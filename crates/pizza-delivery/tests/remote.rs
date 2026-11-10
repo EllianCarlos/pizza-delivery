@@ -233,3 +233,42 @@ fn remote_actions_and_rejections_are_recorded_in_the_ledger() -> TestResult {
     assert_eq!(rejected.payload["reasons"]["malformed-assertion"], 1);
     Ok(())
 }
+
+#[test]
+fn a_remote_dismiss_is_ledgered_against_the_affected_job_as_the_remote_human() -> TestResult {
+    let signer = Signer::one();
+    let certs = CertsServer::start(&[("k1", &signer)])?;
+    let script = harness::VALID_HANDOFF_AGENT.replace(
+        "## Assumptions\nnone",
+        "## Assumptions\n- The API stays v1 [confidence: 70; alternatives: bump to v2; impact: clients break]",
+    );
+    let h = Harness::with_agent(&script)?.with_remote(&certs.url);
+    let job = h.submit_in_repo("build the thing")?;
+    assert_eq!(h.wait_for_end(&job)?["state"], "completed");
+    let entry = h.get("/api/inbox")?["entries"][0]["id"]
+        .as_str()
+        .ok_or("no entry")?
+        .to_owned();
+    let token = signer.sign("k1", &claims(OWNER));
+    let headers = [RAY, (ASSERTION, token.as_str()), HOST, CLIENT, ORIGIN];
+
+    let (status, body) = h.http_with(
+        "POST",
+        "/api/inbox/dismiss",
+        &headers,
+        Some(&json!({"entries": [entry]})),
+    )?;
+
+    assert_eq!(status, 200, "{body}");
+    let action = h
+        .ledger()?
+        .into_iter()
+        .find(|r| r.kind == "remote-action")
+        .ok_or("no remote-action event")?;
+    assert_eq!(action.actor, "remote-human");
+    assert_eq!(action.job_id, job);
+    assert_eq!(action.payload["action"], "dismiss");
+    assert_eq!(action.payload["email"], OWNER);
+    assert_eq!(action.payload["cf_ray"], RAY.1);
+    Ok(())
+}

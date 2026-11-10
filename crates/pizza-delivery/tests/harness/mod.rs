@@ -9,6 +9,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags};
@@ -16,7 +17,7 @@ use tempfile::TempDir;
 
 pub type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
-pub const VALID_HANDOFF_AGENT: &str = r#"#!/bin/sh
+const VALID_PREFIX: &str = r#"#!/bin/sh
 STAGE_DIR=$(dirname "$PIZZA_DELIVERY_HANDOFF")
 STAGE=$(basename "$STAGE_DIR" | sed 's/^[0-9]*-//')
 JOB=$(basename "$(dirname "$(dirname "$STAGE_DIR")")")
@@ -33,35 +34,20 @@ review)
 printf '## Findings\nNone\n\n## Summary\nok\n' > "$STAGE_DIR/review.md"
 ;;
 esac
-cat > "$PIZZA_DELIVERY_HANDOFF" <<'DOC'
----
-job: J
-stage: implement
----
-
-## Goal
-do the thing
-
-## What was done
-did it
-
-## Decisions made
-none
-
-## Assumptions
-none
-
-## Open questions
-none
-
-## Files touched
-none
-
-## Instructions for the next stage
-review it
-DOC
-echo '{"type":"result","is_error":false}'
 "#;
+
+pub fn handoff_writer(stage: &str, assumptions: &str, next: &str) -> String {
+    format!(
+        "cat > \"$PIZZA_DELIVERY_HANDOFF\" <<'DOC'\n---\njob: J\nstage: {stage}\n---\n\n## Goal\ndo the thing\n\n## What was done\ndid it\n\n## Decisions made\nnone\n\n## Assumptions\n{assumptions}\n\n## Open questions\nnone\n\n## Files touched\nnone\n\n## Instructions for the next stage\n{next}\nDOC\n"
+    )
+}
+
+pub static VALID_HANDOFF_AGENT: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{VALID_PREFIX}{}echo '{{\"type\":\"result\",\"is_error\":false}}'\n",
+        handoff_writer("implement", "none", "review it")
+    )
+});
 
 pub const INVALID_HANDOFF_AGENT: &str = r#"#!/bin/sh
 echo "not a handoff" > "$PIZZA_DELIVERY_HANDOFF"
@@ -117,7 +103,7 @@ impl Cli {
 
 impl Harness {
     pub fn new() -> TestResult<Self> {
-        Self::with_agent(VALID_HANDOFF_AGENT)
+        Self::with_agent(&VALID_HANDOFF_AGENT)
     }
 
     pub fn with_agent(script: &str) -> TestResult<Self> {
@@ -147,7 +133,7 @@ impl Harness {
     }
 
     pub fn with_routing(scripts: &[(&str, &str)], routing: &str) -> TestResult<Self> {
-        let mut harness = Self::with_agent(VALID_HANDOFF_AGENT)?;
+        let mut harness = Self::with_agent(&VALID_HANDOFF_AGENT)?;
         for (name, script) in scripts {
             let path = harness.root.path().join(name);
             fs::write(&path, script)?;

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+use crate::lock::acquire;
 use anyhow::{anyhow, Context, Result};
 
 pub trait Git: Send + Sync {
@@ -201,13 +202,10 @@ impl<G> LockedGit<G> {
 
     fn serialized<T>(&self, repo: &Path, f: impl FnOnce(&G) -> Result<T>) -> Result<T> {
         let lock = {
-            let mut locks = self
-                .locks
-                .lock()
-                .map_err(|_| anyhow!("git lock poisoned"))?;
+            let mut locks = acquire(&self.locks, "locks")?;
             Arc::clone(locks.entry(repo.to_owned()).or_default())
         };
-        let _held = lock.lock().map_err(|_| anyhow!("repo lock poisoned"))?;
+        let _held = acquire(&lock, "lock")?;
         f(&self.inner)
     }
 }

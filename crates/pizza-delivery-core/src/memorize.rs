@@ -41,6 +41,24 @@ impl Kind {
             _ => Store::Engram,
         }
     }
+
+    pub fn engram_type(self) -> &'static str {
+        match self {
+            Kind::Summary | Kind::Failure => "discovery",
+            Kind::Convention => "pattern",
+            Kind::Fix => "bugfix",
+            Kind::Architecture => "architecture",
+            Kind::Directive | Kind::CrossRepo => "manual",
+        }
+    }
+
+    pub fn mnemon_category(self) -> &'static str {
+        match self {
+            Kind::Directive => "preference",
+            Kind::CrossRepo => "fact",
+            _ => "general",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -50,14 +68,11 @@ pub struct Entry {
     pub content: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Existing {
     pub id: String,
-    #[serde(default)]
     pub topic: String,
-    #[serde(default)]
     pub content: String,
-    #[serde(default)]
     pub tags: Vec<String>,
 }
 
@@ -68,6 +83,21 @@ impl Existing {
 
     pub fn has_tag(&self, tag: &str) -> bool {
         self.tags.iter().any(|t| t == tag)
+    }
+
+    fn has_content(&self, content: &str) -> bool {
+        same_content(&self.content, content)
+    }
+}
+
+fn same_content(listed: &str, wanted: &str) -> bool {
+    let (listed, wanted) = (listed.trim(), wanted.trim());
+    if listed == wanted {
+        return true;
+    }
+    match listed.strip_suffix("...") {
+        Some(prefix) => wanted.starts_with(prefix.trim_end()),
+        None => false,
     }
 }
 
@@ -84,12 +114,147 @@ pub fn parse_plan(text: &str) -> Vec<Entry> {
         .collect()
 }
 
-pub fn parse_existing(text: &str) -> Vec<Existing> {
-    parse_lines(text)
-}
-
 pub fn job_tag(job: &str) -> String {
     format!("job:{job}")
+}
+
+pub fn own_marker(job: &str) -> String {
+    format!("[{OWN_TAG} {}]", job_tag(job))
+}
+
+pub fn engram_topic_key(topic: &str) -> String {
+    let slug: Vec<String> = topic
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect();
+    format!("{OWN_TAG}/{}", slug.join("-"))
+}
+
+pub fn engram_content(job: &str, entry: &Entry) -> String {
+    format!("{} {}", own_marker(job), entry.content.trim())
+}
+
+pub fn mnemon_content(entry: &Entry) -> String {
+    format!("{}\n{}", entry.topic.trim(), entry.content.trim())
+}
+
+pub fn mnemon_tags(job: &str) -> String {
+    format!("{OWN_TAG},{}", job_tag(job))
+}
+
+fn split_marker(content: &str) -> (Vec<String>, String) {
+    let unmarked = || (Vec::new(), content.to_owned());
+    let Some((inner, rest)) = content
+        .strip_prefix('[')
+        .and_then(|after| after.split_once(']'))
+    else {
+        return unmarked();
+    };
+    let tags: Vec<String> = inner.split_whitespace().map(str::to_owned).collect();
+    if tags.first().map(String::as_str) == Some(OWN_TAG) {
+        (tags, rest.trim_start().to_owned())
+    } else {
+        unmarked()
+    }
+}
+
+fn engram_header(line: &str) -> Option<(String, String)> {
+    let (_, rest) = line.strip_prefix('[')?.split_once("] #")?;
+    let (id, rest) = rest.split_once(' ')?;
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let (_, title) = rest.split_once(" \u{2014} ")?;
+    Some((id.to_owned(), title.trim().to_owned()))
+}
+
+fn engram_meta(line: &str) -> bool {
+    line.starts_with("    ") && line.contains(" | project: ")
+}
+
+pub fn parse_engram_search(text: &str) -> Vec<Existing> {
+    let mut found = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let Some((id, topic)) = engram_header(line) else {
+            continue;
+        };
+        let mut body: Vec<&str> = Vec::new();
+        for next in lines.by_ref() {
+            if engram_meta(next) {
+                break;
+            }
+            body.push(next);
+        }
+        let joined = body.join("\n");
+        let (tags, content) = split_marker(joined.strip_prefix("    ").unwrap_or(&joined));
+        found.push(Existing {
+            id,
+            topic,
+            content,
+            tags,
+        });
+    }
+    found
+}
+
+#[derive(Deserialize)]
+struct MnemonInsight {
+    id: String,
+    content: String,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct MnemonHit {
+    insight: MnemonInsight,
+}
+
+#[derive(Deserialize)]
+struct MnemonRecall {
+    #[serde(default)]
+    results: Vec<MnemonHit>,
+}
+
+pub fn parse_mnemon_recall(text: &str) -> Vec<Existing> {
+    serde_json::from_str::<MnemonRecall>(text)
+        .map(|recall| {
+            recall
+                .results
+                .into_iter()
+                .map(|hit| {
+                    let (topic, content) = hit
+                        .insight
+                        .content
+                        .split_once('\n')
+                        .unwrap_or((hit.insight.content.as_str(), ""));
+                    Existing {
+                        id: hit.insight.id.clone(),
+                        topic: topic.trim().to_owned(),
+                        content: content.trim().to_owned(),
+                        tags: hit.insight.tags,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn parse_engram_saved(text: &str) -> Option<String> {
+    let after = text.split_once('#')?.1;
+    let id: String = after.chars().take_while(char::is_ascii_digit).collect();
+    (!id.is_empty()).then_some(id)
+}
+
+pub fn parse_mnemon_saved(text: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Saved {
+        id: String,
+    }
+    serde_json::from_str::<Saved>(text).ok().map(|s| s.id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,16 +276,14 @@ pub fn decide(entry: &Entry, existing: &[Existing], confirmed_by_reply: bool) ->
         .collect();
     if let Some(foreign) = matches.iter().find(|e| !e.is_ours()) {
         let id = foreign.id.clone();
-        return if foreign.content.trim() == entry.content.trim() {
+        return if foreign.has_content(&entry.content) {
             Decision::Unchanged { id }
         } else {
             Decision::Contradiction { id }
         };
     }
     match matches.first() {
-        Some(own) if own.content.trim() == entry.content.trim() => {
-            Decision::Unchanged { id: own.id.clone() }
-        }
+        Some(own) if own.has_content(&entry.content) => Decision::Unchanged { id: own.id.clone() },
         Some(own) => Decision::Update { id: own.id.clone() },
         None => Decision::Save,
     }
@@ -324,5 +487,74 @@ mod tests {
             ),
         ];
         assert!(!should_memorize(&events));
+    }
+
+    const ENGRAM_SEARCH: &str = "Found 3 memories:\n\n[1] #2 (discovery) \u{2014} Second\n    [pizza-delivery job:J1] line one\nline two\n    2026-11-10 13:23:59 | project: my-repo | scope: project\n\n[2] #1 (architecture) \u{2014} Multi: line title\n    [pizza-delivery job:J1] word word word...\n    2026-11-10 13:23:59 | project: my-repo | scope: project\n\n[3] #7 (bugfix) \u{2014} Foreign \u{2014} fact\n    written by a person\n    2026-10-01 09:00:00 | project: my-repo | scope: project\n";
+
+    #[test]
+    fn real_engram_search_output_is_parsed_into_titles_content_and_job_tags() {
+        let found = parse_engram_search(ENGRAM_SEARCH);
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0].id, "2");
+        assert_eq!(found[0].topic, "Second");
+        assert_eq!(found[0].content, "line one\nline two");
+        assert_eq!(found[0].tags, vec!["pizza-delivery", "job:J1"]);
+        assert!(found[0].is_ours() && found[0].has_tag("job:J1"));
+        assert_eq!(found[2].topic, "Foreign \u{2014} fact");
+        assert!(!found[2].is_ours());
+        assert_eq!(found[2].content, "written by a person");
+        assert!(parse_engram_search("No memories found for: \"x\"\n").is_empty());
+    }
+
+    #[test]
+    fn a_truncated_engram_listing_still_matches_the_full_content() {
+        let found = parse_engram_search(ENGRAM_SEARCH);
+        let e = entry(
+            Kind::Architecture,
+            "Multi: line title",
+            "word word word word",
+        );
+        assert_eq!(
+            decide(&e, &found, false),
+            Decision::Unchanged { id: "1".into() }
+        );
+    }
+
+    #[test]
+    fn real_mnemon_recall_output_is_parsed_with_the_topic_from_the_first_line() {
+        let out = r#"{"results":[{"insight":{"id":"abc","content":"Style\nuse tabs","category":"fact","importance":3,"tags":["pizza-delivery","job:J1"],"entities":[],"source":"agent"},"score":0.45,"intent":"GENERAL","via":"hybrid"}],"meta":{"hint":"sparse_results"}}"#;
+        let found = parse_mnemon_recall(out);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "abc");
+        assert_eq!(found[0].topic, "Style");
+        assert_eq!(found[0].content, "use tabs");
+        assert!(found[0].has_tag("job:J1") && found[0].is_ours());
+        assert!(parse_mnemon_recall("[]").is_empty());
+    }
+
+    #[test]
+    fn saved_ids_come_from_the_real_save_outputs() {
+        assert_eq!(
+            parse_engram_saved("Memory saved: #12 \"Login bug\" (bugfix)\n"),
+            Some("12".to_owned())
+        );
+        assert_eq!(parse_engram_saved("boom"), None);
+        assert_eq!(
+            parse_mnemon_saved("{\n  \"action\": \"added\",\n  \"id\": \"x-1\"\n}"),
+            Some("x-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_engram_topic_key_is_a_stable_slug_and_the_marker_carries_the_job() {
+        assert_eq!(
+            engram_topic_key("  Login: bug / null-check! "),
+            "pizza-delivery/login-bug-null-check"
+        );
+        assert_eq!(own_marker("J1"), "[pizza-delivery job:J1]");
+        let e = entry(Kind::Fix, "t", " c ");
+        assert_eq!(engram_content("J1", &e), "[pizza-delivery job:J1] c");
+        assert_eq!(mnemon_content(&e), "t\nc");
+        assert_eq!(mnemon_tags("J1"), "pizza-delivery,job:J1");
     }
 }

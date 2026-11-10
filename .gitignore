@@ -2,3 +2,4 @@
 /result
 .devenv/
 .direnv/
+/crates/pizza-delivery/web-assets

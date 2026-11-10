@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::lock::acquire;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
 use pizza_delivery_core::notify::{Notification, Notifier, NotifyError, NotifyKind, Urgency};
@@ -226,14 +227,14 @@ impl Subscriptions {
     }
 
     pub fn add(&self, subscription: Subscription) -> Result<(), String> {
-        let mut guard = self.items.lock().map_err(|_| "lock poisoned")?;
+        let mut guard = acquire(&self.items, "items")?;
         guard.retain(|s| s.endpoint != subscription.endpoint);
         guard.push(subscription);
         self.save(&guard)
     }
 
     pub fn remove(&self, endpoint: &str) -> Result<(), String> {
-        let mut guard = self.items.lock().map_err(|_| "lock poisoned")?;
+        let mut guard = acquire(&self.items, "items")?;
         guard.retain(|s| s.endpoint != endpoint);
         self.save(&guard)
     }

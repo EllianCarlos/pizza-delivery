@@ -19,6 +19,7 @@ use pizza_delivery_core::event::SYSTEM_JOB;
 use pizza_delivery_core::{Actor, JobId, NewEvent};
 
 use crate::handler::{handle, Env};
+use crate::lock::acquire;
 use crate::push::{endpoint_allowed, Push, Subscription};
 use crate::remote::{self, Gate, Origin, Submit};
 use crate::server::dispatch;
@@ -324,18 +325,27 @@ impl Api {
     pub fn flush_rejections(&self, force: bool) {
         if let Some(counts) = self.gate.take_due_rejections(force) {
             let count = counts.values().sum();
+            let reasons = counts
+                .into_iter()
+                .map(|(reject, n)| (reject.as_str().to_owned(), n))
+                .collect();
             self.append(
                 SYSTEM_JOB,
                 Actor::Daemon,
-                EventPayload::AuthRejected {
-                    count,
-                    reasons: counts,
-                },
+                EventPayload::AuthRejected { count, reasons },
             );
         }
     }
 
     fn audit_remote(&self, email: &str, ray: Option<&str>, req: &Req, reply: &Reply) {
+        if req.method == "POST" && req.path.trim_end_matches('/') == "/api/inbox/dismiss" {
+            if reply.status == 200 {
+                for job in self.jobs_of_entries(&reply.body) {
+                    self.append_remote_action(&job, email, ray, "dismiss");
+                }
+            }
+            return;
+        }
         let action = match (req.method.as_str(), req.path.trim_end_matches('/')) {
             ("POST", "/api/jobs") => "submit",
             ("POST", "/api/inbox/reply") => "reply",
@@ -348,6 +358,10 @@ impl Api {
         if reply.status != 200 {
             return;
         }
+        self.append_remote_action(job, email, ray, action);
+    }
+
+    fn append_remote_action(&self, job: &str, email: &str, ray: Option<&str>, action: &str) {
         self.append(
             job,
             Actor::RemoteHuman,
@@ -359,13 +373,32 @@ impl Api {
         );
     }
 
+    fn jobs_of_entries(&self, body: &serde_json::Value) -> Vec<String> {
+        let dismissed: Vec<&str> = body
+            .get("entries")
+            .and_then(|e| e.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let Response::Inbox { entries } = self.run(Request::Inbox { all: true }) else {
+            return Vec::new();
+        };
+        let mut jobs: Vec<String> = entries
+            .iter()
+            .filter(|e| dismissed.contains(&e.id.as_str()))
+            .map(|e| e.job.as_str().to_owned())
+            .collect();
+        jobs.sort();
+        jobs.dedup();
+        jobs
+    }
+
     fn run(&self, request: Request) -> Response {
-        match self.store.lock() {
+        match acquire(&self.store, "store") {
             Ok(mut guard) => handle(request, guard.as_mut(), self.env.as_ref()),
-            Err(_) => Response::Error {
+            Err(e) => Response::Error {
                 error: ApiError {
                     kind: ErrorKind::Internal,
-                    message: "store lock poisoned".into(),
+                    message: e.to_string(),
                     matches: vec![],
                 },
             },
@@ -526,9 +559,9 @@ fn detail(api: &Api, reference: &str) -> Reply {
         Response::Inbox { entries } => entries,
         _ => Vec::new(),
     };
-    let timeline = match api.store.lock() {
+    let timeline = match acquire(&api.store, "store") {
         Ok(guard) => guard.read_timeline_cursored(&job.id),
-        Err(_) => return bad(ErrorKind::Internal, "store lock poisoned"),
+        Err(e) => return bad(ErrorKind::Internal, e.to_string()),
     };
     match timeline {
         Ok(events) => ok(&job_detail(job, &events, &inbox)),
@@ -544,9 +577,9 @@ fn artifact(api: &Api, reference: &str, index: &str) -> Reply {
         Response::Error { error } => return failed(error),
         _ => return bad(ErrorKind::Internal, "unexpected response"),
     };
-    let timeline = match api.store.lock() {
+    let timeline = match acquire(&api.store, "store") {
         Ok(guard) => guard.read_timeline_cursored(&job.id),
-        Err(_) => return bad(ErrorKind::Internal, "store lock poisoned"),
+        Err(e) => return bad(ErrorKind::Internal, e.to_string()),
     };
     let events = match timeline {
         Ok(events) => events,
@@ -583,9 +616,9 @@ fn events(api: &Api, req: &Req) -> Reply {
     let limit = query(req, "limit")
         .and_then(|v| v.parse::<usize>().ok())
         .map_or(1000, |l| l.clamp(1, 5000));
-    let read = match api.store.lock() {
+    let read = match acquire(&api.store, "store") {
         Ok(guard) => guard.events_since(since, limit),
-        Err(_) => return bad(ErrorKind::Internal, "store lock poisoned"),
+        Err(e) => return bad(ErrorKind::Internal, e.to_string()),
     };
     match read {
         Ok(entries) => {
