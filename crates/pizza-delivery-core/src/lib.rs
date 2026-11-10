@@ -27,6 +27,7 @@ pub mod spec;
 pub mod stage;
 pub mod store;
 pub mod triage;
+pub mod tui;
 pub mod usage;
 pub mod view;
 

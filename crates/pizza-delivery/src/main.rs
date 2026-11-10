@@ -11,6 +11,8 @@ mod sandbox;
 mod server;
 mod sqlite_store;
 mod triage;
+#[cfg(feature = "tui")]
+mod tui;
 mod worker;
 
 use std::io::IsTerminal;
@@ -120,6 +122,9 @@ enum Command {
     Daemon,
     /// Ask the running daemon to exit
     Stop,
+    /// Open the terminal UI
+    #[cfg(feature = "tui")]
+    Tui,
     /// Serve the per-stage MCP broker on stdio (started by the agent session)
     #[command(hide = true)]
     McpBroker {
@@ -207,6 +212,25 @@ fn render_triaged(
 ) -> String {
     let value = serde_json::json!({"outcome": outcome, "context_sources": sources});
     format!("{}\n", serde_json::to_string(&value).unwrap_or_default())
+}
+
+#[cfg(feature = "tui")]
+fn run_tui(config: &Config) -> ProcessExitCode {
+    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+        eprintln!("error: the tui needs an interactive terminal");
+        return exit(ExitCode::Usage);
+    }
+    match tui::run(config) {
+        Ok(()) => exit(ExitCode::Success),
+        Err(e @ ClientError::Unreachable(_)) => {
+            eprintln!("error: {e}");
+            exit(ExitCode::DaemonUnreachable)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            exit(ExitCode::General)
+        }
+    }
 }
 
 fn exit(code: ExitCode) -> ProcessExitCode {
@@ -330,6 +354,8 @@ fn run(cli: Cli) -> ProcessExitCode {
             }
         },
         Some(Command::McpBroker { .. }) => exit(ExitCode::General),
+        #[cfg(feature = "tui")]
+        Some(Command::Tui) => run_tui(&config),
         Some(Command::Stop) => present(
             send(&config, &Request::Stop, Start::Never),
             OutputMode::resolve(false, tty),
@@ -405,6 +431,10 @@ fn run(cli: Cli) -> ProcessExitCode {
                 request(&config, req, OutputMode::resolve(cli.json, tty))
             }
             None => {
+                #[cfg(feature = "tui")]
+                if tty && std::io::stdin().is_terminal() {
+                    return run_tui(&config);
+                }
                 let _ = Cli::command().print_help();
                 exit(ExitCode::Usage)
             }
