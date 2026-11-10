@@ -122,7 +122,11 @@ impl Harness {
     }
 
     pub fn repo(&self) -> TestResult<PathBuf> {
-        let repo = self.root.path().join("src").join("my-repo");
+        self.repo_named("my-repo")
+    }
+
+    pub fn repo_named(&self, name: &str) -> TestResult<PathBuf> {
+        let repo = self.root.path().join("src").join(name);
         if !repo.exists() {
             fs::create_dir_all(&repo)?;
             let setup: [&[&str]; 2] = [
@@ -165,6 +169,13 @@ impl Harness {
             .env("PIZZA_DELIVERY_DATA_DIR", self.data_dir())
             .env("PIZZA_DELIVERY_SOCKET", self.root.path().join("pd.sock"))
             .env("PIZZA_DELIVERY_AGENT", self.root.path().join("fake-agent"))
+            .env("PIZZA_DELIVERY_PROJECTS_DIR", self.root.path().join("src"))
+            .env(
+                "PIZZA_DELIVERY_ENGRAM_DB",
+                self.root.path().join("no-engram.db"),
+            )
+            .env("PIZZA_DELIVERY_ENGRAM", self.root.path().join("no-engram"))
+            .env("PIZZA_DELIVERY_MNEMON", self.root.path().join("no-mnemon"))
             .env_remove("NO_COLOR")
             .stdin(Stdio::null())
             .output()?;
@@ -191,6 +202,21 @@ impl Harness {
             .and_then(|v| v["id"].as_str())
             .ok_or("submit printed no id")?;
         Ok(id.to_owned())
+    }
+
+    pub fn wait_for_state(&self, id: &str, states: &[&str]) -> TestResult<serde_json::Value> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let cli = self.run(&["status", id])?;
+            let job = cli.json_lines()?.into_iter().next().ok_or("no status")?;
+            if job["state"].as_str().is_some_and(|s| states.contains(&s)) {
+                return Ok(job);
+            }
+            if Instant::now() > deadline {
+                return Err(format!("job did not reach {states:?}: {job}").into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     pub fn wait_for_end(&self, id: &str) -> TestResult<serde_json::Value> {

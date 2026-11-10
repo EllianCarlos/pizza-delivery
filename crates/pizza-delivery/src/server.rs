@@ -9,12 +9,18 @@ use listenfd::ListenFd;
 use pizza_delivery_core::api::{ApiError, ErrorKind};
 use pizza_delivery_core::{Request, Response, Store};
 
-use crate::agent::Fleet;
+use crate::agent::{CliAgent, Fleet};
 use crate::config::Config;
 use crate::git::SystemGit;
 use crate::handler::{handle, Env, SystemEnv};
+use crate::sandbox::{ensure_compatible, load_trust, SystemProbe};
 use crate::sqlite_store::SqliteStore;
+use crate::triage::{
+    analyze, AgentTieBreaker, ContextSource, ConventionsSource, Deps, EngramSource, LedgerSource,
+    MnemonSource, SystemIndex, Triager,
+};
 use crate::worker::{Worker, WorkerConfig};
+use pizza_delivery_core::routing::AdapterKind;
 
 pub enum Bound {
     Listener(UnixListener),
@@ -48,13 +54,71 @@ pub fn run(config: &Config) -> Result<()> {
         Bound::AlreadyRunning => return Ok(()),
     };
     std::fs::create_dir_all(&config.data_dir).context("create data directory")?;
+    let trust = load_trust(&config.trust_path)?;
+    ensure_compatible(
+        &trust,
+        &config.agent_command.to_string_lossy(),
+        &SystemProbe,
+    )?;
     let store: Box<dyn Store> = Box::new(SqliteStore::open(&config.db_path())?);
     serve(listener, store, Arc::new(SystemEnv), config)
 }
 
+fn with_deps<T>(
+    store: &Mutex<Box<dyn Store>>,
+    config: &Config,
+    agent: &CliAgent,
+    f: impl FnOnce(Deps<'_>) -> T,
+) -> T {
+    let index = SystemIndex {
+        projects_dir: config.projects_dir.clone(),
+        engram_db: config.engram_db.clone(),
+    };
+    let tie_breaker = AgentTieBreaker {
+        agent,
+        cwd: config.data_dir.clone(),
+    };
+    let engram = EngramSource {
+        command: config.engram_command.clone(),
+    };
+    let mnemon = MnemonSource {
+        command: config.mnemon_command.clone(),
+    };
+    let ledger = LedgerSource { store };
+    let sources: Vec<&dyn ContextSource> = vec![&engram, &mnemon, &ledger, &ConventionsSource];
+    f(Deps {
+        index: &index,
+        tie_breaker: &tie_breaker,
+        sources,
+    })
+}
+
+fn dry_run(
+    store: &Mutex<Box<dyn Store>>,
+    config: &Config,
+    prompt: &str,
+    repo: Option<&str>,
+) -> Response {
+    let agent = CliAgent::new(AdapterKind::Claude, &config.agent_command);
+    let report = with_deps(store, config, &agent, |deps| analyze(prompt, repo, &deps));
+    Response::Triaged {
+        outcome: report.outcome,
+        context_sources: report.context.map(|c| c.included).unwrap_or_default(),
+    }
+}
+
 fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop: &AtomicBool) {
     let fleet = Fleet::from_routing(&config.routing);
+    let agent = CliAgent::new(AdapterKind::Claude, &config.agent_command);
+    let trust = match load_trust(&config.trust_path) {
+        Ok(trust) => trust,
+        Err(e) => {
+            eprintln!("trust config: {e:#}");
+            return;
+        }
+    };
     let worker_config = WorkerConfig {
+        trust,
         data_dir: config.data_dir.clone(),
         holder: format!("daemon-{}", std::process::id()),
         lease_ttl_ms: config.lease_ttl_ms,
@@ -72,6 +136,20 @@ fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop
         config: &worker_config,
     };
     while !stop.load(Ordering::SeqCst) {
+        let triaged = with_deps(store, config, &agent, |deps| {
+            Triager {
+                store,
+                env,
+                data_dir: &config.data_dir,
+                deps,
+            }
+            .tick()
+        });
+        match triaged {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(e) => eprintln!("triage: {e:#}"),
+        }
         match worker.tick() {
             Ok(true) => {}
             Ok(false) => std::thread::sleep(Duration::from_millis(50)),
@@ -107,8 +185,9 @@ pub fn serve(
                 let store = Arc::clone(&store);
                 let env = Arc::clone(&env);
                 let stop = Arc::clone(&stop);
+                let config = config.clone();
                 std::thread::spawn(move || {
-                    let _ = connection(stream, &store, env.as_ref(), &stop);
+                    let _ = connection(stream, &store, env.as_ref(), &stop, &config);
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -126,11 +205,16 @@ fn connection(
     store: &Mutex<Box<dyn Store>>,
     env: &dyn Env,
     stop: &AtomicBool,
+    config: &Config,
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
     let response = match serde_json::from_str::<Request>(&line) {
+        Ok(Request::Triage { prompt, .. }) if prompt.trim().is_empty() => {
+            failure(ErrorKind::Usage, "prompt must not be empty")
+        }
+        Ok(Request::Triage { prompt, repo }) => dry_run(store, config, &prompt, repo.as_deref()),
         Ok(request) => {
             let stopping = request == Request::Stop;
             let response = match store.lock() {

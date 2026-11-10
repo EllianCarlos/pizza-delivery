@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use pizza_delivery_core::routing::{AdapterKind, RoutingConfig};
 
+use pizza_delivery_core::sandbox::{sandbox_for, CommandSpec, SandboxProfile};
+
 use crate::process::{kill_group, terminate_group};
 
 pub struct Invocation {
@@ -16,6 +18,8 @@ pub struct Invocation {
     pub cwd: PathBuf,
     pub handoff_path: PathBuf,
     pub timeout: Duration,
+    pub sandbox: SandboxProfile,
+    pub egress_log: PathBuf,
 }
 
 pub struct AgentOutput {
@@ -87,10 +91,31 @@ fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<String
 
 impl Agent for CliAgent {
     fn run(&self, inv: &Invocation, on_spawn: &mut dyn FnMut(u32)) -> Result<AgentOutput> {
-        let mut child = Command::new(&self.command)
-            .args(argv(self.kind, &inv.prompt, inv.model.as_deref()))
+        let launch = sandbox_for(inv.sandbox.kind).wrap(
+            &inv.sandbox,
+            &CommandSpec {
+                program: self.command.to_string_lossy().into_owned(),
+                args: argv(self.kind, &inv.prompt, inv.model.as_deref()),
+                env: vec![
+                    (
+                        "PIZZA_DELIVERY_HANDOFF".to_owned(),
+                        inv.handoff_path.to_string_lossy().into_owned(),
+                    ),
+                    (
+                        "PIZZA_DELIVERY_EGRESS_LOG".to_owned(),
+                        inv.egress_log.to_string_lossy().into_owned(),
+                    ),
+                    (
+                        "PIZZA_DELIVERY_EGRESS_ALLOW".to_owned(),
+                        inv.sandbox.egress_allowlist.join(","),
+                    ),
+                ],
+            },
+        );
+        let mut child = Command::new(&launch.program)
+            .args(&launch.args)
+            .envs(launch.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&inv.cwd)
-            .env("PIZZA_DELIVERY_HANDOFF", &inv.handoff_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

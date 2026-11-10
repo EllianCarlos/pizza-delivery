@@ -8,10 +8,15 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub socket_path: PathBuf,
     pub agent_command: PathBuf,
+    pub trust_path: PathBuf,
     pub lease_ttl_ms: i64,
     pub stage_timeout_secs: u64,
     pub routing: RoutingConfig,
     pub routing_file: Option<RoutingFile>,
+    pub projects_dir: PathBuf,
+    pub engram_db: PathBuf,
+    pub engram_command: PathBuf,
+    pub mnemon_command: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +55,11 @@ impl Config {
         let agent_command = get("PIZZA_DELIVERY_AGENT")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("claude"));
+        let home = get("HOME").map(PathBuf::from).unwrap_or_default();
+        let path_or = |key: &str, default: PathBuf| get(key).map(PathBuf::from).unwrap_or(default);
+        let trust_path = get("PIZZA_DELIVERY_TRUST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("trust.json"));
         let number =
             |key: &str, default: u64| get(key).and_then(|v| v.parse().ok()).unwrap_or(default);
         let routing_file = get("PIZZA_DELIVERY_ROUTING")
@@ -72,8 +82,13 @@ impl Config {
             data_dir,
             socket_path,
             agent_command,
+            trust_path,
             lease_ttl_ms: number("PIZZA_DELIVERY_LEASE_TTL_MS", 30_000) as i64,
             stage_timeout_secs: number("PIZZA_DELIVERY_STAGE_TIMEOUT_SECS", 3600),
+            projects_dir: path_or("PIZZA_DELIVERY_PROJECTS_DIR", home.join("Projects")),
+            engram_db: path_or("PIZZA_DELIVERY_ENGRAM_DB", home.join(".engram/engram.db")),
+            engram_command: path_or("PIZZA_DELIVERY_ENGRAM", PathBuf::from("engram")),
+            mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
         })
     }
 

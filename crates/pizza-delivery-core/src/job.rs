@@ -11,6 +11,7 @@ pub enum JobState {
     WaitingForQuota,
     Completed,
     Failed,
+    NeedsHuman,
 }
 
 impl JobState {
@@ -21,6 +22,7 @@ impl JobState {
             JobState::WaitingForQuota => "waiting-for-quota",
             JobState::Completed => "completed",
             JobState::Failed => "failed",
+            JobState::NeedsHuman => "needs-human",
         }
     }
 }
@@ -42,6 +44,14 @@ fn next_state(current: JobState, payload: &EventPayload) -> JobState {
         EventPayload::JobParked { .. } => JobState::WaitingForQuota,
         EventPayload::JobCompleted {} => JobState::Completed,
         EventPayload::JobFailed { .. } => JobState::Failed,
+        EventPayload::JobNeedsHuman { .. } => JobState::NeedsHuman,
+        _ => current,
+    }
+}
+
+fn repo_after(current: Option<String>, payload: &EventPayload) -> Option<String> {
+    match payload {
+        EventPayload::TriageCompleted { triage } => Some(triage.repo.path.clone()),
         _ => current,
     }
 }
@@ -58,6 +68,7 @@ pub fn apply(state: Option<Job>, event: &Event) -> Option<Job> {
         }),
         (payload, Some(job)) => Some(Job {
             state: next_state(job.state, payload),
+            repo: repo_after(job.repo.clone(), payload),
             last_seq: event.seq,
             ..job
         }),
@@ -158,6 +169,27 @@ mod tests {
                 JobState::Completed
             ]
         );
+    }
+
+    #[test]
+    fn triage_sets_the_repo_and_needs_human_parks_the_job() {
+        let triage = crate::triage::triage(
+            "fix it",
+            crate::triage::Resolution {
+                path: "/found".into(),
+                confidence: 90,
+                alternatives: vec![],
+            },
+        );
+        let history = [
+            submitted(1),
+            after(2, EventPayload::TriageCompleted { triage }),
+            after(3, EventPayload::JobNeedsHuman { reason: "x".into() }),
+        ];
+        let job = fold(&history[..2]);
+        assert_eq!(job.map(|j| j.repo), Some(Some("/found".to_owned())));
+        let parked = fold(&history);
+        assert_eq!(parked.map(|j| j.state), Some(JobState::NeedsHuman));
     }
 
     #[test]

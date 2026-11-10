@@ -124,6 +124,11 @@ pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Respons
             }
             Err(e) => internal(e),
         },
+        Request::Triage { .. } => error(
+            ErrorKind::Internal,
+            "triage requests are served by the daemon",
+            vec![],
+        ),
         Request::Stop => Response::Stopped,
     }
 }

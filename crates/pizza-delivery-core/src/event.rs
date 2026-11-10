@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::JobId;
 use crate::quota::QuotaStatus;
+use crate::triage::{PlannedStage, Triage};
 use crate::usage::Usage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +75,19 @@ pub enum EventPayload {
         until_ms: i64,
         reason: String,
     },
+    SandboxAudit {
+        profile_hash: String,
+        mounts: Vec<String>,
+        egress_allowlist: Vec<String>,
+        blocked_requests: Vec<String>,
+        mcp_activations: Vec<String>,
+        diff_policy_result: Option<String>,
+        pushed_ref: Option<String>,
+        pr_url: Option<String>,
+    },
+    EgressBlocked {
+        host: String,
+    },
     ArtifactRecorded {
         kind: String,
         path: String,
@@ -95,6 +109,27 @@ pub enum EventPayload {
     LeaseReleased {
         holder: String,
     },
+    ContextRead {
+        source: String,
+        bytes: u64,
+    },
+    TriageCompleted {
+        triage: Triage,
+    },
+    FeedbackRecorded {
+        kind: String,
+        severity: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confidence: Option<u8>,
+    },
+    PlanAmended {
+        after: String,
+        stages: Vec<PlannedStage>,
+    },
+    JobNeedsHuman {
+        reason: String,
+    },
 }
 
 impl EventPayload {
@@ -111,6 +146,8 @@ impl EventPayload {
             EventPayload::QuotaSignal { .. } => "quota-signal",
             EventPayload::AgentFellBack { .. } => "agent-fell-back",
             EventPayload::JobParked { .. } => "job-parked",
+            EventPayload::SandboxAudit { .. } => "sandbox-audit",
+            EventPayload::EgressBlocked { .. } => "egress-blocked",
             EventPayload::ArtifactRecorded { .. } => "artifact-recorded",
             EventPayload::HandoffWritten { .. } => "handoff-written",
             EventPayload::StageSucceeded { .. } => "stage-succeeded",
@@ -118,6 +155,11 @@ impl EventPayload {
             EventPayload::StageRetried { .. } => "stage-retried",
             EventPayload::LeaseExpired { .. } => "lease-expired",
             EventPayload::LeaseReleased { .. } => "lease-released",
+            EventPayload::ContextRead { .. } => "context-read",
+            EventPayload::TriageCompleted { .. } => "triage-completed",
+            EventPayload::FeedbackRecorded { .. } => "feedback-recorded",
+            EventPayload::PlanAmended { .. } => "plan-amended",
+            EventPayload::JobNeedsHuman { .. } => "job-needs-human",
         }
     }
 }
@@ -149,6 +191,33 @@ mod tests {
             serde_json::to_value(&p).ok(),
             Some(serde_json::json!({"kind":"job-submitted","payload":{"prompt":"x"}}))
         );
+    }
+
+    #[test]
+    fn audit_fields_are_always_present_even_when_unknown() {
+        let p = EventPayload::SandboxAudit {
+            profile_hash: "h".into(),
+            mounts: vec![],
+            egress_allowlist: vec![],
+            blocked_requests: vec![],
+            mcp_activations: vec![],
+            diff_policy_result: None,
+            pushed_ref: None,
+            pr_url: None,
+        };
+        let v = serde_json::to_value(&p).unwrap_or_default();
+        for key in [
+            "profile_hash",
+            "mounts",
+            "egress_allowlist",
+            "blocked_requests",
+            "mcp_activations",
+            "diff_policy_result",
+            "pushed_ref",
+            "pr_url",
+        ] {
+            assert!(v["payload"].get(key).is_some(), "missing {key}");
+        }
     }
 
     #[test]
