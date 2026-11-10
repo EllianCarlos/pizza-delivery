@@ -70,7 +70,7 @@ fn quota_exhaustion_falls_back_and_status_quota_shows_the_exhausted_agent() -> T
     let h = Harness::with_routing(
         &[
             ("first", QUOTA_EXHAUSTED_AGENT),
-            ("second", VALID_HANDOFF_AGENT),
+            ("second", &VALID_HANDOFF_AGENT),
         ],
         TWO_CLAUDES,
     )?;
@@ -123,7 +123,7 @@ fn skill_driven_stages_are_never_run_by_an_adapter_without_skills() -> TestResul
     let h = Harness::with_routing(
         &[
             ("first", CREDENTIALS_MISSING_AGENT),
-            ("second", VALID_HANDOFF_AGENT),
+            ("second", &VALID_HANDOFF_AGENT),
         ],
         r#"
 [agents.first]

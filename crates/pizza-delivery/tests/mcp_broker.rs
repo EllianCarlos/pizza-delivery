@@ -1,3 +1,5 @@
+mod mcp_mock;
+
 use std::error::Error;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -14,23 +16,8 @@ type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 const TOKEN: &str = "s3cr3t-token-value";
 
-const FAKE_SERVER: &str = r#"#!/bin/sh
-dir=$(dirname "$0")
-echo "$$" > "$dir/server.pid"
-printf '%s' "$FAKE_TOKEN" > "$dir/token-seen"
-while IFS= read -r line; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
-  [ -z "$id" ] && continue
-  case "$line" in
-    *'"method":"initialize"'*)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}}";;
-    *'"method":"tools/list"'*)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"echo\",\"description\":\"echo\",\"inputSchema\":{\"type\":\"object\"}}]}}";;
-    *'"method":"tools/call"'*)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong\"}]}}";;
-  esac
-done
-"#;
+const FAKE_PRELUDE: &str = r#"echo "$$" > "$dir/server.pid"
+printf '%s' "$FAKE_TOKEN" > "$dir/token-seen""#;
 
 struct Broker {
     dir: TempDir,
@@ -82,7 +69,7 @@ impl Broker {
     fn start(extra: &str) -> TestResult<Self> {
         let dir = TempDir::new()?;
         let server = dir.path().join("server.sh");
-        fs::write(&server, FAKE_SERVER)?;
+        fs::write(&server, mcp_mock::fake_server(FAKE_PRELUDE))?;
         fs::set_permissions(&server, fs::Permissions::from_mode(0o755))?;
         fs::create_dir(dir.path().join("secrets"))?;
         fs::write(dir.path().join("secrets/FAKE_TOKEN"), format!("{TOKEN}\n"))?;

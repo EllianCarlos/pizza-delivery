@@ -73,41 +73,14 @@ cat > "$STAGE_DIR/review.md" <<'R'
 fi
 ;;
 esac
-cat > "$PIZZA_DELIVERY_HANDOFF" <<'DOC'
----
-job: J
-stage: any
----
-
-## Goal
-do the thing
-
-## What was done
-did it
-
-## Decisions made
-none
-
-## Assumptions
-{assumptions}
-
-## Open questions
-none
-
-## Files touched
-none
-
-## Instructions for the next stage
-go on
-DOC
-echo '{{"type":"result","is_error":false}}'
+{handoff}echo '{{"type":"result","is_error":false}}'
 "#,
         grill = plan.grill,
         spec = SPEC,
         tickets = tickets,
         first = plan.review_first,
         after = plan.review_after_fix,
-        assumptions = plan.assumptions,
+        handoff = harness::handoff_writer("any", plan.assumptions, "go on"),
     )
 }
 

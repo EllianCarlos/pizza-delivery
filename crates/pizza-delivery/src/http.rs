@@ -332,10 +332,7 @@ impl Api {
             self.append(
                 SYSTEM_JOB,
                 Actor::Daemon,
-                EventPayload::AuthRejected {
-                    count,
-                    reasons,
-                },
+                EventPayload::AuthRejected { count, reasons },
             );
         }
     }
