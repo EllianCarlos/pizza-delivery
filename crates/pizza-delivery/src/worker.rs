@@ -12,6 +12,11 @@ use pizza_delivery_core::event::{Actor, Event, EventPayload};
 use pizza_delivery_core::feedback::parse_feedback;
 use pizza_delivery_core::grill;
 use pizza_delivery_core::handoff::validate;
+use pizza_delivery_core::memorize::{
+    contradiction_risk, decide, job_tag, parse_existing, parse_plan, prompt as memorize_prompt,
+    should_memorize, Decision as MemoryDecision, Entry, Store as MemoryStore, ARTIFACT_KIND,
+    OWN_TAG,
+};
 use pizza_delivery_core::prompt::{render, Rendered, Templates, Vars};
 use pizza_delivery_core::quota::{fold_quota, QuotaStatus};
 use pizza_delivery_core::review::{self, Decision};
@@ -52,6 +57,12 @@ pub struct WorkerConfig {
     pub budget_defaults: Defaults,
     pub require_triage: bool,
     pub mcp: Option<McpSetup>,
+    pub memory: Option<MemorySetup>,
+}
+
+pub struct MemorySetup {
+    pub engram: PathBuf,
+    pub mnemon: PathBuf,
 }
 
 pub struct McpSetup {
@@ -456,6 +467,7 @@ impl Worker<'_> {
                 },
             )?;
         }
+        self.memorize_if_due(job);
         Ok(())
     }
 
@@ -472,6 +484,298 @@ impl Worker<'_> {
             verdict,
             Some(&self.config.holder),
         )
+    }
+
+    fn memorize_if_due(&self, job: &JobId) {
+        if self.config.memory.is_none() {
+            return;
+        }
+        let Ok(events) = self.with_store(|s| s.read_timeline(job)) else {
+            return;
+        };
+        if !should_memorize(&events) {
+            return;
+        }
+        if let Err(e) = self.memorize(job, &events) {
+            let _ = self.append(
+                job,
+                None,
+                EventPayload::FeedbackRecorded {
+                    kind: "risk".to_owned(),
+                    severity: "low".to_owned(),
+                    text: format!(
+                        "The memorize stage failed and nothing may have been saved: {e:#}"
+                    ),
+                    confidence: None,
+                    alternatives: vec![],
+                    impact: Some("the job result is unaffected".to_owned()),
+                },
+            );
+        }
+    }
+
+    fn memory_cli(&self, store: MemoryStore, args: &[String]) -> Result<String> {
+        let setup = self
+            .config
+            .memory
+            .as_ref()
+            .ok_or_else(|| anyhow!("memory is not configured"))?;
+        let command = match store {
+            MemoryStore::Engram => &setup.engram,
+            MemoryStore::Mnemon => &setup.mnemon,
+        };
+        let output = std::process::Command::new(command).args(args).output()?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "{} {}: {}",
+                store.as_str(),
+                args.first().map_or("", String::as_str),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn memory_search(
+        &self,
+        store: MemoryStore,
+        query: &str,
+        project: &str,
+    ) -> Result<Vec<pizza_delivery_core::memorize::Existing>> {
+        let verb = if store == MemoryStore::Engram {
+            "search"
+        } else {
+            "recall"
+        };
+        let mut args = vec![
+            verb.to_owned(),
+            query.to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ];
+        if store == MemoryStore::Engram {
+            args.extend(["--project".to_owned(), project.to_owned()]);
+        }
+        Ok(parse_existing(&self.memory_cli(store, &args)?))
+    }
+
+    fn memory_write(
+        &self,
+        entry: &Entry,
+        decision: &MemoryDecision,
+        job: &JobId,
+        project: &str,
+    ) -> Result<(String, String)> {
+        let store = entry.kind.store();
+        let tags = [
+            "--tag".to_owned(),
+            OWN_TAG.to_owned(),
+            "--tag".to_owned(),
+            job_tag(job.as_str()),
+        ];
+        let mut args = match decision {
+            MemoryDecision::Update { id } => vec![
+                "update".to_owned(),
+                id.clone(),
+                entry.topic.clone(),
+                entry.content.clone(),
+            ],
+            _ => vec![
+                if store == MemoryStore::Engram {
+                    "save"
+                } else {
+                    "remember"
+                }
+                .to_owned(),
+                entry.topic.clone(),
+                entry.content.clone(),
+            ],
+        };
+        args.extend(tags);
+        if store == MemoryStore::Engram {
+            args.extend(["--project".to_owned(), project.to_owned()]);
+        }
+        let out = self.memory_cli(store, &args)?;
+        Ok(match decision {
+            MemoryDecision::Update { id } => (id.clone(), "updated".to_owned()),
+            _ => (out.trim().to_owned(), "saved".to_owned()),
+        })
+    }
+
+    fn memorize(&self, job: &JobId, events: &[Event]) -> Result<()> {
+        let record = self.find_job(job)?.ok_or_else(|| anyhow!("job vanished"))?;
+        let repo = record.repo.as_deref().map(PathBuf::from);
+        let project = repo
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let confirmed = events.iter().any(|e| {
+            matches!(
+                e.payload,
+                EventPayload::JobSubmitted {
+                    follow_up: Some(_),
+                    ..
+                }
+            )
+        });
+        let outcome = events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.payload {
+                EventPayload::JobCompleted {} => Some("completed".to_owned()),
+                EventPayload::JobFailed { reason } => Some(format!("failed: {reason}")),
+                EventPayload::JobNeedsHuman { reason } => Some(format!("needs human: {reason}")),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let relative = stage_dir(job, 0, "memorize");
+        let dir = self.config.data_dir.join(&relative);
+        std::fs::create_dir_all(&dir)?;
+        let plan_path = dir.join("plan.jsonl");
+        if plan_path.exists() {
+            std::fs::remove_file(&plan_path)?;
+        }
+        let text = memorize_prompt(
+            job.as_str(),
+            &record.prompt,
+            &outcome,
+            &self.handoffs(events),
+            &plan_path.to_string_lossy(),
+        );
+        let quota = fold_quota(&self.with_store(|s| s.quota_events())?);
+        let routed = route(
+            self.routing,
+            &RouteRequest {
+                stage: "memorize",
+                tier: DEFAULT_TIER,
+                repo: record.repo.as_deref(),
+                required: &[],
+            },
+            &quota,
+            self.env.now_ms(),
+        )
+        .map_err(|e| anyhow!("routing: {e}"))?;
+        let egress_log = dir.join("egress-requests.log");
+        let sandbox = self.config.trust.profile_for(
+            &repo.as_deref().unwrap_or(Path::new("")).to_string_lossy(),
+            &[dir.to_string_lossy().into_owned()],
+        );
+        let mut ran = false;
+        for candidate in &routed.candidates {
+            let Some((_, agent)) = self.fleet.get(&candidate.agent) else {
+                continue;
+            };
+            self.append(
+                job,
+                None,
+                EventPayload::AgentInvoked {
+                    agent: candidate.agent.clone(),
+                    template: "memorize".to_owned(),
+                    version: 1,
+                    prompt_sha256: sha256_hex(text.as_bytes()),
+                },
+            )?;
+            let invocation = Invocation {
+                prompt: text.clone(),
+                model: candidate.model.clone(),
+                cwd: dir.clone(),
+                handoff_path: plan_path.clone(),
+                timeout: self
+                    .config
+                    .timeout
+                    .unwrap_or_else(|| stage_timeout("memorize", tier_of("memorize"))),
+                grace: self.config.kill_grace,
+                sandbox: sandbox.clone(),
+                egress_log: egress_log.clone(),
+                mcp_config: None,
+            };
+            if agent.run(&invocation, &mut |_| {}).is_ok() {
+                ran = true;
+                break;
+            }
+        }
+        if !ran {
+            return Err(anyhow!("no agent could run the memorize stage"));
+        }
+        let entries = parse_plan(&std::fs::read_to_string(&plan_path).unwrap_or_default());
+        let mut applied: Vec<(MemoryStore, String, String, String)> = Vec::new();
+        for entry in &entries {
+            let store = entry.kind.store();
+            let existing = self
+                .memory_search(store, &entry.topic, &project)
+                .unwrap_or_default();
+            let decision = decide(entry, &existing, confirmed);
+            let (id, action) = match &decision {
+                MemoryDecision::Save | MemoryDecision::Update { .. } => self
+                    .memory_write(entry, &decision, job, &project)
+                    .unwrap_or_else(|e| (String::new(), format!("failed: {e:#}"))),
+                MemoryDecision::Unchanged { id } => (id.clone(), "unchanged".to_owned()),
+                MemoryDecision::Contradiction { id } => {
+                    let risk = contradiction_risk(entry, store, id);
+                    self.append(
+                        job,
+                        None,
+                        EventPayload::FeedbackRecorded {
+                            kind: risk.kind,
+                            severity: risk.severity,
+                            text: risk.text,
+                            confidence: risk.confidence,
+                            alternatives: risk.alternatives,
+                            impact: risk.impact,
+                        },
+                    )?;
+                    (id.clone(), "contradiction".to_owned())
+                }
+                MemoryDecision::Unconfirmed => (String::new(), "skipped-unconfirmed".to_owned()),
+            };
+            applied.push((store, id, entry.topic.clone(), action));
+        }
+        let tag = job_tag(job.as_str());
+        let mut ledger: Vec<(MemoryStore, String, String, String)> = Vec::new();
+        for store in [MemoryStore::Engram, MemoryStore::Mnemon] {
+            for found in self
+                .memory_search(store, &tag, &project)
+                .unwrap_or_default()
+            {
+                if !found.has_tag(&tag) {
+                    continue;
+                }
+                let action = applied
+                    .iter()
+                    .find(|(s, id, _, _)| *s == store && *id == found.id)
+                    .map_or("found", |(_, _, _, a)| a.as_str());
+                ledger.push((store, found.id, found.topic, action.to_owned()));
+            }
+        }
+        for item in applied {
+            if !ledger
+                .iter()
+                .any(|(s, id, _, _)| *s == item.0 && *id == item.1)
+            {
+                ledger.push(item);
+            }
+        }
+        let mut listing = String::new();
+        for (store, id, topic, action) in ledger {
+            listing.push_str(&format!(
+                "{}\n",
+                serde_json::json!({"store": store.as_str(), "id": id, "topic": topic, "action": action})
+            ));
+            self.append(
+                job,
+                None,
+                EventPayload::WriteBack {
+                    store: store.as_str().to_owned(),
+                    id,
+                    topic,
+                    action,
+                },
+            )?;
+        }
+        let listing_rel = relative.join("memory-writeback.jsonl");
+        std::fs::write(self.config.data_dir.join(&listing_rel), listing)?;
+        self.record_file(job, None, ARTIFACT_KIND, &listing_rel)
     }
 
     fn record_artifact(
@@ -1546,6 +1850,7 @@ mod tests {
                     budget_defaults: Defaults::standard(),
                     require_triage: false,
                     mcp: None,
+                    memory: None,
                     trust: TrustConfig {
                         default_hosts: vec!["api.anthropic.com".to_owned()],
                         ..TrustConfig::default()
@@ -2552,6 +2857,256 @@ chain = [{ agent = "claude" }, { agent = "opencode" }]
             *rig.git.pushes.lock().map_err(|_| anyhow!("poisoned"))?,
             vec![("fork".to_owned(), "pizza/J1".to_owned())]
         );
+        Ok(())
+    }
+
+    const FAKE_MEMORY_CLI: &str = r#"#!/bin/sh
+F="$0.store"
+verb=$1
+shift
+case "$verb" in
+search|recall)
+  [ -f "$F" ] && grep -F -- "$1" "$F"
+  exit 0
+  ;;
+save|remember|update)
+  if [ "$verb" = update ]; then
+    id=$1
+    shift
+    grep -v "\"id\":\"$id\"," "$F" > "$F.tmp"
+    mv "$F.tmp" "$F"
+  else
+    id=$(( $(cat "$F.n" 2>/dev/null || echo 0) + 1 ))
+    echo $id > "$F.n"
+  fi
+  topic=$1
+  content=$2
+  shift 2
+  tags=""
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--tag" ]; then tags="$tags\"$2\","; fi
+    shift
+  done
+  printf '{"id":"%s","topic":"%s","content":"%s","tags":[%s]}\n' "$id" "$topic" "$content" "${tags%,}" >> "$F"
+  echo "$id"
+  ;;
+esac
+"#;
+
+    fn install_memory(rig: &mut Rig) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let engram = rig.config.data_dir.join("engram");
+        let mnemon = rig.config.data_dir.join("mnemon");
+        for path in [&engram, &mnemon] {
+            std::fs::write(path, FAKE_MEMORY_CLI)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+        }
+        rig.config.memory = Some(MemorySetup { engram, mnemon });
+        Ok(())
+    }
+
+    fn memory_store(rig: &Rig, name: &str) -> String {
+        std::fs::read_to_string(rig.config.data_dir.join(format!("{name}.store")))
+            .unwrap_or_default()
+    }
+
+    fn seed_memory(rig: &Rig, name: &str, line: &str) -> Result<()> {
+        std::fs::write(
+            rig.config.data_dir.join(format!("{name}.store")),
+            format!("{line}\n"),
+        )?;
+        Ok(())
+    }
+
+    fn plan(lines: &'static str) -> Script {
+        Script {
+            handoff: Some(lines),
+            stdout: OK_RESULT,
+            ..Script::default()
+        }
+    }
+
+    fn write_backs(rig: &Rig) -> Result<Vec<(String, String, String)>> {
+        Ok(rig
+            .timeline()?
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::WriteBack {
+                    store,
+                    topic,
+                    action,
+                    ..
+                } => Some((store, topic, action)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    fn triple(store: &str, topic: &str, action: &str) -> (String, String, String) {
+        (store.to_owned(), topic.to_owned(), action.to_owned())
+    }
+
+    const FIX_PLAN: &str =
+        "{\"kind\":\"fix\",\"topic\":\"Login bug\",\"content\":\"hash before compare\"}\n";
+
+    #[test]
+    fn a_completed_job_saves_project_facts_to_engram_and_reconciles_them_by_job_tag() -> Result<()>
+    {
+        let mut rig = Rig::new(vec![good(), plan(FIX_PLAN)])?;
+        install_memory(&mut rig)?;
+
+        rig.worker().tick()?;
+
+        let saved = memory_store(&rig, "engram");
+        assert!(saved.contains("\"topic\":\"Login bug\""));
+        assert!(saved.contains("\"pizza-delivery\""));
+        assert!(saved.contains("\"job:J1\""));
+        assert_eq!(memory_store(&rig, "mnemon"), "");
+        assert_eq!(
+            write_backs(&rig)?,
+            vec![triple("engram", "Login bug", "saved")]
+        );
+        let artifact = rig.timeline()?.into_iter().find_map(|e| match e.payload {
+            EventPayload::ArtifactRecorded { kind, path, .. } if kind == "memory-writeback" => {
+                Some(path)
+            }
+            _ => None,
+        });
+        let listing = std::fs::read_to_string(
+            rig.config
+                .data_dir
+                .join(artifact.ok_or_else(|| anyhow!("no memory-writeback artifact"))?),
+        )?;
+        assert!(listing.contains("Login bug"));
+        assert_eq!(rig.job_state()?, JobState::Completed);
+        Ok(())
+    }
+
+    #[test]
+    fn a_second_write_updates_our_own_memory_instead_of_duplicating_it() -> Result<()> {
+        let mut rig = Rig::new(vec![good(), plan(FIX_PLAN)])?;
+        install_memory(&mut rig)?;
+        seed_memory(
+            &rig,
+            "engram",
+            "{\"id\":\"7\",\"topic\":\"Login bug\",\"content\":\"old\",\"tags\":[\"pizza-delivery\",\"job:J0\"]}",
+        )?;
+
+        rig.worker().tick()?;
+
+        let saved = memory_store(&rig, "engram");
+        assert_eq!(saved.lines().count(), 1);
+        assert!(saved.contains("hash before compare"));
+        assert!(saved.contains("\"job:J1\""));
+        assert_eq!(
+            write_backs(&rig)?,
+            vec![triple("engram", "Login bug", "updated")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_contradiction_with_a_foreign_memory_adds_a_risk_and_skips_the_write() -> Result<()> {
+        let mut rig = Rig::new(vec![good(), plan(FIX_PLAN)])?;
+        install_memory(&mut rig)?;
+        let foreign =
+            "{\"id\":\"f1\",\"topic\":\"Login bug\",\"content\":\"mine\",\"tags\":[\"owner\"]}";
+        seed_memory(&rig, "engram", foreign)?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(memory_store(&rig, "engram").trim(), foreign);
+        let risks: Vec<String> = rig
+            .timeline()?
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::FeedbackRecorded { kind, text, .. } if kind == "risk" => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(risks.len(), 1);
+        assert!(risks[0].contains("f1"));
+        assert_eq!(
+            write_backs(&rig)?,
+            vec![triple("engram", "Login bug", "contradiction")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn owner_directives_need_a_reply_and_cross_repo_facts_go_to_mnemon_only() -> Result<()> {
+        let mut rig = Rig::new(vec![
+            good(),
+            plan(
+                "{\"kind\":\"directive\",\"topic\":\"Style\",\"content\":\"tabs\"}\n{\"kind\":\"cross-repo\",\"topic\":\"Nix\",\"content\":\"flakes everywhere\"}\n",
+            ),
+        ])?;
+        install_memory(&mut rig)?;
+
+        rig.worker().tick()?;
+
+        let saved = memory_store(&rig, "mnemon");
+        assert!(saved.contains("Nix"));
+        assert!(!saved.contains("Style"));
+        assert_eq!(memory_store(&rig, "engram"), "");
+        assert!(write_backs(&rig)?.contains(&triple("mnemon", "Style", "skipped-unconfirmed")));
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_job_is_memorized_too() -> Result<()> {
+        let mut rig = Rig::new(vec![
+            Script {
+                handoff: Some(HANDOFF),
+                stdout: ERR_RESULT,
+                exit_code: 1,
+                ..Script::default()
+            },
+            plan(
+                "{\"kind\":\"failure\",\"topic\":\"Provider 404\",\"content\":\"model missing\"}\n",
+            ),
+        ])?;
+        install_memory(&mut rig)?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::Failed);
+        assert!(memory_store(&rig, "engram").contains("Provider 404"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_memorize_failure_never_blocks_the_job() -> Result<()> {
+        let mut rig = Rig::new(vec![good()])?;
+        install_memory(&mut rig)?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::Completed);
+        assert_eq!(memory_store(&rig, "engram"), "");
+        assert!(write_backs(&rig)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_cancelled_job_is_not_memorized() -> Result<()> {
+        let mut rig = Rig::new(vec![plan(FIX_PLAN)])?;
+        install_memory(&mut rig)?;
+        let job = JobId::new("J1");
+        rig.worker()
+            .append(&job, None, EventPayload::JobCancelled {})?;
+        rig.worker().append(
+            &job,
+            None,
+            EventPayload::JobFailed {
+                reason: "cancelled".into(),
+            },
+        )?;
+
+        rig.worker().memorize_if_due(&job);
+
+        assert!(rig.prompts()?.is_empty());
+        assert_eq!(memory_store(&rig, "engram"), "");
         Ok(())
     }
 }
