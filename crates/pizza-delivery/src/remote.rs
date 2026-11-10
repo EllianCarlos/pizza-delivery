@@ -31,7 +31,7 @@ pub enum Submit {
 
 struct Rejections {
     since: Option<Instant>,
-    counts: BTreeMap<String, u32>,
+    counts: BTreeMap<Reject, u32>,
 }
 
 pub struct Gate {
@@ -115,11 +115,11 @@ impl Gate {
     fn record(&self, reject: Reject) {
         if let Ok(mut guard) = self.rejections.lock() {
             guard.since.get_or_insert_with(Instant::now);
-            *guard.counts.entry(reject.as_str().to_owned()).or_default() += 1;
+            *guard.counts.entry(reject).or_default() += 1;
         }
     }
 
-    pub fn take_due_rejections(&self, force: bool) -> Option<BTreeMap<String, u32>> {
+    pub fn take_due_rejections(&self, force: bool) -> Option<BTreeMap<Reject, u32>> {
         let mut guard = self.rejections.lock().ok()?;
         let since = guard.since?;
         if !force && since.elapsed() < self.window {

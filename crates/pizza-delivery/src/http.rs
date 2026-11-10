@@ -325,12 +325,16 @@ impl Api {
     pub fn flush_rejections(&self, force: bool) {
         if let Some(counts) = self.gate.take_due_rejections(force) {
             let count = counts.values().sum();
+            let reasons = counts
+                .into_iter()
+                .map(|(reject, n)| (reject.as_str().to_owned(), n))
+                .collect();
             self.append(
                 SYSTEM_JOB,
                 Actor::Daemon,
                 EventPayload::AuthRejected {
                     count,
-                    reasons: counts,
+                    reasons,
                 },
             );
         }
