@@ -336,6 +336,14 @@ impl Api {
     }
 
     fn audit_remote(&self, email: &str, ray: Option<&str>, req: &Req, reply: &Reply) {
+        if req.method == "POST" && req.path.trim_end_matches('/') == "/api/inbox/dismiss" {
+            if reply.status == 200 {
+                for job in self.jobs_of_entries(&reply.body) {
+                    self.append_remote_action(&job, email, ray, "dismiss");
+                }
+            }
+            return;
+        }
         let action = match (req.method.as_str(), req.path.trim_end_matches('/')) {
             ("POST", "/api/jobs") => "submit",
             ("POST", "/api/inbox/reply") => "reply",
@@ -348,6 +356,10 @@ impl Api {
         if reply.status != 200 {
             return;
         }
+        self.append_remote_action(job, email, ray, action);
+    }
+
+    fn append_remote_action(&self, job: &str, email: &str, ray: Option<&str>, action: &str) {
         self.append(
             job,
             Actor::RemoteHuman,
@@ -357,6 +369,25 @@ impl Api {
                 action: action.to_owned(),
             },
         );
+    }
+
+    fn jobs_of_entries(&self, body: &serde_json::Value) -> Vec<String> {
+        let dismissed: Vec<&str> = body
+            .get("entries")
+            .and_then(|e| e.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let Response::Inbox { entries } = self.run(Request::Inbox { all: true }) else {
+            return Vec::new();
+        };
+        let mut jobs: Vec<String> = entries
+            .iter()
+            .filter(|e| dismissed.contains(&e.id.as_str()))
+            .map(|e| e.job.as_str().to_owned())
+            .collect();
+        jobs.sort();
+        jobs.dedup();
+        jobs
     }
 
     fn run(&self, request: Request) -> Response {
