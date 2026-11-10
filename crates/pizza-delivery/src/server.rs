@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +16,7 @@ use crate::agent::{CliAgent, Fleet};
 use crate::config::Config;
 use crate::git::{Git, LockedGit, SystemGit};
 use crate::handler::{handle, Env, SystemEnv};
+use crate::http;
 use crate::process::stop_leased_group;
 use crate::sandbox::{ensure_compatible, load_trust, SystemProbe};
 use crate::sqlite_store::SqliteStore;
@@ -303,6 +305,18 @@ pub fn serve(
         });
     }
     let kill_grace = Duration::from_millis(config.kill_grace_ms);
+    match TcpListener::bind(("127.0.0.1", config.http_port)) {
+        Ok(http_listener) => {
+            let api = http::Api {
+                store: Arc::clone(&store),
+                env: Arc::clone(&env),
+                stop: Arc::clone(&stop),
+                kill_grace,
+            };
+            std::thread::spawn(move || http::listen(http_listener, api));
+        }
+        Err(e) => eprintln!("http api disabled: port {}: {e}", config.http_port),
+    }
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -355,25 +369,33 @@ fn connection(
             failure(ErrorKind::Usage, "prompt must not be empty")
         }
         Ok(Request::Triage { prompt, repo }) => dry_run(store, config, &prompt, repo.as_deref()),
-        Ok(request) => {
-            let stopping = request == Request::Stop;
-            let response = match store.lock() {
-                Ok(mut guard) => handle(request, guard.as_mut(), env),
-                Err(_) => failure(ErrorKind::Internal, "store lock poisoned"),
-            };
-            if stopping {
-                stop.store(true, Ordering::SeqCst);
-            }
-            if let Response::Cancelled { id, .. } = &response {
-                stop_running_stage(store, id, kill_grace);
-            }
-            response
-        }
+        Ok(request) => dispatch(request, store, env, stop, kill_grace),
         Err(e) => failure(ErrorKind::Usage, format!("bad request: {e}")),
     };
     let mut out = &stream;
     writeln!(out, "{}", serde_json::to_string(&response)?)?;
     Ok(())
+}
+
+pub fn dispatch(
+    request: Request,
+    store: &Mutex<Box<dyn Store>>,
+    env: &dyn Env,
+    stop: &AtomicBool,
+    kill_grace: Duration,
+) -> Response {
+    let stopping = request == Request::Stop;
+    let response = match store.lock() {
+        Ok(mut guard) => handle(request, guard.as_mut(), env),
+        Err(_) => failure(ErrorKind::Internal, "store lock poisoned"),
+    };
+    if stopping {
+        stop.store(true, Ordering::SeqCst);
+    }
+    if let Response::Cancelled { id, .. } = &response {
+        stop_running_stage(store, id, kill_grace);
+    }
+    response
 }
 
 fn failure(kind: ErrorKind, message: impl Into<String>) -> Response {

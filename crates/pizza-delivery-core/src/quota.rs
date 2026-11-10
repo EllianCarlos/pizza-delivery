@@ -69,7 +69,8 @@ pub fn fold_quota(events: &[Event]) -> QuotaSnapshot {
         .fold(QuotaSnapshot::default(), QuotaSnapshot::with_signal)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct QuotaView {
     pub agent: String,
     pub state: String,

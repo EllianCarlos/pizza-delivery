@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use crate::event::{Event, EventPayload};
 use crate::id::JobId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum EntryStatus {
     Open,
     Answered,
@@ -23,7 +24,8 @@ impl EntryStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct InboxEntry {
     pub id: String,
     pub short_id: String,

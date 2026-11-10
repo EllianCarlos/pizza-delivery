@@ -5,6 +5,8 @@ use pizza_delivery_core::routing::{ConfigError as RoutingError, RoutingConfig};
 use pizza_delivery_core::{Caps, DEFAULT_RETENTION_MS};
 use thiserror::Error;
 
+pub const DEFAULT_HTTP_PORT: u16 = 7878;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -27,6 +29,7 @@ pub struct Config {
     pub budget_defaults: Defaults,
     pub mcp_catalog: PathBuf,
     pub mcp_secrets: PathBuf,
+    pub http_port: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +119,9 @@ impl Config {
             mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
             mcp_catalog,
             mcp_secrets,
+            http_port: get("PIZZA_DELIVERY_HTTP_PORT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_HTTP_PORT),
             budget_cap_tokens: number("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", DEFAULT_CAP_TOKENS),
             budget_defaults: {
                 let std = Defaults::standard();

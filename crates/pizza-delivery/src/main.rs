@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod git;
 mod handler;
+mod http;
 mod mcp_broker;
 mod process;
 mod sandbox;

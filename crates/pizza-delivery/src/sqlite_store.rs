@@ -185,9 +185,20 @@ fn events_where(
     filter: &str,
     args: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<Event>, StoreError> {
+    Ok(cursored_where(conn, filter, args)?
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect())
+}
+
+fn cursored_where(
+    conn: &Connection,
+    filter: &str,
+    args: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<(u64, Event)>, StoreError> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT id, job_id, stage_id, seq, ts_ms, actor, kind, payload
+            "SELECT id, job_id, stage_id, seq, ts_ms, actor, kind, payload, global_seq
              FROM events WHERE {filter} ORDER BY global_seq"
         ))
         .map_err(backend)?;
@@ -202,25 +213,30 @@ fn events_where(
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
                 r.get::<_, String>(7)?,
+                r.get::<_, i64>(8)?,
             ))
         })
         .map_err(backend)?;
     let mut events = Vec::new();
     for row in rows {
-        let (id, job_id, stage_id, seq, ts_ms, actor, kind, payload) = row.map_err(backend)?;
+        let (id, job_id, stage_id, seq, ts_ms, actor, kind, payload, cursor) =
+            row.map_err(backend)?;
         let body: serde_json::Value = serde_json::from_str(&payload).map_err(backend)?;
         let payload: EventPayload =
             serde_json::from_value(serde_json::json!({"kind": kind, "payload": body}))
                 .map_err(backend)?;
-        events.push(Event {
-            id,
-            job_id: JobId::new(job_id),
-            stage_id,
-            seq: seq as u64,
-            ts_ms,
-            actor: parse_actor(&actor)?,
-            payload,
-        });
+        events.push((
+            cursor as u64,
+            Event {
+                id,
+                job_id: JobId::new(job_id),
+                stage_id,
+                seq: seq as u64,
+                ts_ms,
+                actor: parse_actor(&actor)?,
+                payload,
+            },
+        ));
     }
     Ok(events)
 }
@@ -340,6 +356,29 @@ impl Store for SqliteStore {
 
     fn read_timeline(&self, job: &JobId) -> Result<Vec<Event>, StoreError> {
         timeline_in(&self.conn, job)
+    }
+
+    fn read_timeline_cursored(&self, job: &JobId) -> Result<Vec<(u64, Event)>, StoreError> {
+        cursored_where(&self.conn, "job_id = ?1", &[&job.as_str()])
+    }
+
+    fn head(&self) -> Result<u64, StoreError> {
+        self.conn
+            .query_row("SELECT COALESCE(MAX(global_seq), 0) FROM events", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n as u64)
+            .map_err(backend)
+    }
+
+    fn events_since(&self, after: u64, limit: usize) -> Result<Vec<(u64, Event)>, StoreError> {
+        let after = after as i64;
+        let limit = limit as i64;
+        cursored_where(
+            &self.conn,
+            "global_seq > ?1 AND global_seq IN (SELECT global_seq FROM events WHERE global_seq > ?1 ORDER BY global_seq LIMIT ?2)",
+            &[&after, &limit],
+        )
     }
 
     fn quota_events(&self) -> Result<Vec<Event>, StoreError> {

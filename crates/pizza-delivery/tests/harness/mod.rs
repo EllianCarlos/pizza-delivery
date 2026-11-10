@@ -2,6 +2,8 @@
 
 use std::error::Error;
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -84,6 +86,7 @@ pub struct Harness {
     root: TempDir,
     env: Vec<(String, String)>,
     routing: Option<PathBuf>,
+    http_port: u16,
 }
 
 #[derive(Debug)]
@@ -124,6 +127,7 @@ impl Harness {
             root,
             env: Vec::new(),
             routing: None,
+            http_port: TcpListener::bind("127.0.0.1:0")?.local_addr()?.port(),
         })
     }
 
@@ -219,6 +223,7 @@ impl Harness {
             .env("PATH", path)
             .env("XDG_CONFIG_HOME", self.root.path().join("xdg"))
             .env("PIZZA_DELIVERY_DATA_DIR", self.data_dir())
+            .env("PIZZA_DELIVERY_HTTP_PORT", self.http_port.to_string())
             .env("PIZZA_DELIVERY_SOCKET", self.root.path().join("pd.sock"))
             .env("PIZZA_DELIVERY_AGENT", self.root.path().join("fake-agent"))
             .env("PIZZA_DELIVERY_PROJECTS_DIR", self.root.path().join("src"))
@@ -317,6 +322,64 @@ impl Harness {
         Ok(out)
     }
 
+    pub fn http(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> TestResult<(u16, serde_json::Value)> {
+        self.run(&["status"])?;
+        let mut stream = TcpStream::connect(("127.0.0.1", self.http_port))?;
+        let payload = body.map(ToString::to_string).unwrap_or_default();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+            payload.len()
+        )?;
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw)?;
+        let (head, text) = raw.split_once("\r\n\r\n").ok_or("malformed response")?;
+        let status = head.split_whitespace().nth(1).ok_or("no status")?.parse()?;
+        let json = serde_json::from_str(text).unwrap_or(serde_json::Value::Null);
+        Ok((status, json))
+    }
+
+    pub fn get(&self, path: &str) -> TestResult<serde_json::Value> {
+        let (status, body) = self.http("GET", path, None)?;
+        assert_eq!(status, 200, "GET {path}: {body}");
+        Ok(body)
+    }
+
+    pub fn stream(&self, path: &str, last_event_id: Option<u64>) -> TestResult<Sse> {
+        self.run(&["status"])?;
+        let mut stream = TcpStream::connect(("127.0.0.1", self.http_port))?;
+        let resume = last_event_id
+            .map(|n| format!("Last-Event-ID: {n}\r\n"))
+            .unwrap_or_default();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n{resume}\r\n"
+        )?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        let mut reader = BufReader::new(stream);
+        let mut status = String::new();
+        reader.read_line(&mut status)?;
+        assert!(status.contains("200"), "stream status: {status}");
+        let mut content_type = String::new();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            if line.trim().is_empty() {
+                break;
+            }
+            if line.to_ascii_lowercase().starts_with("content-type:") {
+                content_type = line.trim().to_owned();
+            }
+        }
+        assert!(content_type.contains("text/event-stream"), "{content_type}");
+        Ok(Sse { reader })
+    }
+
     pub fn raw_db(&self) -> TestResult<Connection> {
         Ok(Connection::open(self.db_path())?)
     }
@@ -325,5 +388,45 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         let _ = self.run(&["stop"]);
+    }
+}
+
+pub struct Sse {
+    reader: BufReader<TcpStream>,
+}
+
+pub struct Frame {
+    pub id: u64,
+    pub event: String,
+    pub data: serde_json::Value,
+}
+
+impl Sse {
+    pub fn next_frame(&mut self) -> TestResult<Frame> {
+        let (mut id, mut event, mut data) = (None, String::new(), String::new());
+        loop {
+            let mut line = String::new();
+            if self.reader.read_line(&mut line)? == 0 {
+                return Err("stream closed".into());
+            }
+            let line = line.trim_end();
+            if line.is_empty() {
+                if let Some(id) = id {
+                    return Ok(Frame {
+                        id,
+                        event,
+                        data: serde_json::from_str(&data)?,
+                    });
+                }
+                continue;
+            }
+            if let Some(v) = line.strip_prefix("id: ") {
+                id = Some(v.parse()?);
+            } else if let Some(v) = line.strip_prefix("event: ") {
+                event = v.to_owned();
+            } else if let Some(v) = line.strip_prefix("data: ") {
+                data = v.to_owned();
+            }
+        }
     }
 }
