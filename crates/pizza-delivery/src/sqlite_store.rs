@@ -135,6 +135,7 @@ fn parse_actor(raw: &str) -> Result<Actor, StoreError> {
         "daemon" => Ok(Actor::Daemon),
         "agent" => Ok(Actor::Agent),
         "human" => Ok(Actor::Human),
+        "remote-human" => Ok(Actor::RemoteHuman),
         other => Err(backend(format!("unknown actor '{other}'"))),
     }
 }
@@ -298,6 +299,27 @@ fn lease_effects(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> 
     }
 }
 
+fn append_system(tx: &Transaction<'_>, new: NewEvent) -> Result<Event, StoreError> {
+    let seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE job_id = ?1",
+            params![new.job_id.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(backend)?;
+    let event = Event {
+        id: new.id,
+        job_id: new.job_id,
+        stage_id: new.stage_id,
+        seq: seq as u64,
+        ts_ms: new.ts_ms,
+        actor: new.actor,
+        payload: new.payload,
+    };
+    event_row(tx, &event)?;
+    Ok(event)
+}
+
 fn append_in(tx: &Transaction<'_>, new: NewEvent) -> Result<(Event, Job), StoreError> {
     let seq: i64 = tx
         .query_row(
@@ -392,6 +414,11 @@ impl Store for SqliteStore {
 
     fn append_event(&mut self, event: NewEvent) -> Result<Event, StoreError> {
         let tx = self.conn.transaction().map_err(backend)?;
+        if event.payload.is_system() {
+            let event = append_system(&tx, event)?;
+            tx.commit().map_err(backend)?;
+            return Ok(event);
+        }
         let (event, _) = append_in(&tx, event)?;
         tx.commit().map_err(backend)?;
         Ok(event)

@@ -13,8 +13,10 @@ rust-version = "1.80"
 pizza-delivery-core = { path = "crates/pizza-delivery-core", version = "0.0.0" }
 
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 listenfd = "1"
+ring = "0.17"
 ratatui = "0.30"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -25,6 +27,7 @@ thiserror = "1"
 ts-rs = { version = "12", default-features = false, features = ["serde-compat", "serde-json-impl", "no-serde-warnings"] }
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 ulid = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

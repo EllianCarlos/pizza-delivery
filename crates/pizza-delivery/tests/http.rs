@@ -203,6 +203,38 @@ fn the_web_ui_is_served_from_the_root() -> TestResult {
 }
 
 #[test]
+fn the_pwa_shell_manifest_service_worker_and_job_links_are_served() -> TestResult {
+    let h = harness()?;
+    let (status, head, body) = h.raw_get("/manifest.webmanifest")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("manifest+json"), "{head}");
+    let manifest: serde_json::Value = serde_json::from_str(&body)?;
+    assert_eq!(manifest["display"], "standalone");
+    assert_eq!(manifest["start_url"], "/");
+
+    let (status, head, body) = h.raw_get("/sw.js")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("javascript"), "{head}");
+    assert!(body.contains("addEventListener(\"push\""), "{body}");
+    assert!(
+        !body.contains("/api/jobs"),
+        "service worker must not cache api data"
+    );
+
+    for icon in ["/icon-192.png", "/icon-512.png"] {
+        let (status, head, _) = h.raw_get(icon)?;
+        assert_eq!(status, 200);
+        assert!(head.contains("image/png"), "{head}");
+    }
+
+    let (status, head, body) = h.raw_get("/jobs/01J9ABCDEF")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("text/html"), "{head}");
+    assert!(body.contains("<div id=\"root\">"), "{body}");
+    Ok(())
+}
+
+#[test]
 fn stream_resumes_from_last_event_id_and_delivers_live_events() -> TestResult {
     let h = harness()?;
     finished_job(&h)?;

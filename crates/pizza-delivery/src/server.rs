@@ -19,6 +19,8 @@ use crate::handler::{handle, Env, SystemEnv};
 use crate::http;
 use crate::notify::{MakoNotifier, NotifyingStore};
 use crate::process::stop_leased_group;
+use crate::push::{FanOut, Push, Subscriptions, Vapid, WebPushNotifier};
+use crate::remote::Gate;
 use crate::sandbox::{ensure_compatible, load_trust, SystemProbe};
 use crate::sqlite_store::SqliteStore;
 use crate::triage::{
@@ -26,7 +28,7 @@ use crate::triage::{
     MnemonSource, SystemIndex, Triager,
 };
 use crate::worker::{McpSetup, MemorySetup, Worker, WorkerConfig};
-use pizza_delivery_core::notify::{parse_muted, Dispatcher};
+use pizza_delivery_core::notify::{parse_muted, Dispatcher, Notifier};
 use pizza_delivery_core::routing::AdapterKind;
 
 pub enum Bound {
@@ -270,20 +272,28 @@ pub fn serve(
     listener
         .set_nonblocking(true)
         .context("nonblocking listener")?;
-    let store: Box<dyn Store> = match &config.notify_command {
-        Some(command) => Box::new(NotifyingStore::new(
-            store,
-            Dispatcher::new(
-                Box::new(MakoNotifier::new(
-                    command.clone(),
-                    config.notify_opener.clone(),
-                )),
-                parse_muted(&config.notify_muted),
-                config.web_url.clone(),
-            ),
-        )),
-        None => store,
-    };
+    let push = Arc::new(Push {
+        vapid: Vapid::load_or_create(&config.data_dir.join("vapid.pk8"))
+            .map_err(|e| anyhow::anyhow!("vapid keys: {e}"))?,
+        subscriptions: Subscriptions::open(config.data_dir.join("push-subscriptions.json")),
+        subject: config.vapid_subject.clone(),
+    });
+    let mut notifiers: Vec<Box<dyn Notifier>> =
+        vec![Box::new(WebPushNotifier::new(Arc::clone(&push)))];
+    if let Some(command) = &config.notify_command {
+        notifiers.push(Box::new(MakoNotifier::new(
+            command.clone(),
+            config.notify_opener.clone(),
+        )));
+    }
+    let store: Box<dyn Store> = Box::new(NotifyingStore::new(
+        store,
+        Dispatcher::new(
+            Box::new(FanOut(notifiers)),
+            parse_muted(&config.notify_muted),
+            config.web_url.clone(),
+        ),
+    ));
     let store = Arc::new(Mutex::new(store));
     let stop = Arc::new(AtomicBool::new(false));
     let git = Arc::new(LockedGit::new(SystemGit));
@@ -343,6 +353,11 @@ pub fn serve(
                 stop: Arc::clone(&stop),
                 kill_grace,
                 data_dir: config.data_dir.clone(),
+                push: Arc::clone(&push),
+                gate: Arc::new(match &config.remote {
+                    Some(remote) => Gate::new(remote, config.reject_window_ms),
+                    None => Gate::local_only(config.reject_window_ms),
+                }),
             };
             std::thread::spawn(move || http::listen(http_listener, api));
         }

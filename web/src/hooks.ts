@@ -74,4 +74,6 @@ const KINDS = [
   "mcp-deactivated",
   "mcp-calls",
   "write-back",
+  "remote-action",
+  "auth-rejected",
 ];

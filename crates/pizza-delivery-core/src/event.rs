@@ -26,6 +26,7 @@ pub enum Actor {
     Daemon,
     Agent,
     Human,
+    RemoteHuman,
 }
 
 impl Actor {
@@ -34,6 +35,7 @@ impl Actor {
             Actor::Daemon => "daemon",
             Actor::Agent => "agent",
             Actor::Human => "human",
+            Actor::RemoteHuman => "remote-human",
         }
     }
 }
@@ -197,9 +199,24 @@ pub enum EventPayload {
         topic: String,
         action: String,
     },
+    RemoteAction {
+        email: String,
+        cf_ray: Option<String>,
+        action: String,
+    },
+    AuthRejected {
+        count: u32,
+        reasons: std::collections::BTreeMap<String, u32>,
+    },
 }
 
+pub const SYSTEM_JOB: &str = "system";
+
 impl EventPayload {
+    pub fn is_system(&self) -> bool {
+        matches!(self, EventPayload::AuthRejected { .. })
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             EventPayload::JobSubmitted { .. } => "job-submitted",
@@ -237,6 +254,8 @@ impl EventPayload {
             EventPayload::McpCalls { .. } => "mcp-calls",
             EventPayload::StageBudgetRecorded { .. } => "stage-budget-recorded",
             EventPayload::WriteBack { .. } => "write-back",
+            EventPayload::RemoteAction { .. } => "remote-action",
+            EventPayload::AuthRejected { .. } => "auth-rejected",
         }
     }
 }

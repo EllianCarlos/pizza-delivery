@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod access;
+
 use std::error::Error;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -134,6 +136,14 @@ impl Harness {
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
         self.env.push((key.to_owned(), value.to_owned()));
         self
+    }
+
+    pub fn with_remote(self, certs_url: &str) -> Self {
+        self.with_env("PIZZA_DELIVERY_REMOTE", "on")
+            .with_env("PIZZA_DELIVERY_ACCESS_AUD", access::AUD)
+            .with_env("PIZZA_DELIVERY_ACCESS_ISSUER", access::ISSUER)
+            .with_env("PIZZA_DELIVERY_ACCESS_EMAILS", access::OWNER)
+            .with_env("PIZZA_DELIVERY_ACCESS_CERTS_URL", certs_url)
     }
 
     pub fn with_routing(scripts: &[(&str, &str)], routing: &str) -> TestResult<Self> {
@@ -329,12 +339,26 @@ impl Harness {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> TestResult<(u16, serde_json::Value)> {
+        self.http_with(method, path, &[], body)
+    }
+
+    pub fn http_with(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<&serde_json::Value>,
+    ) -> TestResult<(u16, serde_json::Value)> {
         self.run(&["status"])?;
+        let extra: String = headers
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}\r\n"))
+            .collect();
         let mut stream = TcpStream::connect(("127.0.0.1", self.http_port))?;
         let payload = body.map(ToString::to_string).unwrap_or_default();
         write!(
             stream,
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\n\r\n{payload}",
             payload.len()
         )?;
         let mut raw = String::new();
@@ -352,8 +376,9 @@ impl Harness {
             stream,
             "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
         )?;
-        let mut raw = String::new();
-        stream.read_to_string(&mut raw)?;
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes)?;
+        let raw = String::from_utf8_lossy(&bytes).into_owned();
         let (head, body) = raw.split_once("\r\n\r\n").ok_or("malformed response")?;
         let status = head.split_whitespace().nth(1).ok_or("no status")?.parse()?;
         Ok((status, head.to_owned(), body.to_owned()))

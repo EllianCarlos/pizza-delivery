@@ -1,3 +1,4 @@
+mod access;
 mod agent;
 mod assets;
 mod client;
@@ -8,6 +9,8 @@ mod http;
 mod mcp_broker;
 mod notify;
 mod process;
+mod push;
+mod remote;
 mod sandbox;
 mod server;
 mod sqlite_store;
