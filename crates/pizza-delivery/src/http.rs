@@ -102,7 +102,11 @@ fn connection(stream: TcpStream, api: &Api) -> std::io::Result<()> {
 fn write_asset(mut stream: &TcpStream, path: &str) -> std::io::Result<()> {
     let (status, content_type, body) = match crate::assets::lookup(path) {
         Some((content_type, body)) => ("200 OK", content_type, body),
-        None => ("404 Not Found", "text/plain; charset=utf-8", b"not found".as_slice()),
+        None => (
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            b"not found".as_slice(),
+        ),
     };
     write!(
         stream,
@@ -273,9 +277,7 @@ fn route(api: &Api, req: &Req) -> Reply {
             _ => bad(ErrorKind::Internal, "unexpected response"),
         },
         ("GET", ["api", "jobs", reference]) => detail(api, reference),
-        ("GET", ["api", "jobs", reference, "artifacts", index]) => {
-            artifact(api, reference, index)
-        }
+        ("GET", ["api", "jobs", reference, "artifacts", index]) => artifact(api, reference, index),
         ("GET", ["api", "quota"]) => match api.run(Request::Quota) {
             Response::Quota { agents, now_ms } => ok(&quota_panel(agents, now_ms)),
             Response::Error { error } => failed(error),
