@@ -228,6 +228,7 @@ impl Harness {
             )
             .env("PIZZA_DELIVERY_ENGRAM", self.root.path().join("no-engram"))
             .env("PIZZA_DELIVERY_MNEMON", self.root.path().join("no-mnemon"))
+            .env("PIZZA_DELIVERY_NOTIFY", "off")
             .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .env_remove("NO_COLOR")
             .stdin(Stdio::null())
