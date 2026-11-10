@@ -64,6 +64,8 @@ jobs:
         run: |
           bun install --frozen-lockfile
           bun run build
+      - name: Vendor web assets into the binary crate
+        run: scripts/vendor-web.sh
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish core crate, then binary crate
         env:

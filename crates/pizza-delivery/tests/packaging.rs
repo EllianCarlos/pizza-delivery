@@ -61,3 +61,30 @@ fn install_service_is_idempotent() -> TestResult {
         .is_file());
     Ok(())
 }
+
+#[test]
+fn published_crate_vendors_the_built_web_assets() -> TestResult {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))?;
+    assert!(manifest.contains("\"web-assets/**\""));
+    let build = std::fs::read_to_string(root.join("build.rs"))?;
+    assert!(build.contains("web-assets"));
+    let workflow = root.join("../../.github/workflows/release.yml");
+    if workflow.is_file() {
+        let text = std::fs::read_to_string(workflow)?;
+        let crates = text.split("\n  crates:").nth(1).ok_or("no crates job")?;
+        let vendor = crates
+            .find("scripts/vendor-web.sh")
+            .ok_or("crates job does not vendor web assets")?;
+        let publish = crates
+            .find("cargo publish -p pizza-delivery-core")
+            .ok_or("no publish step")?;
+        assert!(vendor < publish);
+    }
+    let script = root.join("../../scripts/vendor-web.sh");
+    if script.is_file() {
+        let text = std::fs::read_to_string(script)?;
+        assert!(text.contains("crates/pizza-delivery/web-assets"));
+    }
+    Ok(())
+}
