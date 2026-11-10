@@ -161,6 +161,25 @@ pub fn event_view(cursor: u64, event: &Event) -> EventView {
     }
 }
 
+pub fn event_from_view(view: &EventView) -> Option<Event> {
+    let payload = if view.payload.is_null() {
+        serde_json::json!({})
+    } else {
+        view.payload.clone()
+    };
+    serde_json::from_value(serde_json::json!({
+        "id": view.id,
+        "job_id": view.job_id,
+        "stage_id": view.stage_id,
+        "seq": view.seq,
+        "ts_ms": view.ts_ms,
+        "actor": view.actor,
+        "kind": view.kind,
+        "payload": payload,
+    }))
+    .ok()
+}
+
 pub fn events_view(entries: &[(u64, Event)]) -> EventsView {
     EventsView {
         events: entries.iter().map(|(c, e)| event_view(*c, e)).collect(),
@@ -336,6 +355,19 @@ mod tests {
         assert_eq!(v.kind, "job-failed");
         assert_eq!(v.payload["reason"], "boom");
         assert_eq!(v.job_id, "j1");
+    }
+
+    #[test]
+    fn an_event_view_converts_back_to_the_event_it_came_from() {
+        let e = event(
+            3,
+            EventPayload::JobFailed {
+                reason: "boom".into(),
+            },
+        );
+        assert_eq!(event_from_view(&event_view(7, &e)), Some(e));
+        let done = event(4, EventPayload::JobCompleted {});
+        assert_eq!(event_from_view(&event_view(8, &done)), Some(done));
     }
 
     #[test]
