@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
+use pizza_delivery_core::budget::{Defaults, DEFAULT_CAP_TOKENS};
 use pizza_delivery_core::routing::{ConfigError as RoutingError, RoutingConfig};
 use pizza_delivery_core::{Caps, DEFAULT_RETENTION_MS};
 use thiserror::Error;
@@ -24,6 +24,7 @@ pub struct Config {
     pub engram_command: PathBuf,
     pub mnemon_command: PathBuf,
     pub budget_cap_tokens: u64,
+    pub budget_defaults: Defaults,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +107,20 @@ impl Config {
             engram_command: path_or("PIZZA_DELIVERY_ENGRAM", PathBuf::from("engram")),
             mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
             budget_cap_tokens: number("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", DEFAULT_CAP_TOKENS),
+            budget_defaults: {
+                let std = Defaults::standard();
+                let tier = |name: &str, base: (u64, u64)| {
+                    (
+                        number(&format!("PIZZA_DELIVERY_ESTIMATE_{name}_TOKENS"), base.0),
+                        number(&format!("PIZZA_DELIVERY_ESTIMATE_{name}_WALL_MS"), base.1),
+                    )
+                };
+                Defaults {
+                    small: tier("SMALL", std.small),
+                    medium: tier("MEDIUM", std.medium),
+                    large: tier("LARGE", std.large),
+                }
+            },
         })
     }
 

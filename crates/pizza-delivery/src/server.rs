@@ -124,6 +124,7 @@ fn worker_config(config: &Config) -> Result<WorkerConfig> {
         caps: config.caps,
         retention_ms: config.retention_ms,
         budget_cap_tokens: config.budget_cap_tokens,
+        budget_defaults: config.budget_defaults,
         require_triage: true,
     })
 }
@@ -174,6 +175,7 @@ fn triage_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, st
                 deps,
                 agent: agent.name(),
                 budget_cap_tokens: config.budget_cap_tokens,
+                budget_defaults: config.budget_defaults,
             }
             .tick()
         });
