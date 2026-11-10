@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,7 +11,7 @@ use pizza_delivery_core::view::{
     board_view, events_view, job_detail, jobs_view, quota_panel, DismissedView, InboxView,
     RepliedView, SubmittedView,
 };
-use pizza_delivery_core::{JobState, Request, Response, Store};
+use pizza_delivery_core::{EventPayload, JobState, Request, Response, Store};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,7 @@ pub struct Api {
     pub env: Arc<dyn Env>,
     pub stop: Arc<AtomicBool>,
     pub kill_grace: Duration,
+    pub data_dir: PathBuf,
 }
 
 struct Req {
@@ -91,7 +93,24 @@ fn connection(stream: TcpStream, api: &Api) -> std::io::Result<()> {
     if req.method == "GET" && req.path == "/api/stream" {
         return stream_events(&stream, api, &req);
     }
+    if req.method == "GET" && !req.path.starts_with("/api/") {
+        return write_asset(&stream, &req.path);
+    }
     write_reply(&stream, route(api, &req))
+}
+
+fn write_asset(mut stream: &TcpStream, path: &str) -> std::io::Result<()> {
+    let (status, content_type, body) = match crate::assets::lookup(path) {
+        Some((content_type, body)) => ("200 OK", content_type, body),
+        None => ("404 Not Found", "text/plain; charset=utf-8", b"not found".as_slice()),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    stream.flush()
 }
 
 fn read_request(stream: &TcpStream) -> std::io::Result<Option<Req>> {
@@ -254,6 +273,9 @@ fn route(api: &Api, req: &Req) -> Reply {
             _ => bad(ErrorKind::Internal, "unexpected response"),
         },
         ("GET", ["api", "jobs", reference]) => detail(api, reference),
+        ("GET", ["api", "jobs", reference, "artifacts", index]) => {
+            artifact(api, reference, index)
+        }
         ("GET", ["api", "quota"]) => match api.run(Request::Quota) {
             Response::Quota { agents, now_ms } => ok(&quota_panel(agents, now_ms)),
             Response::Error { error } => failed(error),
@@ -333,6 +355,46 @@ fn detail(api: &Api, reference: &str) -> Reply {
     match timeline {
         Ok(events) => ok(&job_detail(job, &events, &inbox)),
         Err(e) => bad(ErrorKind::Internal, e.to_string()),
+    }
+}
+
+fn artifact(api: &Api, reference: &str, index: &str) -> Reply {
+    let job = match api.run(Request::Status {
+        job: Some(reference.to_owned()),
+    }) {
+        Response::Job { job, .. } => job,
+        Response::Error { error } => return failed(error),
+        _ => return bad(ErrorKind::Internal, "unexpected response"),
+    };
+    let timeline = match api.store.lock() {
+        Ok(guard) => guard.read_timeline_cursored(&job.id),
+        Err(_) => return bad(ErrorKind::Internal, "store lock poisoned"),
+    };
+    let events = match timeline {
+        Ok(events) => events,
+        Err(e) => return bad(ErrorKind::Internal, e.to_string()),
+    };
+    let path = index.parse::<usize>().ok().and_then(|n| {
+        events
+            .iter()
+            .filter_map(|(_, e)| match &e.payload {
+                EventPayload::ArtifactRecorded { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .nth(n)
+    });
+    let Some(path) = path else {
+        return bad(ErrorKind::NotFound, "no such artifact");
+    };
+    if path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return bad(ErrorKind::Usage, "artifact path escapes the data directory");
+    }
+    match std::fs::read(api.data_dir.join(&path)) {
+        Ok(bytes) => ok(&serde_json::json!({
+            "path": path,
+            "content": String::from_utf8_lossy(&bytes),
+        })),
+        Err(e) => bad(ErrorKind::NotFound, format!("artifact unreadable: {e}")),
     }
 }
 
