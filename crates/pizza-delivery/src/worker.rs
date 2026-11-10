@@ -8,6 +8,7 @@ use pizza_delivery_core::claude::{parse_stream, Outcome};
 use pizza_delivery_core::event::{Actor, EventPayload};
 use pizza_delivery_core::handoff::validate;
 use pizza_delivery_core::prompt::{render_stage_prompt, TEMPLATE_NAME, TEMPLATE_VERSION};
+use pizza_delivery_core::sandbox::{blocked_hosts, Mount, SandboxProfile, TrustConfig};
 use pizza_delivery_core::{
     fold_stages, ClaimRequest, Claimed, JobId, NewEvent, Store, StoreError, MAX_ATTEMPTS,
 };
@@ -24,6 +25,7 @@ pub struct WorkerConfig {
     pub lease_ttl_ms: i64,
     pub heartbeat_ms: u64,
     pub timeout: Duration,
+    pub trust: TrustConfig,
 }
 
 pub struct Worker<'a> {
@@ -253,11 +255,25 @@ impl Worker<'_> {
                 prompt_sha256: sha256_hex(prompt.as_bytes()),
             },
         )?;
+        let egress_rel = relative.join("egress-requests.log");
+        let egress_log = self.config.data_dir.join(&egress_rel);
+        if egress_log.exists() {
+            std::fs::remove_file(&egress_log)?;
+        }
+        let sandbox = self.config.trust.profile_for(
+            &repo.to_string_lossy(),
+            &[
+                worktree.to_string_lossy().into_owned(),
+                dir.to_string_lossy().into_owned(),
+            ],
+        );
         let invocation = Invocation {
             prompt,
             cwd: worktree,
             handoff_path: handoff_path.clone(),
             timeout: self.config.timeout,
+            sandbox: sandbox.clone(),
+            egress_log: egress_log.clone(),
         };
         let started = self.env.now_ms();
         let stop = AtomicBool::new(false);
@@ -271,9 +287,24 @@ impl Worker<'_> {
             let _ = beat.join();
             result
         });
+        let requested = std::fs::read_to_string(&egress_log).unwrap_or_default();
+        let blocked = blocked_hosts(&sandbox.egress_allowlist, &requested);
+        for host in &blocked {
+            self.append(
+                &job.id,
+                stage,
+                EventPayload::EgressBlocked { host: host.clone() },
+            )?;
+        }
         let output = match output {
-            Ok(output) => output,
-            Err(e) => return Ok(Verdict::Fail(format!("agent: {e:#}"))),
+            Ok(output) => {
+                self.audit(claimed, &sandbox, blocked)?;
+                output
+            }
+            Err(e) => {
+                self.audit(claimed, &sandbox, blocked)?;
+                return Ok(Verdict::Fail(format!("agent: {e:#}")));
+            }
         };
         let wall_ms = u64::try_from(self.env.now_ms() - started).ok();
         let raw_rel = relative.join("raw-output.jsonl");
@@ -294,6 +325,28 @@ impl Worker<'_> {
             Outcome::Failed { reason, .. } => Ok(Verdict::Fail(reason)),
             Outcome::Succeeded => self.accept_handoff(claimed, &handoff_rel),
         }
+    }
+
+    fn audit(
+        &self,
+        claimed: &Claimed,
+        profile: &SandboxProfile,
+        blocked_requests: Vec<String>,
+    ) -> Result<()> {
+        self.append(
+            &claimed.job.id,
+            Some(claimed.stage_id.as_str()),
+            EventPayload::SandboxAudit {
+                profile_hash: profile.hash(),
+                mounts: profile.mounts.iter().map(Mount::describe).collect(),
+                egress_allowlist: profile.egress_allowlist.clone(),
+                blocked_requests,
+                mcp_activations: Vec::new(),
+                diff_policy_result: None,
+                pushed_ref: None,
+                pr_url: None,
+            },
+        )
     }
 
     fn accept_handoff(&self, claimed: &Claimed, handoff_rel: &Path) -> Result<Verdict> {
@@ -366,6 +419,7 @@ mod tests {
 
     struct FakeAgent {
         scripts: Mutex<VecDeque<Script>>,
+        egress: Option<&'static str>,
     }
 
     impl Agent for FakeAgent {
@@ -373,6 +427,9 @@ mod tests {
             "fake"
         }
         fn run(&self, inv: &Invocation, _on_spawn: &mut dyn FnMut(u32)) -> Result<AgentOutput> {
+            if let Some(requests) = self.egress {
+                std::fs::write(&inv.egress_log, requests)?;
+            }
             let script = self
                 .scripts
                 .lock()
@@ -416,6 +473,10 @@ mod tests {
                     lease_ttl_ms: 1000,
                     heartbeat_ms: 100,
                     timeout: Duration::from_secs(5),
+                    trust: TrustConfig {
+                        default_hosts: vec!["api.anthropic.com".to_owned()],
+                        ..TrustConfig::default()
+                    },
                 },
                 _dir: dir,
                 store: Mutex::new(Box::new(store)),
@@ -426,8 +487,23 @@ mod tests {
                 git: FakeGit,
                 agent: FakeAgent {
                     scripts: Mutex::new(scripts.into()),
+                    egress: None,
                 },
             })
+        }
+
+        fn with_egress(mut self, requests: &'static str) -> Self {
+            self.agent.egress = Some(requests);
+            self
+        }
+
+        fn audits(&self) -> Result<Vec<EventPayload>> {
+            Ok(self
+                .timeline()?
+                .into_iter()
+                .map(|e| e.payload)
+                .filter(|p| matches!(p, EventPayload::SandboxAudit { .. }))
+                .collect())
         }
 
         fn worker(&self) -> Worker<'_> {
@@ -487,6 +563,7 @@ mod tests {
                 "stage-claimed",
                 "stage-started",
                 "agent-invoked",
+                "sandbox-audit",
                 "artifact-recorded",
                 "agent-finished",
                 "artifact-recorded",
@@ -498,6 +575,71 @@ mod tests {
         );
         assert_eq!(rig.job_state()?, JobState::Completed);
         assert!(!rig.worker().tick()?);
+        Ok(())
+    }
+
+    #[test]
+    fn every_invocation_records_an_audit_entry_with_all_fields() -> Result<()> {
+        let rig = Rig::new(vec![good()])?;
+        rig.worker().tick()?;
+
+        let audits = rig.audits()?;
+        assert_eq!(audits.len(), 1);
+        let EventPayload::SandboxAudit {
+            profile_hash,
+            mounts,
+            egress_allowlist,
+            blocked_requests,
+            diff_policy_result,
+            pushed_ref,
+            pr_url,
+            ..
+        } = &audits[0]
+        else {
+            return Err(anyhow!("not an audit"));
+        };
+        assert_eq!(profile_hash.len(), 64);
+        assert!(mounts
+            .iter()
+            .any(|m| m.ends_with(":rw") && m.contains("J1")));
+        assert_eq!(egress_allowlist, &vec!["api.anthropic.com".to_owned()]);
+        assert!(blocked_requests.is_empty());
+        assert_eq!(
+            (diff_policy_result, pushed_ref, pr_url),
+            (&None, &None, &None)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_agent_run_is_audited_too() -> Result<()> {
+        let rig = Rig::new(vec![])?;
+        rig.worker().tick()?;
+        assert_eq!(rig.audits()?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn blocked_egress_is_ledgered_per_host_and_in_the_audit() -> Result<()> {
+        let rig = Rig::new(vec![good()])?
+            .with_egress("api.anthropic.com\nevil.example\nevil.example\ntracker.io\n");
+        rig.worker().tick()?;
+
+        let blocked: Vec<String> = rig
+            .timeline()?
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::EgressBlocked { host } => Some(host),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blocked, vec!["evil.example", "tracker.io"]);
+        let audits = rig.audits()?;
+        assert!(matches!(
+            &audits[0],
+            EventPayload::SandboxAudit { blocked_requests, .. }
+                if blocked_requests == &vec!["evil.example".to_owned(), "tracker.io".to_owned()]
+        ));
         Ok(())
     }
 

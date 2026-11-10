@@ -7,6 +7,7 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub socket_path: PathBuf,
     pub agent_command: PathBuf,
+    pub trust_path: PathBuf,
     pub lease_ttl_ms: i64,
     pub stage_timeout_secs: u64,
 }
@@ -37,12 +38,16 @@ impl Config {
         let agent_command = get("PIZZA_DELIVERY_AGENT")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("claude"));
+        let trust_path = get("PIZZA_DELIVERY_TRUST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("trust.json"));
         let number =
             |key: &str, default: u64| get(key).and_then(|v| v.parse().ok()).unwrap_or(default);
         Ok(Self {
             data_dir,
             socket_path,
             agent_command,
+            trust_path,
             lease_ttl_ms: number("PIZZA_DELIVERY_LEASE_TTL_MS", 30_000) as i64,
             stage_timeout_secs: number("PIZZA_DELIVERY_STAGE_TIMEOUT_SECS", 3600),
         })

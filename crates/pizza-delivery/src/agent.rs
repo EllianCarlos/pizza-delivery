@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use pizza_delivery_core::sandbox::{sandbox_for, CommandSpec, SandboxProfile};
+
 use crate::process::{kill_group, terminate_group};
 
 pub struct Invocation {
@@ -13,6 +15,8 @@ pub struct Invocation {
     pub cwd: PathBuf,
     pub handoff_path: PathBuf,
     pub timeout: Duration,
+    pub sandbox: SandboxProfile,
+    pub egress_log: PathBuf,
 }
 
 pub struct AgentOutput {
@@ -45,16 +49,39 @@ impl Agent for ClaudeAgent {
     }
 
     fn run(&self, inv: &Invocation, on_spawn: &mut dyn FnMut(u32)) -> Result<AgentOutput> {
-        let mut child = Command::new(&self.command)
-            .args([
-                "-p",
-                &inv.prompt,
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ])
+        let launch = sandbox_for(inv.sandbox.kind).wrap(
+            &inv.sandbox,
+            &CommandSpec {
+                program: self.command.to_string_lossy().into_owned(),
+                args: [
+                    "-p",
+                    &inv.prompt,
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                env: vec![
+                    (
+                        "PIZZA_DELIVERY_HANDOFF".to_owned(),
+                        inv.handoff_path.to_string_lossy().into_owned(),
+                    ),
+                    (
+                        "PIZZA_DELIVERY_EGRESS_LOG".to_owned(),
+                        inv.egress_log.to_string_lossy().into_owned(),
+                    ),
+                    (
+                        "PIZZA_DELIVERY_EGRESS_ALLOW".to_owned(),
+                        inv.sandbox.egress_allowlist.join(","),
+                    ),
+                ],
+            },
+        );
+        let mut child = Command::new(&launch.program)
+            .args(&launch.args)
+            .envs(launch.env.iter().map(|(k, v)| (k, v)))
             .current_dir(&inv.cwd)
-            .env("PIZZA_DELIVERY_HANDOFF", &inv.handoff_path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

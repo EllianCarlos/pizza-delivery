@@ -7,6 +7,7 @@ pub mod id;
 pub mod job;
 pub mod prompt;
 pub mod render;
+pub mod sandbox;
 pub mod stage;
 pub mod store;
 pub mod usage;

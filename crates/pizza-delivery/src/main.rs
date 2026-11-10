@@ -4,6 +4,7 @@ mod config;
 mod git;
 mod handler;
 mod process;
+mod sandbox;
 mod server;
 mod sqlite_store;
 mod worker;

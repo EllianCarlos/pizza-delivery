@@ -13,6 +13,7 @@ use crate::agent::ClaudeAgent;
 use crate::config::Config;
 use crate::git::SystemGit;
 use crate::handler::{handle, Env, SystemEnv};
+use crate::sandbox::{ensure_compatible, load_trust, SystemProbe};
 use crate::sqlite_store::SqliteStore;
 use crate::worker::{Worker, WorkerConfig};
 
@@ -48,13 +49,27 @@ pub fn run(config: &Config) -> Result<()> {
         Bound::AlreadyRunning => return Ok(()),
     };
     std::fs::create_dir_all(&config.data_dir).context("create data directory")?;
+    let trust = load_trust(&config.trust_path)?;
+    ensure_compatible(
+        &trust,
+        &config.agent_command.to_string_lossy(),
+        &SystemProbe,
+    )?;
     let store: Box<dyn Store> = Box::new(SqliteStore::open(&config.db_path())?);
     serve(listener, store, Arc::new(SystemEnv), config)
 }
 
 fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop: &AtomicBool) {
     let agent = ClaudeAgent::new(&config.agent_command);
+    let trust = match load_trust(&config.trust_path) {
+        Ok(trust) => trust,
+        Err(e) => {
+            eprintln!("trust config: {e:#}");
+            return;
+        }
+    };
     let worker_config = WorkerConfig {
+        trust,
         data_dir: config.data_dir.clone(),
         holder: format!("daemon-{}", std::process::id()),
         lease_ttl_ms: config.lease_ttl_ms,
