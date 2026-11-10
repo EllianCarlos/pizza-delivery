@@ -111,6 +111,7 @@ fn parse_state(raw: &str) -> Result<JobState, StoreError> {
     match raw {
         "queued" => Ok(JobState::Queued),
         "running" => Ok(JobState::Running),
+        "waiting-for-quota" => Ok(JobState::WaitingForQuota),
         "completed" => Ok(JobState::Completed),
         "failed" => Ok(JobState::Failed),
         other => Err(backend(format!("unknown job state '{other}'"))),
@@ -165,36 +166,41 @@ fn load_job(tx: &Transaction<'_>, id: &JobId) -> Result<Option<Job>, StoreError>
     row.map(job_from_row).transpose()
 }
 
-fn timeline_in(conn: &Connection, job: &JobId) -> Result<Vec<Event>, StoreError> {
+fn events_where(
+    conn: &Connection,
+    filter: &str,
+    args: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<Event>, StoreError> {
     let mut stmt = conn
-        .prepare(
-            "SELECT id, stage_id, seq, ts_ms, actor, kind, payload
-             FROM events WHERE job_id = ?1 ORDER BY seq",
-        )
+        .prepare(&format!(
+            "SELECT id, job_id, stage_id, seq, ts_ms, actor, kind, payload
+             FROM events WHERE {filter} ORDER BY global_seq"
+        ))
         .map_err(backend)?;
     let rows = stmt
-        .query_map(params![job.as_str()], |r| {
+        .query_map(args, |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, i64>(2)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
                 r.get::<_, i64>(3)?,
-                r.get::<_, String>(4)?,
+                r.get::<_, i64>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
             ))
         })
         .map_err(backend)?;
     let mut events = Vec::new();
     for row in rows {
-        let (id, stage_id, seq, ts_ms, actor, kind, payload) = row.map_err(backend)?;
+        let (id, job_id, stage_id, seq, ts_ms, actor, kind, payload) = row.map_err(backend)?;
         let body: serde_json::Value = serde_json::from_str(&payload).map_err(backend)?;
         let payload: EventPayload =
             serde_json::from_value(serde_json::json!({"kind": kind, "payload": body}))
                 .map_err(backend)?;
         events.push(Event {
             id,
-            job_id: job.clone(),
+            job_id: JobId::new(job_id),
             stage_id,
             seq: seq as u64,
             ts_ms,
@@ -203,6 +209,10 @@ fn timeline_in(conn: &Connection, job: &JobId) -> Result<Vec<Event>, StoreError>
         });
     }
     Ok(events)
+}
+
+fn timeline_in(conn: &Connection, job: &JobId) -> Result<Vec<Event>, StoreError> {
+    events_where(conn, "job_id = ?1", &[&job.as_str()])
 }
 
 fn lease_effects(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> {
@@ -288,6 +298,15 @@ impl Store for SqliteStore {
         timeline_in(&self.conn, job)
     }
 
+    fn quota_events(&self) -> Result<Vec<Event>, StoreError> {
+        events_where(
+            &self.conn,
+            "global_seq IN (SELECT MAX(global_seq) FROM events WHERE kind = 'quota-signal'
+                            GROUP BY json_extract(payload, '$.agent'))",
+            &[],
+        )
+    }
+
     fn append_event(&mut self, event: NewEvent) -> Result<Event, StoreError> {
         let tx = self.conn.transaction().map_err(backend)?;
         let (event, _) = append_in(&tx, event)?;
@@ -299,11 +318,13 @@ impl Store for SqliteStore {
         let candidates: Vec<Job> = self
             .list_jobs()?
             .into_iter()
-            .filter(|j| j.repo.is_some() && j.state == JobState::Queued)
+            .filter(|j| {
+                j.repo.is_some() && matches!(j.state, JobState::Queued | JobState::WaitingForQuota)
+            })
             .collect();
         for job in candidates {
             let events = timeline_in(&self.conn, &job.id)?;
-            let Some(plan) = next_claim(&events) else {
+            let Some(plan) = next_claim(&events, request.now_ms) else {
                 continue;
             };
             let [planned_id, claimed_id] = request.event_ids.clone();

@@ -103,3 +103,12 @@ Only the credential failure could be captured (`agy/normal.*`): exit code 1, emp
 ## Scrubbing
 
 Hook output and synthetic hook-feedback text were replaced with `[redacted ...]`, thinking signatures were redacted, the home directory and username were replaced with `/home/user` and `user`, and the scratch cwd was replaced with `/tmp/scratch/run`. Session ids and message ids are left as is since they are not sensitive. MCP server names in `system/init` are kept. A grep for the username, email and common key prefixes found only MCP server names.
+
+## Conservative quota classifiers (issue #7)
+
+Implemented in `crates/pizza-delivery-core/src/classify.rs`. Every quota shape below is an assumption, not an observation, until a real exhaustion is captured; all recorded fixtures classify as success, provider error or configuration error, never as quota.
+
+- claude: a `rate_limit_event` whose `status` does not start with `allowed` is treated as exhausted, with the reset taken from the hottest `unifiedWindows` entry (else `resetsAt`). An `is_error` result is quota when `api_error_status` is 429, a non-allowed rate-limit event was seen, or the result text or reason mentions a rate or usage limit. 5xx and 529 are transient. Anything else, including the budget cap and unknown model, is a terminal provider error.
+- opencode and agy (reactive): a non-zero exit whose stdout or stderr mentions rate limit, usage limit, quota, too many requests, resource exhausted or a standalone 429 is quota with an unknown reset (default backoff applies). Otherwise a non-zero exit with a `type: error` stdout event (opencode) or any non-zero exit (agy) is a terminal provider error, and a silent non-zero exit or signal death is a crash.
+- Hermes: quota classification stays disabled; credential failures are configuration errors, everything else non-zero is a provider error. agy credential failures (`environment variable is not set`) are configuration errors too.
+- Skill pre-flight: when a stage names a required skill and `system/init.slash_commands` is non-empty but lacks it, the failure is a configuration error. No stage passes a skill name yet.

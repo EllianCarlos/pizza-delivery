@@ -9,7 +9,7 @@ use listenfd::ListenFd;
 use pizza_delivery_core::api::{ApiError, ErrorKind};
 use pizza_delivery_core::{Request, Response, Store};
 
-use crate::agent::ClaudeAgent;
+use crate::agent::Fleet;
 use crate::config::Config;
 use crate::git::SystemGit;
 use crate::handler::{handle, Env, SystemEnv};
@@ -53,7 +53,7 @@ pub fn run(config: &Config) -> Result<()> {
 }
 
 fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop: &AtomicBool) {
-    let agent = ClaudeAgent::new(&config.agent_command);
+    let fleet = Fleet::from_routing(&config.routing);
     let worker_config = WorkerConfig {
         data_dir: config.data_dir.clone(),
         holder: format!("daemon-{}", std::process::id()),
@@ -67,7 +67,8 @@ fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop
         store,
         env,
         git: &SystemGit,
-        agent: &agent,
+        fleet: &fleet,
+        routing: &config.routing,
         config: &worker_config,
     };
     while !stop.load(Ordering::SeqCst) {

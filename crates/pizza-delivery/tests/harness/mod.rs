@@ -50,6 +50,7 @@ echo '{"type":"result","is_error":false}'
 
 pub struct Harness {
     root: TempDir,
+    routing: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -86,7 +87,26 @@ impl Harness {
         let agent = root.path().join("fake-agent");
         fs::write(&agent, script)?;
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o755))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            routing: None,
+        })
+    }
+
+    pub fn with_routing(scripts: &[(&str, &str)], routing: &str) -> TestResult<Self> {
+        let mut harness = Self::with_agent(VALID_HANDOFF_AGENT)?;
+        for (name, script) in scripts {
+            let path = harness.root.path().join(name);
+            fs::write(&path, script)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        }
+        let file = harness.root.path().join("routing.toml");
+        fs::write(
+            &file,
+            routing.replace("{root}", &harness.root.path().to_string_lossy()),
+        )?;
+        harness.routing = Some(file);
+        Ok(harness)
     }
 
     pub fn root(&self) -> &Path {
@@ -135,8 +155,13 @@ impl Harness {
     }
 
     pub fn run(&self, args: &[&str]) -> TestResult<Cli> {
-        let out: Output = Command::new(env!("CARGO_BIN_EXE_pizza-delivery"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pizza-delivery"));
+        if let Some(routing) = &self.routing {
+            command.env("PIZZA_DELIVERY_ROUTING", routing);
+        }
+        let out: Output = command
             .args(args)
+            .env("XDG_CONFIG_HOME", self.root.path().join("xdg"))
             .env("PIZZA_DELIVERY_DATA_DIR", self.data_dir())
             .env("PIZZA_DELIVERY_SOCKET", self.root.path().join("pd.sock"))
             .env("PIZZA_DELIVERY_AGENT", self.root.path().join("fake-agent"))

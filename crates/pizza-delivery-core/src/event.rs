@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::JobId;
+use crate::quota::QuotaStatus;
 use crate::usage::Usage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +55,25 @@ pub enum EventPayload {
     AgentFinished {
         usage: Usage,
     },
+    QuotaSignal {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        status: QuotaStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        utilization_permille: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at_ms: Option<i64>,
+        reset_known: bool,
+    },
+    AgentFellBack {
+        agent: String,
+        reason: String,
+    },
+    JobParked {
+        until_ms: i64,
+        reason: String,
+    },
     ArtifactRecorded {
         kind: String,
         path: String,
@@ -88,6 +108,9 @@ impl EventPayload {
             EventPayload::StageStarted { .. } => "stage-started",
             EventPayload::AgentInvoked { .. } => "agent-invoked",
             EventPayload::AgentFinished { .. } => "agent-finished",
+            EventPayload::QuotaSignal { .. } => "quota-signal",
+            EventPayload::AgentFellBack { .. } => "agent-fell-back",
+            EventPayload::JobParked { .. } => "job-parked",
             EventPayload::ArtifactRecorded { .. } => "artifact-recorded",
             EventPayload::HandoffWritten { .. } => "handoff-written",
             EventPayload::StageSucceeded { .. } => "stage-succeeded",

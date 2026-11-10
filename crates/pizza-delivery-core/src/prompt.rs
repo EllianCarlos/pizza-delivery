@@ -12,9 +12,26 @@ pub fn render_stage_prompt(job_id: &str, stage: &str, task: &str, handoff_path: 
     )
 }
 
+pub fn with_interruption_note(prompt: &str, interrupted: Option<&str>) -> String {
+    match interrupted {
+        None => prompt.to_owned(),
+        Some(agent) => format!(
+            "{prompt}\n\nInterruption note: the previous run of this stage ({agent}) was interrupted by quota exhaustion before it finished. Its edits may already be present in the working tree. Restart the stage from its input above, check what exists, and finish the work."
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_interruption_note_names_the_agent_and_is_absent_without_one() {
+        assert_eq!(with_interruption_note("p", None), "p");
+        let noted = with_interruption_note("p", Some("claude"));
+        assert!(noted.starts_with("p\n\nInterruption note:"));
+        assert!(noted.contains("(claude)"));
+    }
 
     #[test]
     fn the_prompt_carries_autonomy_preamble_task_and_handoff_location() {

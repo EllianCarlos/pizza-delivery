@@ -1,7 +1,7 @@
 use pizza_delivery_core::api::{ApiError, ErrorKind, JobView};
 use pizza_delivery_core::{
-    fold_stages, resolve, short_id, Job, JobId, NewJob, Request, ResolveError, Response, Store,
-    StoreError,
+    fold_quota, fold_stages, quota_views, resolve, short_id, Job, JobId, NewJob, Request,
+    ResolveError, Response, Store, StoreError,
 };
 
 pub trait Env: Send + Sync {
@@ -114,6 +114,16 @@ pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Respons
                 (_, Err(e)) => internal(e),
             }
         }
+        Request::Quota => match store.quota_events() {
+            Ok(events) => {
+                let now_ms = env.now_ms();
+                Response::Quota {
+                    agents: quota_views(&fold_quota(&events), now_ms),
+                    now_ms,
+                }
+            }
+            Err(e) => internal(e),
+        },
         Request::Stop => Response::Stopped,
     }
 }

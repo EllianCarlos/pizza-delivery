@@ -4,6 +4,7 @@ use crate::event::Event;
 use crate::exit::ExitCode;
 use crate::id::JobId;
 use crate::job::JobState;
+use crate::quota::QuotaView;
 use crate::stage::StageView;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +18,7 @@ pub enum Request {
     Status {
         job: Option<String>,
     },
+    Quota,
     Stop,
 }
 
@@ -69,6 +71,10 @@ pub enum Response {
         job: JobView,
         stages: Vec<StageView>,
         events: Vec<Event>,
+    },
+    Quota {
+        agents: Vec<QuotaView>,
+        now_ms: i64,
     },
     Stopped,
     Error {

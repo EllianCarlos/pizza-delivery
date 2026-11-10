@@ -67,6 +67,10 @@ pub fn fold_stages(events: &[Event]) -> Vec<StageView> {
                     stage.attempt = *attempt;
                 }
                 EventPayload::StageRetried { .. } => stage.state = StageState::Queued,
+                EventPayload::JobParked { .. } => {
+                    stage.state = StageState::Queued;
+                    stage.attempt = stage.attempt.saturating_sub(1);
+                }
                 EventPayload::StageSucceeded {} => stage.state = StageState::Succeeded,
                 EventPayload::StageFailed { .. } => stage.state = StageState::Failed,
                 EventPayload::AgentFinished { usage } => stage.usage = Some(usage.clone()),
@@ -77,7 +81,21 @@ pub fn fold_stages(events: &[Event]) -> Vec<StageView> {
     })
 }
 
-pub fn next_claim(events: &[Event]) -> Option<ClaimPlan> {
+fn parked_until(events: &[Event]) -> Option<i64> {
+    events
+        .iter()
+        .rev()
+        .take_while(|e| !matches!(e.payload, EventPayload::StageClaimed { .. }))
+        .find_map(|e| match &e.payload {
+            EventPayload::JobParked { until_ms, .. } => Some(*until_ms),
+            _ => None,
+        })
+}
+
+pub fn next_claim(events: &[Event], now_ms: i64) -> Option<ClaimPlan> {
+    if parked_until(events).is_some_and(|until| until > now_ms) {
+        return None;
+    }
     let finished = events.iter().any(|e| {
         matches!(
             e.payload,
@@ -159,7 +177,7 @@ mod tests {
     #[test]
     fn a_fresh_job_plans_stage_one_attempt_one() {
         assert_eq!(
-            next_claim(&[submitted()]),
+            next_claim(&[submitted()], 0),
             Some(ClaimPlan {
                 existing_stage_id: None,
                 n: 1,
@@ -171,7 +189,10 @@ mod tests {
 
     #[test]
     fn a_running_stage_is_not_claimable() {
-        assert_eq!(next_claim(&[submitted(), planned(), claimed(3, 1)]), None);
+        assert_eq!(
+            next_claim(&[submitted(), planned(), claimed(3, 1)], 0),
+            None
+        );
     }
 
     #[test]
@@ -181,10 +202,47 @@ mod tests {
             Some("S1"),
             EventPayload::StageRetried { reason: "x".into() },
         );
-        let plan = next_claim(&[submitted(), planned(), claimed(3, 1), retried]);
+        let plan = next_claim(&[submitted(), planned(), claimed(3, 1), retried], 0);
         assert_eq!(
             plan.map(|p| (p.existing_stage_id, p.attempt)),
             Some((Some("S1".to_owned()), 2))
+        );
+    }
+
+    fn parked(seq: u64, until_ms: i64) -> Event {
+        ev(
+            seq,
+            Some("S1"),
+            EventPayload::JobParked {
+                until_ms,
+                reason: "quota".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_parked_stage_is_claimable_again_only_at_its_reset_and_keeps_its_attempt_number() {
+        let events = [submitted(), planned(), claimed(3, 1), parked(4, 1_000)];
+        assert_eq!(next_claim(&events, 999), None);
+        assert_eq!(
+            next_claim(&events, 1_000).map(|p| (p.existing_stage_id, p.attempt)),
+            Some((Some("S1".to_owned()), 1))
+        );
+    }
+
+    #[test]
+    fn a_claim_after_a_park_ends_the_park() {
+        let events = [
+            submitted(),
+            planned(),
+            claimed(3, 1),
+            parked(4, 1_000),
+            claimed(5, 1),
+        ];
+        assert_eq!(next_claim(&events, 0), None);
+        assert_eq!(
+            fold_stages(&events).last().map(|s| s.state),
+            Some(StageState::Running)
         );
     }
 
@@ -197,7 +255,7 @@ mod tests {
             EventPayload::StageFailed { reason: "x".into() },
         );
         assert_eq!(
-            next_claim(&[submitted(), planned(), claimed(3, 1), failed, done]),
+            next_claim(&[submitted(), planned(), claimed(3, 1), failed, done], 0),
             None
         );
     }

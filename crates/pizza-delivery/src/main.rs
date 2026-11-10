@@ -14,7 +14,8 @@ use std::process::ExitCode as ProcessExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use pizza_delivery_core::{
-    render_jobs, render_submitted, render_timeline, ExitCode, OutputMode, Request, Response,
+    render_jobs, render_quota, render_submitted, render_timeline, ExitCode, OutputMode, Request,
+    Response,
 };
 
 use client::{send, ClientError, Start};
@@ -49,6 +50,9 @@ enum Command {
     /// List jobs, or show one job's timeline (id prefix or @last)
     Status {
         job: Option<String>,
+        /// Show agent quota state instead of jobs
+        #[arg(long, conflicts_with = "job")]
+        quota: bool,
         /// Emit JSON lines even on a terminal
         #[arg(long)]
         json: bool,
@@ -86,6 +90,10 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
             print!("{}", render_timeline(&job, &stages, &events, mode));
             exit(ExitCode::Success)
         }
+        Ok(Response::Quota { agents, now_ms }) => {
+            print!("{}", render_quota(&agents, now_ms, mode));
+            exit(ExitCode::Success)
+        }
         Ok(Response::Stopped) => exit(ExitCode::Success),
         Ok(Response::Error { error }) => {
             eprintln!("error: {}", error.message);
@@ -115,7 +123,11 @@ fn run(cli: Cli) -> ProcessExitCode {
     };
     let tty = std::io::stdout().is_terminal();
     match cli.command {
-        Some(Command::Daemon) => match server::run(&config) {
+        Some(Command::Daemon) => match config
+            .load_routing()
+            .map_err(anyhow::Error::from)
+            .and_then(|c| server::run(&c))
+        {
             Ok(()) => exit(ExitCode::Success),
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -126,7 +138,14 @@ fn run(cli: Cli) -> ProcessExitCode {
             send(&config, &Request::Stop, Start::Never),
             OutputMode::resolve(false, tty),
         ),
-        Some(Command::Status { job, json }) => request(
+        Some(Command::Status {
+            quota: true, json, ..
+        }) => request(
+            &config,
+            Request::Quota,
+            OutputMode::resolve(json || cli.json, tty),
+        ),
+        Some(Command::Status { job, json, .. }) => request(
             &config,
             Request::Status { job },
             OutputMode::resolve(json || cli.json, tty),
