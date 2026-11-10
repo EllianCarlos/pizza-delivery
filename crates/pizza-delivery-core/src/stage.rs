@@ -81,7 +81,9 @@ pub fn next_claim(events: &[Event]) -> Option<ClaimPlan> {
     let finished = events.iter().any(|e| {
         matches!(
             e.payload,
-            EventPayload::JobCompleted {} | EventPayload::JobFailed { .. }
+            EventPayload::JobCompleted {}
+                | EventPayload::JobFailed { .. }
+                | EventPayload::JobNeedsHuman { .. }
         )
     });
     if finished {
@@ -200,6 +202,12 @@ mod tests {
             next_claim(&[submitted(), planned(), claimed(3, 1), failed, done]),
             None
         );
+    }
+
+    #[test]
+    fn a_job_parked_for_a_human_has_nothing_to_claim() {
+        let parked = ev(2, None, EventPayload::JobNeedsHuman { reason: "x".into() });
+        assert_eq!(next_claim(&[submitted(), parked]), None);
     }
 
     #[test]

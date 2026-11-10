@@ -89,7 +89,7 @@ fn artifacts_are_indexed_in_the_ledger_with_hashes_of_the_files_on_disk() -> Tes
         .iter()
         .map(|r| r.payload["kind"].as_str().unwrap_or_default().to_owned())
         .collect();
-    assert_eq!(kinds, vec!["raw-output", "handoff"]);
+    assert_eq!(kinds, vec!["context", "raw-output", "handoff"]);
     for row in artifacts {
         let path = row.payload["path"].as_str().ok_or("no path")?;
         let bytes = std::fs::read(h.data_dir().join(path))?;

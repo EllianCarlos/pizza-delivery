@@ -1,15 +1,22 @@
 use serde::{Deserialize, Serialize};
 
+use crate::context::SourceUse;
 use crate::event::Event;
 use crate::exit::ExitCode;
 use crate::id::JobId;
 use crate::job::JobState;
 use crate::stage::StageView;
+use crate::triage::Outcome;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
     Submit {
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+    },
+    Triage {
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
@@ -69,6 +76,10 @@ pub enum Response {
         job: JobView,
         stages: Vec<StageView>,
         events: Vec<Event>,
+    },
+    Triaged {
+        outcome: Outcome,
+        context_sources: Vec<SourceUse>,
     },
     Stopped,
     Error {

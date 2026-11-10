@@ -9,6 +9,10 @@ pub struct Config {
     pub agent_command: PathBuf,
     pub lease_ttl_ms: i64,
     pub stage_timeout_secs: u64,
+    pub projects_dir: PathBuf,
+    pub engram_db: PathBuf,
+    pub engram_command: PathBuf,
+    pub mnemon_command: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -37,6 +41,8 @@ impl Config {
         let agent_command = get("PIZZA_DELIVERY_AGENT")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("claude"));
+        let home = get("HOME").map(PathBuf::from).unwrap_or_default();
+        let path_or = |key: &str, default: PathBuf| get(key).map(PathBuf::from).unwrap_or(default);
         let number =
             |key: &str, default: u64| get(key).and_then(|v| v.parse().ok()).unwrap_or(default);
         Ok(Self {
@@ -45,6 +51,10 @@ impl Config {
             agent_command,
             lease_ttl_ms: number("PIZZA_DELIVERY_LEASE_TTL_MS", 30_000) as i64,
             stage_timeout_secs: number("PIZZA_DELIVERY_STAGE_TIMEOUT_SECS", 3600),
+            projects_dir: path_or("PIZZA_DELIVERY_PROJECTS_DIR", home.join("Projects")),
+            engram_db: path_or("PIZZA_DELIVERY_ENGRAM_DB", home.join(".engram/engram.db")),
+            engram_command: path_or("PIZZA_DELIVERY_ENGRAM", PathBuf::from("engram")),
+            mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
         })
     }
 

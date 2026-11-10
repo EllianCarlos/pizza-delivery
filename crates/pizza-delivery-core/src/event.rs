@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::JobId;
+use crate::triage::{PlannedStage, Triage};
 use crate::usage::Usage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +76,27 @@ pub enum EventPayload {
     LeaseReleased {
         holder: String,
     },
+    ContextRead {
+        source: String,
+        bytes: u64,
+    },
+    TriageCompleted {
+        triage: Triage,
+    },
+    FeedbackRecorded {
+        kind: String,
+        severity: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confidence: Option<u8>,
+    },
+    PlanAmended {
+        after: String,
+        stages: Vec<PlannedStage>,
+    },
+    JobNeedsHuman {
+        reason: String,
+    },
 }
 
 impl EventPayload {
@@ -95,6 +117,11 @@ impl EventPayload {
             EventPayload::StageRetried { .. } => "stage-retried",
             EventPayload::LeaseExpired { .. } => "lease-expired",
             EventPayload::LeaseReleased { .. } => "lease-released",
+            EventPayload::ContextRead { .. } => "context-read",
+            EventPayload::TriageCompleted { .. } => "triage-completed",
+            EventPayload::FeedbackRecorded { .. } => "feedback-recorded",
+            EventPayload::PlanAmended { .. } => "plan-amended",
+            EventPayload::JobNeedsHuman { .. } => "job-needs-human",
         }
     }
 }

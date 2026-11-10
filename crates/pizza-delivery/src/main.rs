@@ -6,6 +6,7 @@ mod handler;
 mod process;
 mod server;
 mod sqlite_store;
+mod triage;
 mod worker;
 
 use std::io::IsTerminal;
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 use std::process::ExitCode as ProcessExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use pizza_delivery_core::triage::render_triage;
 use pizza_delivery_core::{
     render_jobs, render_submitted, render_timeline, ExitCode, OutputMode, Request, Response,
 };
@@ -36,6 +38,10 @@ struct Cli {
     #[arg(long)]
     repo: Option<PathBuf>,
 
+    /// Run triage only: print the plan and context sources without enqueuing
+    #[arg(long)]
+    dry_run: bool,
+
     /// Emit JSON lines even on a terminal
     #[arg(long)]
     json: bool,
@@ -57,6 +63,14 @@ enum Command {
     Daemon,
     /// Ask the running daemon to exit
     Stop,
+}
+
+fn render_triaged(
+    outcome: &pizza_delivery_core::triage::Outcome,
+    sources: &[pizza_delivery_core::context::SourceUse],
+) -> String {
+    let value = serde_json::json!({"outcome": outcome, "context_sources": sources});
+    format!("{}\n", serde_json::to_string(&value).unwrap_or_default())
 }
 
 fn exit(code: ExitCode) -> ProcessExitCode {
@@ -85,6 +99,21 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
         }) => {
             print!("{}", render_timeline(&job, &stages, &events, mode));
             exit(ExitCode::Success)
+        }
+        Ok(Response::Triaged {
+            outcome,
+            context_sources,
+        }) => {
+            if mode == OutputMode::Json {
+                print!("{}", render_triaged(&outcome, &context_sources));
+            } else {
+                print!("{}", render_triage(&outcome, false));
+            }
+            exit(if outcome.triage.is_some() {
+                ExitCode::Success
+            } else {
+                ExitCode::NotFound
+            })
         }
         Ok(Response::Stopped) => exit(ExitCode::Success),
         Ok(Response::Error { error }) => {
@@ -132,19 +161,20 @@ fn run(cli: Cli) -> ProcessExitCode {
             OutputMode::resolve(json || cli.json, tty),
         ),
         None => match cli.prompt {
-            Some(prompt) => request(
-                &config,
-                Request::Submit {
-                    prompt,
-                    repo: cli.repo.map(|r| {
-                        std::fs::canonicalize(&r)
-                            .unwrap_or(r)
-                            .to_string_lossy()
-                            .into_owned()
-                    }),
-                },
-                OutputMode::resolve(cli.json, tty),
-            ),
+            Some(prompt) => {
+                let repo = cli.repo.map(|r| {
+                    std::fs::canonicalize(&r)
+                        .unwrap_or(r)
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                let req = if cli.dry_run {
+                    Request::Triage { prompt, repo }
+                } else {
+                    Request::Submit { prompt, repo }
+                };
+                request(&config, req, OutputMode::resolve(cli.json, tty))
+            }
             None => {
                 let _ = Cli::command().print_help();
                 exit(ExitCode::Usage)

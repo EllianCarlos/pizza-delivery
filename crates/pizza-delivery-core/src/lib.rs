@@ -1,5 +1,6 @@
 pub mod api;
 pub mod claude;
+pub mod context;
 pub mod event;
 pub mod exit;
 pub mod handoff;
@@ -9,6 +10,7 @@ pub mod prompt;
 pub mod render;
 pub mod stage;
 pub mod store;
+pub mod triage;
 pub mod usage;
 
 pub use api::{ApiError, ErrorKind, JobView, Request, Response};

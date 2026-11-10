@@ -93,7 +93,7 @@ fn project(tx: &Transaction<'_>, job: &Job) -> Result<(), StoreError> {
     tx.execute(
         "INSERT INTO jobs (id, state, prompt, repo, submitted_at_ms, last_seq)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(id) DO UPDATE SET state = excluded.state, last_seq = excluded.last_seq",
+         ON CONFLICT(id) DO UPDATE SET state = excluded.state, repo = excluded.repo, last_seq = excluded.last_seq",
         params![
             job.id.as_str(),
             job.state.as_str(),
@@ -113,6 +113,7 @@ fn parse_state(raw: &str) -> Result<JobState, StoreError> {
         "running" => Ok(JobState::Running),
         "completed" => Ok(JobState::Completed),
         "failed" => Ok(JobState::Failed),
+        "needs-human" => Ok(JobState::NeedsHuman),
         other => Err(backend(format!("unknown job state '{other}'"))),
     }
 }
