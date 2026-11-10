@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, EventPayload};
 use crate::id::JobId;
+use crate::schedule::Priority;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -12,6 +13,7 @@ pub enum JobState {
     Completed,
     Failed,
     NeedsHuman,
+    Cancelled,
 }
 
 impl JobState {
@@ -23,6 +25,7 @@ impl JobState {
             JobState::Completed => "completed",
             JobState::Failed => "failed",
             JobState::NeedsHuman => "needs-human",
+            JobState::Cancelled => "cancelled",
         }
     }
 }
@@ -33,12 +36,17 @@ pub struct Job {
     pub state: JobState,
     pub prompt: String,
     pub repo: Option<String>,
+    pub priority: Priority,
     pub submitted_at_ms: i64,
     pub last_seq: u64,
 }
 
 fn next_state(current: JobState, payload: &EventPayload) -> JobState {
+    if current == JobState::Cancelled {
+        return current;
+    }
     match payload {
+        EventPayload::JobCancelled {} => JobState::Cancelled,
         EventPayload::StageClaimed { .. } => JobState::Running,
         EventPayload::StageRetried { .. } => JobState::Queued,
         EventPayload::JobParked { .. } => JobState::WaitingForQuota,
@@ -58,11 +66,19 @@ fn repo_after(current: Option<String>, payload: &EventPayload) -> Option<String>
 
 pub fn apply(state: Option<Job>, event: &Event) -> Option<Job> {
     match (&event.payload, state) {
-        (EventPayload::JobSubmitted { prompt, repo }, None) => Some(Job {
+        (
+            EventPayload::JobSubmitted {
+                prompt,
+                repo,
+                priority,
+            },
+            None,
+        ) => Some(Job {
             id: event.job_id.clone(),
             state: JobState::Queued,
             prompt: prompt.clone(),
             repo: repo.clone(),
+            priority: *priority,
             submitted_at_ms: event.ts_ms,
             last_seq: event.seq,
         }),
@@ -96,8 +112,27 @@ mod tests {
             payload: EventPayload::JobSubmitted {
                 prompt: "do it".into(),
                 repo: Some("/r".into()),
+                priority: Priority::High,
             },
         }
+    }
+
+    #[test]
+    fn a_cancelled_job_stays_cancelled_whatever_the_dying_stage_reports() {
+        let history = [
+            submitted(1),
+            after(2, EventPayload::JobCancelled {}),
+            after(3, EventPayload::JobFailed { reason: "x".into() }),
+        ];
+        assert_eq!(fold(&history).map(|j| j.state), Some(JobState::Cancelled));
+    }
+
+    #[test]
+    fn the_priority_of_the_submission_is_kept_on_the_job() {
+        assert_eq!(
+            fold(&[submitted(1)]).map(|j| j.priority),
+            Some(Priority::High)
+        );
     }
 
     fn after(seq: u64, payload: EventPayload) -> Event {
@@ -117,6 +152,7 @@ mod tests {
                 state: JobState::Queued,
                 prompt: "do it".into(),
                 repo: Some("/r".into()),
+                priority: Priority::High,
                 submitted_at_ms: 42,
                 last_seq: 1
             })
@@ -148,7 +184,10 @@ mod tests {
             attempt: 1,
             lease_expires_ms: 9,
         };
-        let retried = EventPayload::StageRetried { reason: "r".into() };
+        let retried = EventPayload::StageRetried {
+            reason: "r".into(),
+            cause: Default::default(),
+        };
         let history = [
             submitted(1),
             after(2, claimed.clone()),

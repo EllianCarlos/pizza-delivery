@@ -1,8 +1,13 @@
 use std::process::{Command, Stdio};
 
 fn signal_group(signal: &str, pgid: u32) {
-    let _ = Command::new("kill")
-        .args(["-s", signal, "--", &format!("-{pgid}")])
+    let _ = Command::new("sh")
+        .args([
+            "-c",
+            "kill -s \"$0\" -- \"$1\"",
+            signal,
+            &format!("-{pgid}"),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -15,6 +20,19 @@ pub fn terminate_group(pgid: u32) {
 
 pub fn kill_group(pgid: u32) {
     signal_group("KILL", pgid);
+}
+
+pub fn stop_leased_group(pid: u32, start: u64, grace: std::time::Duration) {
+    if start_ticks(pid) != Some(start) {
+        return;
+    }
+    terminate_group(pid);
+    std::thread::spawn(move || {
+        std::thread::sleep(grace);
+        if start_ticks(pid) == Some(start) {
+            kill_group(pid);
+        }
+    });
 }
 
 pub fn parse_start_ticks(stat: &str) -> Option<u64> {

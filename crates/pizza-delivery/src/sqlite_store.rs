@@ -3,8 +3,8 @@ use std::path::Path;
 use pizza_delivery_core::event::{Actor, Event, EventPayload};
 use pizza_delivery_core::job::{apply, JobState};
 use pizza_delivery_core::{
-    next_claim, ClaimRequest, Claimed, ExpiredLease, Job, JobId, NewEvent, NewJob, Store,
-    StoreError,
+    next_claim, pick, Candidate, ClaimPlan, ClaimRequest, Claimed, ExpiredLease, Job, JobId,
+    NewEvent, NewJob, Priority, Slot, Store, StoreError,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     state           TEXT NOT NULL,
     prompt          TEXT NOT NULL,
     repo            TEXT,
+    priority        INTEGER NOT NULL DEFAULT 1,
     submitted_at_ms INTEGER NOT NULL,
     last_seq        INTEGER NOT NULL
 );
@@ -39,7 +40,8 @@ CREATE TABLE IF NOT EXISTS leases (
     holder     TEXT NOT NULL,
     expires_ms INTEGER NOT NULL,
     pid        INTEGER,
-    pid_start  INTEGER
+    pid_start  INTEGER,
+    agent      TEXT
 );
 ";
 
@@ -61,6 +63,12 @@ impl SqliteStore {
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(backend)?;
         conn.execute_batch(SCHEMA).map_err(backend)?;
+        for migration in [
+            "ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE leases ADD COLUMN agent TEXT",
+        ] {
+            let _ = conn.execute(migration, []);
+        }
         Ok(Self { conn })
     }
 }
@@ -91,14 +99,16 @@ fn event_row(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> {
 
 fn project(tx: &Transaction<'_>, job: &Job) -> Result<(), StoreError> {
     tx.execute(
-        "INSERT INTO jobs (id, state, prompt, repo, submitted_at_ms, last_seq)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(id) DO UPDATE SET state = excluded.state, repo = excluded.repo, last_seq = excluded.last_seq",
+        "INSERT INTO jobs (id, state, prompt, repo, priority, submitted_at_ms, last_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET state = excluded.state, repo = excluded.repo,
+             priority = excluded.priority, last_seq = excluded.last_seq",
         params![
             job.id.as_str(),
             job.state.as_str(),
             job.prompt,
             job.repo,
+            job.priority.rank(),
             job.submitted_at_ms,
             job.last_seq as i64
         ],
@@ -115,6 +125,7 @@ fn parse_state(raw: &str) -> Result<JobState, StoreError> {
         "completed" => Ok(JobState::Completed),
         "failed" => Ok(JobState::Failed),
         "needs-human" => Ok(JobState::NeedsHuman),
+        "cancelled" => Ok(JobState::Cancelled),
         other => Err(backend(format!("unknown job state '{other}'"))),
     }
 }
@@ -128,9 +139,9 @@ fn parse_actor(raw: &str) -> Result<Actor, StoreError> {
     }
 }
 
-type JobRow = (String, String, String, Option<String>, i64, i64);
+type JobRow = (String, String, String, Option<String>, i64, i64, i64);
 
-const JOB_COLUMNS: &str = "id, state, prompt, repo, submitted_at_ms, last_seq";
+const JOB_COLUMNS: &str = "id, state, prompt, repo, submitted_at_ms, last_seq, priority";
 
 fn map_job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
     Ok((
@@ -140,16 +151,18 @@ fn map_job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         r.get(3)?,
         r.get(4)?,
         r.get(5)?,
+        r.get(6)?,
     ))
 }
 
 fn job_from_row(row: JobRow) -> Result<Job, StoreError> {
-    let (id, state, prompt, repo, submitted_at_ms, last_seq) = row;
+    let (id, state, prompt, repo, submitted_at_ms, last_seq, priority) = row;
     Ok(Job {
         id: JobId::new(id),
         state: parse_state(&state)?,
         prompt,
         repo,
+        priority: Priority::from_rank(priority),
         submitted_at_ms,
         last_seq: last_seq as u64,
     })
@@ -216,6 +229,34 @@ fn timeline_in(conn: &Connection, job: &JobId) -> Result<Vec<Event>, StoreError>
     events_where(conn, "job_id = ?1", &[&job.as_str()])
 }
 
+fn lease_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExpiredLease> {
+    Ok(ExpiredLease {
+        job_id: JobId::new(r.get::<_, String>(0)?),
+        stage_id: r.get(1)?,
+        holder: r.get(2)?,
+        pid: r.get::<_, Option<i64>>(3)?.map(|p| p as u32),
+        pid_start: r.get::<_, Option<i64>>(4)?.map(|p| p as u64),
+    })
+}
+
+fn running_slots(conn: &Connection) -> Result<Vec<Slot>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(j.repo, ''), COALESCE(l.agent, '') FROM leases l
+             JOIN jobs j ON j.id = l.job_id",
+        )
+        .map_err(backend)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(Slot {
+                repo: r.get(0)?,
+                agent: r.get(1)?,
+            })
+        })
+        .map_err(backend)?;
+    rows.map(|row| row.map_err(backend)).collect()
+}
+
 fn lease_effects(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> {
     let Some(stage_id) = event.stage_id.as_deref() else {
         return Ok(());
@@ -277,6 +318,7 @@ impl Store for SqliteStore {
             payload: EventPayload::JobSubmitted {
                 prompt: new.prompt,
                 repo: new.repo,
+                priority: new.priority,
             },
         };
         let tx = self.conn.transaction().map_err(backend)?;
@@ -316,14 +358,10 @@ impl Store for SqliteStore {
     }
 
     fn claim_stage(&mut self, request: ClaimRequest) -> Result<Option<Claimed>, StoreError> {
-        let candidates: Vec<Job> = self
-            .list_jobs()?
-            .into_iter()
-            .filter(|j| {
-                j.repo.is_some() && matches!(j.state, JobState::Queued | JobState::WaitingForQuota)
-            })
-            .collect();
-        for job in candidates {
+        let mut plans: Vec<(Job, ClaimPlan)> = Vec::new();
+        for job in self.list_jobs()?.into_iter().filter(|j| {
+            j.repo.is_some() && matches!(j.state, JobState::Queued | JobState::WaitingForQuota)
+        }) {
             let events = timeline_in(&self.conn, &job.id)?;
             if request.require_triage
                 && !events
@@ -332,56 +370,76 @@ impl Store for SqliteStore {
             {
                 continue;
             }
-            let Some(plan) = next_claim(&events, request.now_ms) else {
-                continue;
-            };
-            let [planned_id, claimed_id] = request.event_ids.clone();
-            let stage_id = plan
-                .existing_stage_id
-                .clone()
-                .unwrap_or_else(|| request.stage_id.clone());
-            let tx = self.conn.transaction().map_err(backend)?;
-            if plan.existing_stage_id.is_none() {
-                append_in(
-                    &tx,
-                    NewEvent {
-                        id: planned_id,
-                        job_id: job.id.clone(),
-                        stage_id: Some(stage_id.clone()),
-                        ts_ms: request.now_ms,
-                        actor: Actor::Daemon,
-                        payload: EventPayload::StagePlanned {
-                            n: plan.n,
-                            name: plan.name.clone(),
-                        },
-                    },
-                )?;
+            if let Some(plan) = next_claim(&events, request.now_ms) {
+                plans.push((job, plan));
             }
-            let (_, job) = append_in(
+        }
+        let candidates: Vec<Candidate> = plans
+            .iter()
+            .map(|(job, _)| Candidate {
+                job_id: job.id.clone(),
+                priority: job.priority,
+                submitted_at_ms: job.submitted_at_ms,
+                repo: job.repo.clone().unwrap_or_default(),
+            })
+            .collect();
+        let running = running_slots(&self.conn)?;
+        let Some(chosen) = pick(&candidates, &running, &request.agent, request.caps) else {
+            return Ok(None);
+        };
+        let Some((job, plan)) = plans.into_iter().nth(chosen) else {
+            return Ok(None);
+        };
+        let [planned_id, claimed_id] = request.event_ids.clone();
+        let stage_id = plan
+            .existing_stage_id
+            .clone()
+            .unwrap_or_else(|| request.stage_id.clone());
+        let tx = self.conn.transaction().map_err(backend)?;
+        if plan.existing_stage_id.is_none() {
+            append_in(
                 &tx,
                 NewEvent {
-                    id: claimed_id,
+                    id: planned_id,
                     job_id: job.id.clone(),
                     stage_id: Some(stage_id.clone()),
                     ts_ms: request.now_ms,
                     actor: Actor::Daemon,
-                    payload: EventPayload::StageClaimed {
-                        holder: request.holder.clone(),
-                        attempt: plan.attempt,
-                        lease_expires_ms: request.now_ms + request.ttl_ms,
+                    payload: EventPayload::StagePlanned {
+                        n: plan.n,
+                        name: plan.name.clone(),
                     },
                 },
             )?;
-            tx.commit().map_err(backend)?;
-            return Ok(Some(Claimed {
-                job,
-                stage_id,
-                n: plan.n,
-                name: plan.name,
-                attempt: plan.attempt,
-            }));
         }
-        Ok(None)
+        let (_, job) = append_in(
+            &tx,
+            NewEvent {
+                id: claimed_id,
+                job_id: job.id.clone(),
+                stage_id: Some(stage_id.clone()),
+                ts_ms: request.now_ms,
+                actor: Actor::Daemon,
+                payload: EventPayload::StageClaimed {
+                    holder: request.holder.clone(),
+                    attempt: plan.attempt,
+                    lease_expires_ms: request.now_ms + request.ttl_ms,
+                },
+            },
+        )?;
+        tx.execute(
+            "UPDATE leases SET agent = ?2 WHERE stage_id = ?1",
+            params![stage_id, request.agent],
+        )
+        .map_err(backend)?;
+        tx.commit().map_err(backend)?;
+        Ok(Some(Claimed {
+            job,
+            stage_id,
+            n: plan.n,
+            name: plan.name,
+            attempt: plan.attempt,
+        }))
     }
 
     fn heartbeat(&mut self, stage_id: &str, expires_ms: i64) -> Result<(), StoreError> {
@@ -409,6 +467,18 @@ impl Store for SqliteStore {
             .map_err(backend)
     }
 
+    fn lease_of_job(&self, job: &JobId) -> Result<Option<ExpiredLease>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT job_id, stage_id, holder, pid, pid_start FROM leases
+                 WHERE job_id = ?1 LIMIT 1",
+                params![job.as_str()],
+                lease_row,
+            )
+            .optional()
+            .map_err(backend)
+    }
+
     fn expired_leases(&self, now_ms: i64) -> Result<Vec<ExpiredLease>, StoreError> {
         let mut stmt = self
             .conn
@@ -418,15 +488,7 @@ impl Store for SqliteStore {
             )
             .map_err(backend)?;
         let rows = stmt
-            .query_map(params![now_ms], |r| {
-                Ok(ExpiredLease {
-                    job_id: JobId::new(r.get::<_, String>(0)?),
-                    stage_id: r.get(1)?,
-                    holder: r.get(2)?,
-                    pid: r.get::<_, Option<i64>>(3)?.map(|p| p as u32),
-                    pid_start: r.get::<_, Option<i64>>(4)?.map(|p| p as u64),
-                })
-            })
+            .query_map(params![now_ms], lease_row)
             .map_err(backend)?;
         rows.map(|row| row.map_err(backend)).collect()
     }
@@ -448,6 +510,7 @@ mod tests {
             event_id: format!("E-{id}"),
             prompt: "p".into(),
             repo: repo.map(str::to_owned),
+            priority: Priority::Normal,
             submitted_at_ms: 7,
         }
     }
@@ -460,6 +523,8 @@ mod tests {
             stage_id: format!("S-{tag}"),
             event_ids: [format!("EP-{tag}"), format!("EC-{tag}")],
             require_triage: false,
+            agent: "claude".into(),
+            caps: pizza_delivery_core::Caps::default(),
         }
     }
 
@@ -468,6 +533,125 @@ mod tests {
             .iter()
             .map(|e| e.payload.kind())
             .collect())
+    }
+
+    fn job_with(id: &str, repo: &str, priority: Priority, at: i64) -> NewJob {
+        NewJob {
+            repo: Some(repo.to_owned()),
+            priority,
+            submitted_at_ms: at,
+            ..new_job(id, None)
+        }
+    }
+
+    fn claim_with(tag: &str, caps: pizza_delivery_core::Caps) -> ClaimRequest {
+        ClaimRequest {
+            caps,
+            ..claim_request(tag, 100)
+        }
+    }
+
+    #[test]
+    fn the_highest_priority_job_is_claimed_first_then_the_earliest(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_d, mut s) = store()?;
+        s.enqueue_job(job_with("J1", "/a", Priority::Normal, 1))?;
+        s.enqueue_job(job_with("J2", "/b", Priority::High, 9))?;
+        s.enqueue_job(job_with("J3", "/c", Priority::High, 5))?;
+        let wide = pizza_delivery_core::Caps {
+            global: 9,
+            per_agent: 9,
+            per_repo: 9,
+        };
+        let first = s.claim_stage(claim_with("a", wide))?.map(|c| c.job.id);
+        let second = s.claim_stage(claim_with("b", wide))?.map(|c| c.job.id);
+        let third = s.claim_stage(claim_with("c", wide))?.map(|c| c.job.id);
+        assert_eq!(
+            [first, second, third],
+            [
+                Some(JobId::new("J3")),
+                Some(JobId::new("J2")),
+                Some(JobId::new("J1"))
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_global_cap_stops_further_claims_until_a_lease_is_released(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_d, mut s) = store()?;
+        for (i, repo) in ["/a", "/b", "/c"].into_iter().enumerate() {
+            s.enqueue_job(job_with(&format!("J{i}"), repo, Priority::Normal, i as i64))?;
+        }
+        let caps = pizza_delivery_core::Caps {
+            global: 2,
+            per_agent: 9,
+            per_repo: 9,
+        };
+        assert!(s.claim_stage(claim_with("a", caps))?.is_some());
+        let second = s.claim_stage(claim_with("b", caps))?;
+        assert!(second.is_some());
+        assert!(s.claim_stage(claim_with("c", caps))?.is_none());
+        let released = NewEvent {
+            id: "ER".into(),
+            job_id: JobId::new("J0"),
+            stage_id: Some("S-a".into()),
+            ts_ms: 200,
+            actor: Actor::Daemon,
+            payload: EventPayload::LeaseReleased {
+                holder: "w1".into(),
+            },
+        };
+        s.append_event(released)?;
+        assert!(s.claim_stage(claim_with("d", caps))?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn the_per_repo_cap_lets_other_repos_through() -> Result<(), Box<dyn std::error::Error>> {
+        let (_d, mut s) = store()?;
+        s.enqueue_job(job_with("J1", "/same", Priority::High, 1))?;
+        s.enqueue_job(job_with("J2", "/same", Priority::High, 2))?;
+        s.enqueue_job(job_with("J3", "/other", Priority::Low, 3))?;
+        let caps = pizza_delivery_core::Caps {
+            global: 9,
+            per_agent: 9,
+            per_repo: 1,
+        };
+        let ids: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|t| {
+                s.claim_stage(claim_with(t, caps))
+                    .map(|c| c.map(|c| c.job.id))
+            })
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            ids,
+            vec![Some(JobId::new("J1")), Some(JobId::new("J3")), None]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_per_agent_cap_counts_only_that_agents_running_stages(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_d, mut s) = store()?;
+        s.enqueue_job(job_with("J1", "/a", Priority::Normal, 1))?;
+        s.enqueue_job(job_with("J2", "/b", Priority::Normal, 2))?;
+        let caps = pizza_delivery_core::Caps {
+            global: 9,
+            per_agent: 1,
+            per_repo: 9,
+        };
+        assert!(s.claim_stage(claim_with("a", caps))?.is_some());
+        assert!(s.claim_stage(claim_with("b", caps))?.is_none());
+        let other = ClaimRequest {
+            agent: "codex".into(),
+            ..claim_with("c", caps)
+        };
+        assert!(s.claim_stage(other)?.is_some());
+        Ok(())
     }
 
     #[test]
@@ -550,6 +734,7 @@ mod tests {
             "E2",
             EventPayload::StageRetried {
                 reason: "lost".into(),
+                cause: Default::default(),
             },
         ))?;
 

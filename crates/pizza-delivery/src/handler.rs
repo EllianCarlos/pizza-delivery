@@ -1,7 +1,7 @@
 use pizza_delivery_core::api::{ApiError, ErrorKind, JobView};
 use pizza_delivery_core::{
-    fold_quota, fold_stages, quota_views, resolve, short_id, Job, JobId, NewJob, Request,
-    ResolveError, Response, Store, StoreError,
+    fold_quota, fold_stages, quota_views, resolve, short_id, Actor, EventPayload, Job, JobId,
+    JobState, NewEvent, NewJob, Request, ResolveError, Response, Store, StoreError,
 };
 
 pub trait Env: Send + Sync {
@@ -57,17 +57,62 @@ fn view(job: &Job, all: &[JobId]) -> JobView {
     }
 }
 
+fn cancel(reference: &str, store: &mut dyn Store, env: &dyn Env) -> Response {
+    let jobs = match store.list_jobs() {
+        Ok(jobs) => jobs,
+        Err(e) => return internal(e),
+    };
+    let all: Vec<JobId> = jobs.iter().map(|j| j.id.clone()).collect();
+    let id = match resolve(reference, &all) {
+        Ok(id) => id,
+        Err(e) => return resolve_error(e),
+    };
+    let Some(job) = jobs.iter().find(|j| j.id == id) else {
+        return error(ErrorKind::NotFound, "job vanished", vec![]);
+    };
+    if matches!(
+        job.state,
+        JobState::Completed | JobState::Failed | JobState::Cancelled
+    ) {
+        return error(
+            ErrorKind::Usage,
+            format!("job is already {}", job.state.as_str()),
+            vec![],
+        );
+    }
+    let event = NewEvent {
+        id: env.new_ulid(),
+        job_id: id.clone(),
+        stage_id: None,
+        ts_ms: env.now_ms(),
+        actor: Actor::Human,
+        payload: EventPayload::JobCancelled {},
+    };
+    match store.append_event(event) {
+        Ok(_) => Response::Cancelled {
+            short_id: short_id(&id, &all),
+            id,
+        },
+        Err(e) => internal(e),
+    }
+}
+
 pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Response {
     match request {
         Request::Submit { prompt, .. } if prompt.trim().is_empty() => {
             error(ErrorKind::Usage, "prompt must not be empty", vec![])
         }
-        Request::Submit { prompt, repo } => {
+        Request::Submit {
+            prompt,
+            repo,
+            priority,
+        } => {
             let new = NewJob {
                 id: JobId::new(env.new_ulid()),
                 event_id: env.new_ulid(),
                 prompt,
                 repo,
+                priority: priority.unwrap_or_default(),
                 submitted_at_ms: env.now_ms(),
             };
             let result = store.enqueue_job(new).and_then(|job| {
@@ -129,6 +174,7 @@ pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Respons
             "triage requests are served by the daemon",
             vec![],
         ),
+        Request::Cancel { job: reference } => cancel(&reference, store, env),
         Request::Stop => Response::Stopped,
     }
 }

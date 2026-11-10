@@ -17,8 +17,8 @@ use std::process::ExitCode as ProcessExitCode;
 use clap::{CommandFactory, Parser, Subcommand};
 use pizza_delivery_core::triage::render_triage;
 use pizza_delivery_core::{
-    render_jobs, render_quota, render_submitted, render_timeline, ExitCode, OutputMode, Request,
-    Response,
+    render_jobs, render_quota, render_submitted, render_timeline, ExitCode, OutputMode, Priority,
+    Request, Response,
 };
 
 use client::{send, ClientError, Start};
@@ -48,8 +48,29 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
+    /// Queue priority of the new job
+    #[arg(long, value_enum)]
+    priority: Option<PriorityArg>,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum PriorityArg {
+    Low,
+    Normal,
+    High,
+}
+
+impl From<PriorityArg> for Priority {
+    fn from(arg: PriorityArg) -> Self {
+        match arg {
+            PriorityArg::Low => Priority::Low,
+            PriorityArg::Normal => Priority::Normal,
+            PriorityArg::High => Priority::High,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -64,6 +85,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Cancel a job, terminate its running stage and keep its worktree
+    Cancel { job: String },
     /// Run the daemon in the foreground (socket-activated or started on demand)
     Daemon,
     /// Ask the running daemon to exit
@@ -124,6 +147,10 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
                 ExitCode::NotFound
             })
         }
+        Ok(Response::Cancelled { id, short_id }) => {
+            print!("{}", render_submitted(&id, &short_id, mode));
+            exit(ExitCode::Success)
+        }
         Ok(Response::Stopped) => exit(ExitCode::Success),
         Ok(Response::Error { error }) => {
             eprintln!("error: {}", error.message);
@@ -168,6 +195,11 @@ fn run(cli: Cli) -> ProcessExitCode {
             send(&config, &Request::Stop, Start::Never),
             OutputMode::resolve(false, tty),
         ),
+        Some(Command::Cancel { job }) => request(
+            &config,
+            Request::Cancel { job },
+            OutputMode::resolve(cli.json, tty),
+        ),
         Some(Command::Status {
             quota: true, json, ..
         }) => request(
@@ -191,7 +223,11 @@ fn run(cli: Cli) -> ProcessExitCode {
                 let req = if cli.dry_run {
                     Request::Triage { prompt, repo }
                 } else {
-                    Request::Submit { prompt, repo }
+                    Request::Submit {
+                        prompt,
+                        repo,
+                        priority: cli.priority.map(Into::into),
+                    }
                 };
                 request(&config, req, OutputMode::resolve(cli.json, tty))
             }

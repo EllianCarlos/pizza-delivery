@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::event::{Actor, Event, EventPayload};
 use crate::id::JobId;
 use crate::job::Job;
+use crate::schedule::{Caps, Priority};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJob {
@@ -10,6 +11,7 @@ pub struct NewJob {
     pub event_id: String,
     pub prompt: String,
     pub repo: Option<String>,
+    pub priority: Priority,
     pub submitted_at_ms: i64,
 }
 
@@ -31,6 +33,8 @@ pub struct ClaimRequest {
     pub stage_id: String,
     pub event_ids: [String; 2],
     pub require_triage: bool,
+    pub agent: String,
+    pub caps: Caps,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,4 +72,5 @@ pub trait Store: Send {
     fn set_lease_process(&mut self, stage_id: &str, pid: u32, start: u64)
         -> Result<(), StoreError>;
     fn expired_leases(&self, now_ms: i64) -> Result<Vec<ExpiredLease>, StoreError>;
+    fn lease_of_job(&self, job: &JobId) -> Result<Option<ExpiredLease>, StoreError>;
 }

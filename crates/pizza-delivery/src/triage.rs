@@ -323,6 +323,7 @@ impl ProjectIndex for SystemIndex {
 pub struct AgentTieBreaker<'a> {
     pub agent: &'a dyn Agent,
     pub cwd: PathBuf,
+    pub grace: Duration,
 }
 
 impl TieBreaker for AgentTieBreaker<'_> {
@@ -333,6 +334,7 @@ impl TieBreaker for AgentTieBreaker<'_> {
             cwd: self.cwd.clone(),
             handoff_path: self.cwd.join("tie-break-handoff.md"),
             timeout: TIE_BREAK_TIMEOUT,
+            grace: self.grace,
             sandbox: SandboxProfile::default(),
             egress_log: self.cwd.join("tie-break-egress.log"),
         };
@@ -430,7 +432,7 @@ mod tests {
     use super::*;
     use crate::sqlite_store::SqliteStore;
     use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
-    use pizza_delivery_core::NewJob;
+    use pizza_delivery_core::{NewJob, Priority};
 
     struct FakeEnv {
         next: AtomicI64,
@@ -494,6 +496,7 @@ mod tests {
                 event_id: "E0".into(),
                 prompt: prompt.into(),
                 repo: repo.map(str::to_owned),
+                priority: Priority::Normal,
                 submitted_at_ms: 0,
             })?;
             Ok(Self {

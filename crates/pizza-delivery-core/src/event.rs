@@ -3,8 +3,14 @@ use serde::{Deserialize, Serialize};
 use crate::budget::{SizeTier, StageEstimate};
 use crate::id::JobId;
 use crate::quota::QuotaStatus;
+use crate::resilience::RetryCause;
+use crate::schedule::Priority;
 use crate::triage::{PlannedStage, Triage};
 use crate::usage::Usage;
+
+fn is_normal(priority: &Priority) -> bool {
+    *priority == Priority::Normal
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -31,8 +37,11 @@ pub enum EventPayload {
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
+        #[serde(default, skip_serializing_if = "is_normal")]
+        priority: Priority,
     },
     JobCompleted {},
+    JobCancelled {},
     JobFailed {
         reason: String,
     },
@@ -103,6 +112,8 @@ pub enum EventPayload {
     },
     StageRetried {
         reason: String,
+        #[serde(default)]
+        cause: RetryCause,
     },
     LeaseExpired {
         holder: String,
@@ -151,6 +162,7 @@ impl EventPayload {
             EventPayload::JobSubmitted { .. } => "job-submitted",
             EventPayload::JobCompleted { .. } => "job-completed",
             EventPayload::JobFailed { .. } => "job-failed",
+            EventPayload::JobCancelled { .. } => "job-cancelled",
             EventPayload::StagePlanned { .. } => "stage-planned",
             EventPayload::StageClaimed { .. } => "stage-claimed",
             EventPayload::StageStarted { .. } => "stage-started",
@@ -200,6 +212,7 @@ mod tests {
         let p = EventPayload::JobSubmitted {
             prompt: "x".into(),
             repo: None,
+            priority: Priority::Normal,
         };
         assert_eq!(p.kind(), "job-submitted");
         assert_eq!(

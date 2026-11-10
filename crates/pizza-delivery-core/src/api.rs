@@ -6,6 +6,7 @@ use crate::exit::ExitCode;
 use crate::id::JobId;
 use crate::job::JobState;
 use crate::quota::QuotaView;
+use crate::schedule::Priority;
 use crate::stage::StageView;
 use crate::triage::Outcome;
 
@@ -16,6 +17,11 @@ pub enum Request {
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<Priority>,
+    },
+    Cancel {
+        job: String,
     },
     Triage {
         prompt: String,
@@ -86,6 +92,10 @@ pub enum Response {
     Triaged {
         outcome: Outcome,
         context_sources: Vec<SourceUse>,
+    },
+    Cancelled {
+        id: JobId,
+        short_id: String,
     },
     Stopped,
     Error {

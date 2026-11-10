@@ -12,11 +12,11 @@ pub fn render_stage_prompt(job_id: &str, stage: &str, task: &str, handoff_path: 
     )
 }
 
-pub fn with_interruption_note(prompt: &str, interrupted: Option<&str>) -> String {
-    match interrupted {
+pub fn with_interruption_note(prompt: &str, note: Option<&str>) -> String {
+    match note {
         None => prompt.to_owned(),
-        Some(agent) => format!(
-            "{prompt}\n\nInterruption note: the previous run of this stage ({agent}) was interrupted by quota exhaustion before it finished. Its edits may already be present in the working tree. Restart the stage from its input above, check what exists, and finish the work."
+        Some(note) => format!(
+            "{prompt}\n\nA previous attempt of this stage was interrupted. Read this before continuing:\n\n{note}"
         ),
     }
 }
@@ -26,11 +26,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_interruption_note_names_the_agent_and_is_absent_without_one() {
-        assert_eq!(with_interruption_note("p", None), "p");
-        let noted = with_interruption_note("p", Some("claude"));
-        assert!(noted.starts_with("p\n\nInterruption note:"));
-        assert!(noted.contains("(claude)"));
+    fn an_interruption_note_is_absent_without_one_and_appended_with_one() {
+        assert_eq!(with_interruption_note("base", None), "base");
+        let prompt = with_interruption_note("base", Some("# Interruption note"));
+        assert!(prompt.starts_with("base"));
+        assert!(prompt.contains("A previous attempt of this stage was interrupted"));
+        assert!(prompt.ends_with("# Interruption note"));
     }
 
     #[test]

@@ -183,7 +183,7 @@ impl Harness {
             )
             .env("PIZZA_DELIVERY_ENGRAM", self.root.path().join("no-engram"))
             .env("PIZZA_DELIVERY_MNEMON", self.root.path().join("no-mnemon"))
-            .envs(self.env.iter().map(|(k, v)| (k, v)))
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .env_remove("NO_COLOR")
             .stdin(Stdio::null())
             .output()?;
@@ -232,7 +232,10 @@ impl Harness {
         loop {
             let cli = self.run(&["status", id])?;
             let job = cli.json_lines()?.into_iter().next().ok_or("no status")?;
-            if matches!(job["state"].as_str(), Some("completed" | "failed")) {
+            if matches!(
+                job["state"].as_str(),
+                Some("completed" | "failed" | "cancelled")
+            ) {
                 return Ok(job);
             }
             if Instant::now() > deadline {

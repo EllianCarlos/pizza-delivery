@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
 use pizza_delivery_core::routing::{ConfigError as RoutingError, RoutingConfig};
+use pizza_delivery_core::{Caps, DEFAULT_RETENTION_MS};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,7 +12,11 @@ pub struct Config {
     pub agent_command: PathBuf,
     pub trust_path: PathBuf,
     pub lease_ttl_ms: i64,
-    pub stage_timeout_secs: u64,
+    pub stage_timeout_secs: Option<u64>,
+    pub kill_grace_ms: u64,
+    pub shutdown_grace_ms: u64,
+    pub retention_ms: i64,
+    pub caps: Caps,
     pub routing: RoutingConfig,
     pub routing_file: Option<RoutingFile>,
     pub projects_dir: PathBuf,
@@ -86,7 +91,16 @@ impl Config {
             agent_command,
             trust_path,
             lease_ttl_ms: number("PIZZA_DELIVERY_LEASE_TTL_MS", 30_000) as i64,
-            stage_timeout_secs: number("PIZZA_DELIVERY_STAGE_TIMEOUT_SECS", 3600),
+            stage_timeout_secs: get("PIZZA_DELIVERY_STAGE_TIMEOUT_SECS")
+                .and_then(|v| v.parse().ok()),
+            kill_grace_ms: number("PIZZA_DELIVERY_KILL_GRACE_MS", 5_000),
+            shutdown_grace_ms: number("PIZZA_DELIVERY_SHUTDOWN_GRACE_MS", 30_000),
+            retention_ms: number("PIZZA_DELIVERY_RETENTION_MS", DEFAULT_RETENTION_MS as u64) as i64,
+            caps: Caps {
+                global: number("PIZZA_DELIVERY_MAX_RUNNING", 2) as usize,
+                per_agent: number("PIZZA_DELIVERY_MAX_PER_AGENT", 2) as usize,
+                per_repo: number("PIZZA_DELIVERY_MAX_PER_REPO", 2) as usize,
+            },
             projects_dir: path_or("PIZZA_DELIVERY_PROJECTS_DIR", home.join("Projects")),
             engram_db: path_or("PIZZA_DELIVERY_ENGRAM_DB", home.join(".engram/engram.db")),
             engram_command: path_or("PIZZA_DELIVERY_ENGRAM", PathBuf::from("engram")),
@@ -232,6 +246,39 @@ mod tests {
         .load_routing()?;
         assert_eq!(cfg.routing, RoutingConfig::builtin("claude"));
         Ok(())
+    }
+
+    #[test]
+    fn resilience_limits_have_design_defaults_and_are_overridable() {
+        let defaults = Config::from_lookup(lookup(&[("HOME", "/h")]));
+        let custom = Config::from_lookup(lookup(&[
+            ("HOME", "/h"),
+            ("PIZZA_DELIVERY_STAGE_TIMEOUT_SECS", "7"),
+            ("PIZZA_DELIVERY_MAX_RUNNING", "5"),
+            ("PIZZA_DELIVERY_MAX_PER_REPO", "1"),
+        ]));
+        assert_eq!(
+            defaults.map(|c| (c.stage_timeout_secs, c.caps)).ok(),
+            Some((
+                None,
+                Caps {
+                    global: 2,
+                    per_agent: 2,
+                    per_repo: 2
+                }
+            ))
+        );
+        assert_eq!(
+            custom.map(|c| (c.stage_timeout_secs, c.caps)).ok(),
+            Some((
+                Some(7),
+                Caps {
+                    global: 5,
+                    per_agent: 2,
+                    per_repo: 1
+                }
+            ))
+        );
     }
 
     #[test]
