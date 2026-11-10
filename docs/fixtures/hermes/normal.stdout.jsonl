@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","model":"gemini-3.6-flash","session_id":"20261109_224624_ba3816","timestamp":1794275186047}
+{"type":"result","session_id":"20261109_224624_ba3816","exit_code":1,"text":"","tokens":{"input":0,"output":0,"total":0,"cache_read":0,"cache_write":0},"duration_ms":28,"error":"credentials or agent init failed","timestamp":1794275186076}
