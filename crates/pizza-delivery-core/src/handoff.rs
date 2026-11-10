@@ -64,6 +64,10 @@ pub(crate) fn sections(body: &str) -> Vec<(String, String)> {
     })
 }
 
+pub(crate) fn body(text: &str) -> Option<&str> {
+    split_frontmatter(text).map(|(_, body)| body)
+}
+
 pub fn validate(text: &str) -> Result<Handoff, HandoffError> {
     let (front, body) = split_frontmatter(text).ok_or(HandoffError::MissingFrontmatter)?;
     let job = field(front, "job")?;
