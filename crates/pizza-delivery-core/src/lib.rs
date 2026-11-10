@@ -1,4 +1,5 @@
 pub mod api;
+pub mod budget;
 pub mod claude;
 pub mod context;
 pub mod event;

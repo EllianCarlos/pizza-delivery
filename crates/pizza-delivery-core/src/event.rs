@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::budget::{SizeTier, StageEstimate};
 use crate::id::JobId;
 use crate::triage::{PlannedStage, Triage};
 use crate::usage::Usage;
@@ -110,6 +111,18 @@ pub enum EventPayload {
     JobNeedsHuman {
         reason: String,
     },
+    BudgetEstimated {
+        stages: Vec<StageEstimate>,
+    },
+    StageBudgetRecorded {
+        stage: String,
+        tier: SizeTier,
+        agent: String,
+        estimate_tokens: u64,
+        estimate_wall_ms: u64,
+        actual_tokens: Option<u64>,
+        actual_wall_ms: Option<u64>,
+    },
 }
 
 impl EventPayload {
@@ -137,6 +150,8 @@ impl EventPayload {
             EventPayload::FeedbackRecorded { .. } => "feedback-recorded",
             EventPayload::PlanAmended { .. } => "plan-amended",
             EventPayload::JobNeedsHuman { .. } => "job-needs-human",
+            EventPayload::BudgetEstimated { .. } => "budget-estimated",
+            EventPayload::StageBudgetRecorded { .. } => "stage-budget-recorded",
         }
     }
 }

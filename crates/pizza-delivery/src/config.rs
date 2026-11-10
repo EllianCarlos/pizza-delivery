@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +15,7 @@ pub struct Config {
     pub engram_db: PathBuf,
     pub engram_command: PathBuf,
     pub mnemon_command: PathBuf,
+    pub budget_cap_tokens: u64,
 }
 
 #[derive(Debug, Error)]
@@ -60,6 +62,7 @@ impl Config {
             engram_db: path_or("PIZZA_DELIVERY_ENGRAM_DB", home.join(".engram/engram.db")),
             engram_command: path_or("PIZZA_DELIVERY_ENGRAM", PathBuf::from("engram")),
             mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
+            budget_cap_tokens: number("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", DEFAULT_CAP_TOKENS),
         })
     }
 

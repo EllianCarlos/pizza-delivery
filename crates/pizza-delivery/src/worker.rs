@@ -4,6 +4,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use pizza_delivery_core::budget::{
+    actual_overrun, estimate_for, estimate_stage, tier_for, Defaults,
+};
 use pizza_delivery_core::claude::{parse_stream, Outcome};
 use pizza_delivery_core::event::{Actor, EventPayload};
 use pizza_delivery_core::handoff::validate;
@@ -26,6 +29,7 @@ pub struct WorkerConfig {
     pub heartbeat_ms: u64,
     pub timeout: Duration,
     pub trust: TrustConfig,
+    pub budget_cap_tokens: u64,
 }
 
 pub struct Worker<'a> {
@@ -38,6 +42,7 @@ pub struct Worker<'a> {
 
 enum Verdict {
     Succeeded,
+    Park(String),
     Retry(String),
     Fail(String),
 }
@@ -134,6 +139,16 @@ impl Worker<'_> {
             Verdict::Succeeded => {
                 self.append(job, stage, EventPayload::StageSucceeded {})?;
                 self.append(job, None, EventPayload::JobCompleted {})?;
+            }
+            Verdict::Park(reason) => {
+                self.append(
+                    job,
+                    stage,
+                    EventPayload::StageFailed {
+                        reason: reason.clone(),
+                    },
+                )?;
+                self.append(job, None, EventPayload::JobNeedsHuman { reason })?;
             }
             Verdict::Retry(reason) => {
                 self.append(job, stage, EventPayload::StageRetried { reason })?;
@@ -313,7 +328,14 @@ impl Worker<'_> {
         let run = parse_stream(&output.stdout);
         let mut usage = run.usage;
         usage.wall_ms = wall_ms;
+        let actual_tokens = usage
+            .input_tokens
+            .zip(usage.output_tokens)
+            .map(|(i, o)| i.saturating_add(o));
         self.append(&job.id, stage, EventPayload::AgentFinished { usage })?;
+        if let Some(reason) = self.record_budget(claimed, actual_tokens, wall_ms)? {
+            return Ok(Verdict::Park(reason));
+        }
         if output.timed_out {
             return Ok(Verdict::Retry("agent timed out".to_owned()));
         }
@@ -325,6 +347,54 @@ impl Worker<'_> {
             Outcome::Failed { reason, .. } => Ok(Verdict::Fail(reason)),
             Outcome::Succeeded => self.accept_handoff(claimed, &handoff_rel),
         }
+    }
+
+    fn record_budget(
+        &self,
+        claimed: &Claimed,
+        actual_tokens: Option<u64>,
+        actual_wall_ms: Option<u64>,
+    ) -> Result<Option<String>> {
+        let job = &claimed.job.id;
+        let stage = Some(claimed.stage_id.as_str());
+        let events = self.with_store(|s| s.read_timeline(job))?;
+        let estimate = estimate_for(&events, &claimed.name).unwrap_or_else(|| {
+            estimate_stage(
+                &claimed.name,
+                tier_for(&claimed.name),
+                self.agent.name(),
+                &[],
+                &Defaults::standard(),
+            )
+        });
+        self.append(
+            job,
+            stage,
+            EventPayload::StageBudgetRecorded {
+                stage: claimed.name.clone(),
+                tier: estimate.tier,
+                agent: self.agent.name().to_owned(),
+                estimate_tokens: estimate.tokens,
+                estimate_wall_ms: estimate.wall_ms,
+                actual_tokens,
+                actual_wall_ms,
+            },
+        )?;
+        let events = self.with_store(|s| s.read_timeline(job))?;
+        let Some(f) = actual_overrun(&events, self.config.budget_cap_tokens) else {
+            return Ok(None);
+        };
+        self.append(
+            job,
+            None,
+            EventPayload::FeedbackRecorded {
+                kind: f.kind,
+                severity: f.severity,
+                text: f.text.clone(),
+                confidence: f.confidence,
+            },
+        )?;
+        Ok(Some(f.text))
     }
 
     fn audit(
@@ -376,6 +446,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicI64;
 
+    use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
     use pizza_delivery_core::event::Event;
     use pizza_delivery_core::job::JobState;
     use pizza_delivery_core::NewJob;
@@ -473,6 +544,7 @@ mod tests {
                     lease_ttl_ms: 1000,
                     heartbeat_ms: 100,
                     timeout: Duration::from_secs(5),
+                    budget_cap_tokens: DEFAULT_CAP_TOKENS,
                     trust: TrustConfig {
                         default_hosts: vec!["api.anthropic.com".to_owned()],
                         ..TrustConfig::default()
@@ -566,6 +638,7 @@ mod tests {
                 "sandbox-audit",
                 "artifact-recorded",
                 "agent-finished",
+                "stage-budget-recorded",
                 "artifact-recorded",
                 "handoff-written",
                 "stage-succeeded",

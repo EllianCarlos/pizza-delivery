@@ -50,6 +50,7 @@ echo '{"type":"result","is_error":false}'
 
 pub struct Harness {
     root: TempDir,
+    env: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -86,7 +87,15 @@ impl Harness {
         let agent = root.path().join("fake-agent");
         fs::write(&agent, script)?;
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o755))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            env: Vec::new(),
+        })
+    }
+
+    pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        self.env.push((key.to_owned(), value.to_owned()));
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -151,6 +160,7 @@ impl Harness {
             )
             .env("PIZZA_DELIVERY_ENGRAM", self.root.path().join("no-engram"))
             .env("PIZZA_DELIVERY_MNEMON", self.root.path().join("no-mnemon"))
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
             .env_remove("NO_COLOR")
             .stdin(Stdio::null())
             .output()?;

@@ -9,7 +9,7 @@ use listenfd::ListenFd;
 use pizza_delivery_core::api::{ApiError, ErrorKind};
 use pizza_delivery_core::{Request, Response, Store};
 
-use crate::agent::ClaudeAgent;
+use crate::agent::{Agent, ClaudeAgent};
 use crate::config::Config;
 use crate::git::SystemGit;
 use crate::handler::{handle, Env, SystemEnv};
@@ -124,6 +124,7 @@ fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop
             .unwrap_or(1000)
             .max(10),
         timeout: Duration::from_secs(config.stage_timeout_secs),
+        budget_cap_tokens: config.budget_cap_tokens,
     };
     let worker = Worker {
         store,
@@ -139,6 +140,8 @@ fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop
                 env,
                 data_dir: &config.data_dir,
                 deps,
+                agent: agent.name(),
+                budget_cap_tokens: config.budget_cap_tokens,
             }
             .tick()
         });

@@ -5,12 +5,14 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use pizza_delivery_core::budget::{estimate_overrun, estimate_plan, samples, Defaults, Sample};
 use pizza_delivery_core::context::{assemble_context, Context, Section, CONTEXT_CAP_BYTES};
 use pizza_delivery_core::event::{Actor, EventPayload};
 use pizza_delivery_core::job::JobState;
 use pizza_delivery_core::sandbox::SandboxProfile;
 use pizza_delivery_core::triage::{
     conclude, parse_choice, reply_text, resolve_repo, tiebreak_prompt, Candidate, Outcome, Project,
+    Triage,
 };
 use pizza_delivery_core::{Job, JobId, NewEvent, Store, StoreError};
 use sha2::{Digest, Sha256};
@@ -81,6 +83,8 @@ pub struct Triager<'a> {
     pub env: &'a dyn Env,
     pub data_dir: &'a Path,
     pub deps: Deps<'a>,
+    pub agent: &'a str,
+    pub budget_cap_tokens: u64,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -150,12 +154,15 @@ impl Triager<'_> {
             )?;
         }
         match &report.outcome.triage {
-            Some(triage) => self.append(
-                &job.id,
-                EventPayload::TriageCompleted {
-                    triage: triage.clone(),
-                },
-            ),
+            Some(triage) => {
+                self.record_budget(&job.id, triage)?;
+                self.append(
+                    &job.id,
+                    EventPayload::TriageCompleted {
+                        triage: triage.clone(),
+                    },
+                )
+            }
             None => self.append(
                 &job.id,
                 EventPayload::JobNeedsHuman {
@@ -163,6 +170,37 @@ impl Triager<'_> {
                 },
             ),
         }
+    }
+
+    fn history(&self) -> Result<Vec<Sample>> {
+        let jobs = self.with_store(|s| s.list_jobs())?;
+        let mut all = Vec::new();
+        for job in jobs {
+            let events = self.with_store(|s| s.read_timeline(&job.id))?;
+            all.extend(samples(&events));
+        }
+        Ok(all)
+    }
+
+    fn record_budget(&self, job: &JobId, triage: &Triage) -> Result<()> {
+        let estimates = estimate_plan(
+            &triage.plan,
+            self.agent,
+            &self.history()?,
+            &Defaults::standard(),
+        );
+        if let Some(f) = estimate_overrun(&estimates, self.budget_cap_tokens) {
+            self.append(
+                job,
+                EventPayload::FeedbackRecorded {
+                    kind: f.kind,
+                    severity: f.severity,
+                    text: f.text,
+                    confidence: f.confidence,
+                },
+            )?;
+        }
+        self.append(job, EventPayload::BudgetEstimated { stages: estimates })
     }
 
     fn record_context(&self, job: &JobId, context: &Context) -> Result<()> {
@@ -390,6 +428,7 @@ mod tests {
 
     use super::*;
     use crate::sqlite_store::SqliteStore;
+    use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
     use pizza_delivery_core::NewJob;
 
     struct FakeEnv {
@@ -478,6 +517,8 @@ mod tests {
                     tie_breaker: &tie,
                     sources: vec![&engram, &mnemon],
                 },
+                agent: "claude",
+                budget_cap_tokens: DEFAULT_CAP_TOKENS,
             };
             triager.tick()
         }
@@ -514,6 +555,7 @@ mod tests {
                 "context-read",
                 "context-read",
                 "artifact-recorded",
+                "budget-estimated",
                 "triage-completed"
             ]
         );
