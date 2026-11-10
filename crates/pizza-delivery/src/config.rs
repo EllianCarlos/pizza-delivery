@@ -30,6 +30,10 @@ pub struct Config {
     pub mcp_catalog: PathBuf,
     pub mcp_secrets: PathBuf,
     pub http_port: u16,
+    pub notify_command: Option<PathBuf>,
+    pub notify_opener: PathBuf,
+    pub notify_muted: String,
+    pub web_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +126,15 @@ impl Config {
             http_port: get("PIZZA_DELIVERY_HTTP_PORT")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_HTTP_PORT),
+            notify_command: match get("PIZZA_DELIVERY_NOTIFY").as_deref() {
+                Some("off") => None,
+                Some(command) => Some(PathBuf::from(command)),
+                None => Some(PathBuf::from("notify-send")),
+            },
+            notify_opener: path_or("PIZZA_DELIVERY_OPENER", PathBuf::from("xdg-open")),
+            notify_muted: get("PIZZA_DELIVERY_NOTIFY_MUTE").unwrap_or_default(),
+            web_url: get("PIZZA_DELIVERY_WEB_URL")
+                .unwrap_or_else(|| "http://127.0.0.1:7878".to_owned()),
             budget_cap_tokens: number("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", DEFAULT_CAP_TOKENS),
             budget_defaults: {
                 let std = Defaults::standard();
@@ -315,5 +328,16 @@ mod tests {
     #[test]
     fn nothing_to_go_on_is_an_error() {
         assert!(Config::from_lookup(lookup(&[])).is_err());
+    }
+
+    #[test]
+    fn notifications_default_to_notify_send_and_can_be_switched_off() {
+        let defaults = Config::from_lookup(lookup(&[("HOME", "/h")]));
+        let off = Config::from_lookup(lookup(&[("HOME", "/h"), ("PIZZA_DELIVERY_NOTIFY", "off")]));
+        assert_eq!(
+            defaults.ok().and_then(|c| c.notify_command),
+            Some(PathBuf::from("notify-send"))
+        );
+        assert_eq!(off.ok().and_then(|c| c.notify_command), None);
     }
 }

@@ -12,6 +12,8 @@ pub mod id;
 pub mod inbox;
 pub mod job;
 pub mod mcp;
+pub mod memorize;
+pub mod notify;
 pub mod prompt;
 pub mod quota;
 pub mod render;

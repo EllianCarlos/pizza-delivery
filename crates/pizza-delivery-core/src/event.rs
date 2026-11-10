@@ -191,6 +191,12 @@ pub enum EventPayload {
         actual_tokens: Option<u64>,
         actual_wall_ms: Option<u64>,
     },
+    WriteBack {
+        store: String,
+        id: String,
+        topic: String,
+        action: String,
+    },
 }
 
 impl EventPayload {
@@ -230,6 +236,7 @@ impl EventPayload {
             EventPayload::McpDeactivated { .. } => "mcp-deactivated",
             EventPayload::McpCalls { .. } => "mcp-calls",
             EventPayload::StageBudgetRecorded { .. } => "stage-budget-recorded",
+            EventPayload::WriteBack { .. } => "write-back",
         }
     }
 }

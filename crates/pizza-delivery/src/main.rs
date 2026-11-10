@@ -5,6 +5,7 @@ mod git;
 mod handler;
 mod http;
 mod mcp_broker;
+mod notify;
 mod process;
 mod sandbox;
 mod server;

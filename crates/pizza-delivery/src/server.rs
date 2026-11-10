@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::git::{Git, LockedGit, SystemGit};
 use crate::handler::{handle, Env, SystemEnv};
 use crate::http;
+use crate::notify::{MakoNotifier, NotifyingStore};
 use crate::process::stop_leased_group;
 use crate::sandbox::{ensure_compatible, load_trust, SystemProbe};
 use crate::sqlite_store::SqliteStore;
@@ -24,7 +25,8 @@ use crate::triage::{
     analyze, AgentTieBreaker, ContextSource, ConventionsSource, Deps, EngramSource, LedgerSource,
     MnemonSource, SystemIndex, Triager,
 };
-use crate::worker::{McpSetup, Worker, WorkerConfig};
+use crate::worker::{McpSetup, MemorySetup, Worker, WorkerConfig};
+use pizza_delivery_core::notify::{parse_muted, Dispatcher};
 use pizza_delivery_core::routing::AdapterKind;
 
 pub enum Bound {
@@ -113,6 +115,14 @@ fn dry_run(
     }
 }
 
+fn command_available(command: &std::path::Path) -> bool {
+    if command.components().count() > 1 {
+        return command.is_file();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(command).is_file()))
+}
+
 fn worker_config(config: &Config) -> Result<WorkerConfig> {
     Ok(WorkerConfig {
         trust: load_trust(&config.trust_path)?,
@@ -133,6 +143,12 @@ fn worker_config(config: &Config) -> Result<WorkerConfig> {
             broker: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pizza-delivery")),
             catalog: config.mcp_catalog.clone(),
             secrets: config.mcp_secrets.clone(),
+        }),
+        memory: (command_available(&config.engram_command)
+            && command_available(&config.mnemon_command))
+        .then(|| MemorySetup {
+            engram: config.engram_command.clone(),
+            mnemon: config.mnemon_command.clone(),
         }),
     })
 }
@@ -254,6 +270,20 @@ pub fn serve(
     listener
         .set_nonblocking(true)
         .context("nonblocking listener")?;
+    let store: Box<dyn Store> = match &config.notify_command {
+        Some(command) => Box::new(NotifyingStore::new(
+            store,
+            Dispatcher::new(
+                Box::new(MakoNotifier::new(
+                    command.clone(),
+                    config.notify_opener.clone(),
+                )),
+                parse_muted(&config.notify_muted),
+                config.web_url.clone(),
+            ),
+        )),
+        None => store,
+    };
     let store = Arc::new(Mutex::new(store));
     let stop = Arc::new(AtomicBool::new(false));
     let git = Arc::new(LockedGit::new(SystemGit));
