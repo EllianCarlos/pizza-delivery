@@ -53,7 +53,11 @@ impl Worker<'_> {
             .collect()
     }
 
-    pub(super) fn deliver(&self, job: &JobId, events: &[Event]) -> Result<std::result::Result<(), String>> {
+    pub(super) fn deliver(
+        &self,
+        job: &JobId,
+        events: &[Event],
+    ) -> Result<std::result::Result<(), String>> {
         let triaged = events
             .iter()
             .any(|e| matches!(e.payload, EventPayload::TriageCompleted { .. }));
@@ -87,7 +91,11 @@ impl Worker<'_> {
         self.record_file(job, None, "report", &relative)
     }
 
-    pub(super) fn ship(&self, job: &JobId, events: &[Event]) -> Result<std::result::Result<(), String>> {
+    pub(super) fn ship(
+        &self,
+        job: &JobId,
+        events: &[Event],
+    ) -> Result<std::result::Result<(), String>> {
         let Some(found) = self.find_job(job)? else {
             return Ok(Err("ship: job vanished".to_owned()));
         };

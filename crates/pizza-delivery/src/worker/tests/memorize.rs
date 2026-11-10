@@ -159,8 +159,7 @@ fn install_memory(rig: &mut Rig) -> Result<()> {
 }
 
 fn memory_store(rig: &Rig, name: &str) -> String {
-    std::fs::read_to_string(rig.config.data_dir.join(format!("{name}.store")))
-        .unwrap_or_default()
+    std::fs::read_to_string(rig.config.data_dir.join(format!("{name}.store"))).unwrap_or_default()
 }
 
 fn seed_memory(rig: &Rig, name: &str, line: &str) -> Result<()> {
@@ -206,8 +205,7 @@ const NIX_PLAN: &str =
     "{\"kind\":\"cross-repo\",\"topic\":\"Nix\",\"content\":\"flakes everywhere\"}\n";
 
 #[test]
-fn a_completed_job_saves_project_facts_to_engram_and_reconciles_them_by_job_marker() -> Result<()>
-{
+fn a_completed_job_saves_project_facts_to_engram_and_reconciles_them_by_job_marker() -> Result<()> {
     let mut rig = Rig::new(vec![good(), plan(FIX_PLAN)])?;
     install_memory(&mut rig)?;
 
@@ -352,9 +350,7 @@ fn a_failed_job_is_memorized_too() -> Result<()> {
             exit_code: 1,
             ..Script::default()
         },
-        plan(
-            "{\"kind\":\"failure\",\"topic\":\"Provider 404\",\"content\":\"model missing\"}\n",
-        ),
+        plan("{\"kind\":\"failure\",\"topic\":\"Provider 404\",\"content\":\"model missing\"}\n"),
     ])?;
     install_memory(&mut rig)?;
 

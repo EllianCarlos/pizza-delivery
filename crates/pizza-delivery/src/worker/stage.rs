@@ -106,7 +106,12 @@ impl Worker<'_> {
         })
     }
 
-    pub(super) fn fall_back(&self, claimed: &Claimed, candidate: &Candidate, reason: &str) -> Result<()> {
+    pub(super) fn fall_back(
+        &self,
+        claimed: &Claimed,
+        candidate: &Candidate,
+        reason: &str,
+    ) -> Result<()> {
         self.append(
             &claimed.job.id,
             Some(&claimed.stage_id),

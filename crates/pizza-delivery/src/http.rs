@@ -19,6 +19,7 @@ use pizza_delivery_core::event::SYSTEM_JOB;
 use pizza_delivery_core::{Actor, JobId, NewEvent};
 
 use crate::handler::{handle, Env};
+use crate::lock::acquire;
 use crate::push::{endpoint_allowed, Push, Subscription};
 use crate::remote::{self, Gate, Origin, Submit};
 use crate::server::dispatch;
@@ -391,12 +392,12 @@ impl Api {
     }
 
     fn run(&self, request: Request) -> Response {
-        match self.store.lock() {
+        match acquire(&self.store, "store") {
             Ok(mut guard) => handle(request, guard.as_mut(), self.env.as_ref()),
-            Err(_) => Response::Error {
+            Err(e) => Response::Error {
                 error: ApiError {
                     kind: ErrorKind::Internal,
-                    message: "store lock poisoned".into(),
+                    message: e.to_string(),
                     matches: vec![],
                 },
             },
@@ -557,9 +558,9 @@ fn detail(api: &Api, reference: &str) -> Reply {
         Response::Inbox { entries } => entries,
         _ => Vec::new(),
     };
-    let timeline = match api.store.lock() {
+    let timeline = match acquire(&api.store, "store") {
         Ok(guard) => guard.read_timeline_cursored(&job.id),
-        Err(_) => return bad(ErrorKind::Internal, "store lock poisoned"),
+        Err(e) => return bad(ErrorKind::Internal, e.to_string()),
     };
     match timeline {
         Ok(events) => ok(&job_detail(job, &events, &inbox)),
@@ -575,9 +576,9 @@ fn artifact(api: &Api, reference: &str, index: &str) -> Reply {
         Response::Error { error } => return failed(error),
         _ => return bad(ErrorKind::Internal, "unexpected response"),
     };
-    let timeline = match api.store.lock() {
+    let timeline = match acquire(&api.store, "store") {
         Ok(guard) => guard.read_timeline_cursored(&job.id),
-        Err(_) => return bad(ErrorKind::Internal, "store lock poisoned"),
+        Err(e) => return bad(ErrorKind::Internal, e.to_string()),
     };
     let events = match timeline {
         Ok(events) => events,
@@ -614,9 +615,9 @@ fn events(api: &Api, req: &Req) -> Reply {
     let limit = query(req, "limit")
         .and_then(|v| v.parse::<usize>().ok())
         .map_or(1000, |l| l.clamp(1, 5000));
-    let read = match api.store.lock() {
+    let read = match acquire(&api.store, "store") {
         Ok(guard) => guard.events_since(since, limit),
-        Err(_) => return bad(ErrorKind::Internal, "store lock poisoned"),
+        Err(e) => return bad(ErrorKind::Internal, e.to_string()),
     };
     match read {
         Ok(entries) => {

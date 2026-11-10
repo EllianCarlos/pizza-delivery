@@ -283,9 +283,7 @@ pub fn decide(entry: &Entry, existing: &[Existing], confirmed_by_reply: bool) ->
         };
     }
     match matches.first() {
-        Some(own) if own.has_content(&entry.content) => {
-            Decision::Unchanged { id: own.id.clone() }
-        }
+        Some(own) if own.has_content(&entry.content) => Decision::Unchanged { id: own.id.clone() },
         Some(own) => Decision::Update { id: own.id.clone() },
         None => Decision::Save,
     }
@@ -511,7 +509,11 @@ mod tests {
     #[test]
     fn a_truncated_engram_listing_still_matches_the_full_content() {
         let found = parse_engram_search(ENGRAM_SEARCH);
-        let e = entry(Kind::Architecture, "Multi: line title", "word word word word");
+        let e = entry(
+            Kind::Architecture,
+            "Multi: line title",
+            "word word word word",
+        );
         assert_eq!(
             decide(&e, &found, false),
             Decision::Unchanged { id: "1".into() }

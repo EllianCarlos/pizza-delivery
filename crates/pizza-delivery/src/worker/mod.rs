@@ -41,6 +41,7 @@ use sha2::{Digest, Sha256};
 use crate::agent::{Fleet, Invocation};
 use crate::git::Git;
 use crate::handler::Env;
+use crate::lock::acquire;
 use crate::process::{kill_group, start_ticks, terminate_group};
 use pizza_delivery_core::mcp::McpEvent;
 
@@ -186,10 +187,7 @@ fn retry_cause(failure: &Failure) -> RetryCause {
 
 impl Worker<'_> {
     fn with_store<T>(&self, f: impl FnOnce(&mut dyn Store) -> Result<T, StoreError>) -> Result<T> {
-        let mut guard = self
-            .store
-            .lock()
-            .map_err(|_| anyhow!("store lock poisoned"))?;
+        let mut guard = acquire(self.store, "store")?;
         Ok(f(guard.as_mut())?)
     }
 
@@ -486,7 +484,6 @@ impl Worker<'_> {
             Some(&self.config.holder),
         )
     }
-
 }
 
 mod accept;

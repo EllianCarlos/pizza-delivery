@@ -25,7 +25,11 @@ impl Worker<'_> {
         std::fs::read_to_string(self.config.data_dir.join(relative)).ok()
     }
 
-    pub(super) fn render_prompt(&self, claimed: &Claimed, run: &StageRun) -> Result<Option<Rendered>> {
+    pub(super) fn render_prompt(
+        &self,
+        claimed: &Claimed,
+        run: &StageRun,
+    ) -> Result<Option<Rendered>> {
         let events = self.with_store(|s| s.read_timeline(&claimed.job.id))?;
         let previous = events.iter().rev().find_map(|e| match &e.payload {
             EventPayload::HandoffWritten { path }

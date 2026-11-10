@@ -225,7 +225,7 @@ fn an_expired_lease_is_ledgered_and_the_stage_is_reclaimed_as_attempt_two() -> R
         agent: "claude".into(),
         caps: Caps::default(),
     };
-    let mut guard = rig.store.lock().map_err(|_| anyhow!("poisoned"))?;
+    let mut guard = acquire(&rig.store, "store")?;
     guard.claim_stage(crashed)?;
     drop(guard);
     rig.env.now.store(5000, Ordering::SeqCst);
@@ -270,12 +270,12 @@ fn a_lease_that_expires_on_the_last_attempt_fails_the_job() -> Result<()> {
         agent: "claude".into(),
         caps: Caps::default(),
     };
-    let mut guard = rig.store.lock().map_err(|_| anyhow!("poisoned"))?;
+    let mut guard = acquire(&rig.store, "store")?;
     guard.claim_stage(claim("0", 0))?;
     drop(guard);
     rig.env.now.store(1000, Ordering::SeqCst);
     rig.worker().reap()?;
-    let mut guard = rig.store.lock().map_err(|_| anyhow!("poisoned"))?;
+    let mut guard = acquire(&rig.store, "store")?;
     guard.claim_stage(claim("1", 1000))?;
     drop(guard);
     rig.env.now.store(5000, Ordering::SeqCst);

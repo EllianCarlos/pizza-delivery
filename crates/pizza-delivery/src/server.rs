@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::git::{Git, LockedGit, SystemGit};
 use crate::handler::{handle, Env, SystemEnv};
 use crate::http;
+use crate::lock::acquire;
 use crate::notify::{MakoNotifier, NotifyingStore};
 use crate::process::stop_leased_group;
 use crate::push::{FanOut, Push, Subscriptions, Vapid, WebPushNotifier};
@@ -431,9 +432,9 @@ pub fn dispatch(
     kill_grace: Duration,
 ) -> Response {
     let stopping = request == Request::Stop;
-    let response = match store.lock() {
+    let response = match acquire(store, "store") {
         Ok(mut guard) => handle(request, guard.as_mut(), env),
-        Err(_) => failure(ErrorKind::Internal, "store lock poisoned"),
+        Err(e) => failure(ErrorKind::Internal, e.to_string()),
     };
     if stopping {
         stop.store(true, Ordering::SeqCst);

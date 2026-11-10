@@ -18,16 +18,16 @@ fn shipped_audit(rig: &Rig) -> Result<Option<EventPayload>> {
 fn shipping_pushes_the_job_branch_and_opens_a_draft_pr_recorded_in_the_ledger() -> Result<()> {
     let rig = Rig::new(vec![good()])?;
     plan_of(&rig, &["implement", "ship"])?;
-    *rig.git.files.lock().map_err(|_| anyhow!("poisoned"))? = vec!["src/a.rs".to_owned()];
+    *acquire(&rig.git.files, "files")? = vec!["src/a.rs".to_owned()];
 
     rig.worker().tick()?;
 
     assert_eq!(rig.job_state()?, JobState::Completed);
     assert_eq!(
-        *rig.git.pushes.lock().map_err(|_| anyhow!("poisoned"))?,
+        *acquire(&rig.git.pushes, "pushes")?,
         vec![("origin".to_owned(), "pizza/J1".to_owned())]
     );
-    let prs = rig.git.prs.lock().map_err(|_| anyhow!("poisoned"))?;
+    let prs = acquire(&rig.git.prs, "prs")?;
     assert_eq!(prs.len(), 1);
     assert!(prs[0].1.contains("J1") && prs[0].1.contains("## implement"));
     assert!(prs[0].2.is_empty());
@@ -51,12 +51,12 @@ fn shipping_pushes_the_job_branch_and_opens_a_draft_pr_recorded_in_the_ledger() 
 fn sensitive_changes_ship_as_a_labelled_draft_with_a_high_severity_risk() -> Result<()> {
     let rig = Rig::new(vec![good()])?;
     plan_of(&rig, &["implement", "ship"])?;
-    *rig.git.files.lock().map_err(|_| anyhow!("poisoned"))? =
+    *acquire(&rig.git.files, "files")? =
         vec!["src/a.rs".to_owned(), ".github/workflows/ci.yml".to_owned()];
 
     rig.worker().tick()?;
 
-    let prs = rig.git.prs.lock().map_err(|_| anyhow!("poisoned"))?;
+    let prs = acquire(&rig.git.prs, "prs")?;
     assert_eq!(prs[0].2, vec!["infra-change"]);
     assert!(prs[0].1.contains(".github/workflows/ci.yml"));
     let risks: Vec<_> = rig
@@ -84,18 +84,8 @@ fn a_report_only_job_ends_with_a_report_artifact_and_never_ships() -> Result<()>
     rig.worker().tick()?;
 
     assert_eq!(rig.job_state()?, JobState::Completed);
-    assert!(rig
-        .git
-        .pushes
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .is_empty());
-    assert!(rig
-        .git
-        .prs
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .is_empty());
+    assert!(acquire(&rig.git.pushes, "pushes")?.is_empty());
+    assert!(acquire(&rig.git.prs, "prs")?.is_empty());
     let kinds: Vec<String> = rig
         .timeline()?
         .into_iter()
@@ -117,12 +107,7 @@ fn a_rejected_push_fails_the_job_with_the_reason() -> Result<()> {
     rig.worker().tick()?;
 
     assert_eq!(rig.job_state()?, JobState::Failed);
-    assert!(rig
-        .git
-        .prs
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .is_empty());
+    assert!(acquire(&rig.git.prs, "prs")?.is_empty());
     Ok(())
 }
 
@@ -141,7 +126,7 @@ fn the_push_remote_comes_from_the_repos_trust_config() -> Result<()> {
     rig.worker().tick()?;
 
     assert_eq!(
-        *rig.git.pushes.lock().map_err(|_| anyhow!("poisoned"))?,
+        *acquire(&rig.git.pushes, "pushes")?,
         vec![("fork".to_owned(), "pizza/J1".to_owned())]
     );
     Ok(())

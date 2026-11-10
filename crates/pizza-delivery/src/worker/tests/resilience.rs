@@ -1,6 +1,5 @@
 use super::*;
 
-
 fn hung() -> Script {
     Script {
         timed_out: true,
@@ -91,10 +90,7 @@ fn a_crash_leaves_a_note_and_a_wip_commit_for_the_next_attempt() -> Result<()> {
         agent: "claude".into(),
         caps: Caps::default(),
     };
-    rig.store
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .claim_stage(crashed)?;
+    acquire(&rig.store, "store")?.claim_stage(crashed)?;
     rig.env.now.store(5000, Ordering::SeqCst);
 
     rig.worker().tick()?;
@@ -121,12 +117,7 @@ fn completed_rig(pushed: bool, dirty: bool) -> Result<Rig> {
 }
 
 fn removed(rig: &Rig) -> Result<usize> {
-    Ok(rig
-        .git
-        .removed
-        .lock()
-        .map_err(|_| anyhow!("poisoned"))?
-        .len())
+    Ok(acquire(&rig.git.removed, "removed")?.len())
 }
 
 #[test]

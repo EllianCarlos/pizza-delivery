@@ -129,7 +129,11 @@ impl Worker<'_> {
                 id
             }
         };
-        let action = if replaced.is_some() { "updated" } else { "saved" };
+        let action = if replaced.is_some() {
+            "updated"
+        } else {
+            "saved"
+        };
         Ok((id, action.to_owned()))
     }
 

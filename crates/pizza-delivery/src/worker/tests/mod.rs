@@ -47,16 +47,13 @@ struct FakeGit {
 
 impl Git for FakeGit {
     fn changed_files(&self, _repo: &Path, _worktree: &Path) -> Result<Vec<String>> {
-        Ok(self.files.lock().map_err(|_| anyhow!("poisoned"))?.clone())
+        Ok(acquire(&self.files, "files")?.clone())
     }
     fn push(&self, _worktree: &Path, remote: &str, branch: &str) -> Result<String> {
         if self.push_fails.load(Ordering::SeqCst) {
             return Err(anyhow!("remote rejected"));
         }
-        self.pushes
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .push((remote.to_owned(), branch.to_owned()));
+        acquire(&self.pushes, "pushes")?.push((remote.to_owned(), branch.to_owned()));
         Ok(format!("{remote}/{branch}"))
     }
     fn open_draft_pr(
@@ -66,7 +63,7 @@ impl Git for FakeGit {
         body: &str,
         labels: &[&str],
     ) -> Result<String> {
-        self.prs.lock().map_err(|_| anyhow!("poisoned"))?.push((
+        acquire(&self.prs, "prs")?.push((
             title.to_owned(),
             body.to_owned(),
             labels.iter().map(|l| (*l).to_owned()).collect(),
@@ -83,10 +80,7 @@ impl Git for FakeGit {
         Ok(std::fs::create_dir_all(worktree)?)
     }
     fn commit_wip(&self, _worktree: &Path, message: &str) -> Result<Option<String>> {
-        self.wip
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .push(message.to_owned());
+        acquire(&self.wip, "wip")?.push(message.to_owned());
         Ok(Some("wip1".to_owned()))
     }
     fn is_dirty(&self, _worktree: &Path) -> Result<bool> {
@@ -96,10 +90,7 @@ impl Git for FakeGit {
         Ok(self.pushed.load(Ordering::SeqCst))
     }
     fn remove_worktree(&self, _repo: &Path, worktree: &Path) -> Result<()> {
-        self.removed
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .push(worktree.to_owned());
+        acquire(&self.removed, "removed")?.push(worktree.to_owned());
         Ok(())
     }
 }
@@ -122,20 +113,14 @@ struct FakeAgent {
 
 impl Agent for FakeAgent {
     fn run(&self, inv: &Invocation, _on_spawn: &mut dyn FnMut(u32)) -> Result<AgentOutput> {
-        let requests = *self.egress.lock().map_err(|_| anyhow!("poisoned"))?;
+        let requests = *acquire(&self.egress, "egress")?;
         if let Some(requests) = requests {
             std::fs::write(&inv.egress_log, requests)?;
         }
-        let script = self
-            .scripts
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?
+        let script = acquire(&self.scripts, "scripts")?
             .pop_front()
             .ok_or_else(|| anyhow!("no scripted run left"))?;
-        self.prompts
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .push(inv.prompt.clone());
+        acquire(&self.prompts, "prompts")?.push(inv.prompt.clone());
         std::fs::write(
             inv.handoff_path
                 .with_file_name(format!("prompt-{}.txt", self.tag)),
@@ -235,7 +220,7 @@ impl Rig {
     }
 
     fn with_egress(self, requests: &'static str) -> Result<Self> {
-        *self.egress.lock().map_err(|_| anyhow!("poisoned"))? = Some(requests);
+        *acquire(&self.egress, "egress")? = Some(requests);
         Ok(self)
     }
 
@@ -259,16 +244,13 @@ impl Rig {
         }
     }
 
-    fn with_store<T>(
-        &self,
-        f: impl FnOnce(&mut dyn Store) -> Result<T, StoreError>,
-    ) -> Result<T> {
-        let mut guard = self.store.lock().map_err(|_| anyhow!("poisoned"))?;
+    fn with_store<T>(&self, f: impl FnOnce(&mut dyn Store) -> Result<T, StoreError>) -> Result<T> {
+        let mut guard = acquire(&self.store, "store")?;
         Ok(f(guard.as_mut())?)
     }
 
     fn timeline(&self) -> Result<Vec<Event>> {
-        let guard = self.store.lock().map_err(|_| anyhow!("poisoned"))?;
+        let guard = acquire(&self.store, "store")?;
         Ok(guard.read_timeline(&JobId::new("J1"))?)
     }
 
@@ -277,7 +259,7 @@ impl Rig {
     }
 
     fn job_state(&self) -> Result<JobState> {
-        let guard = self.store.lock().map_err(|_| anyhow!("poisoned"))?;
+        let guard = acquire(&self.store, "store")?;
         guard
             .list_jobs()?
             .first()
@@ -286,11 +268,7 @@ impl Rig {
     }
 
     fn prompts(&self) -> Result<Vec<String>> {
-        Ok(self
-            .prompts
-            .lock()
-            .map_err(|_| anyhow!("poisoned"))?
-            .clone())
+        Ok(acquire(&self.prompts, "prompts")?.clone())
     }
 }
 
@@ -333,7 +311,7 @@ fn retry_causes(rig: &Rig) -> Result<Vec<RetryCause>> {
 }
 
 fn wip_count(rig: &Rig) -> Result<usize> {
-    Ok(rig.git.wip.lock().map_err(|_| anyhow!("poisoned"))?.len())
+    Ok(acquire(&rig.git.wip, "wip")?.len())
 }
 
 fn plan_of(rig: &Rig, names: &[&str]) -> Result<()> {

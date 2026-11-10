@@ -158,6 +158,7 @@ mod tests {
     use pizza_delivery_core::Priority;
 
     use super::*;
+    use crate::lock::acquire;
     use crate::sqlite_store::SqliteStore;
 
     struct Probe {
@@ -248,7 +249,7 @@ mod tests {
         submit(&mut store, "J1")?;
         append(&mut store, "J1", 1, audit("https://gh/pull/9"))?;
         append(&mut store, "J1", 2, EventPayload::JobCompleted {})?;
-        let seen = seen.lock().map_err(|_| "poisoned")?;
+        let seen = acquire(&seen, "seen")?;
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].urgency, Urgency::Normal);
         assert!(seen[0].body.contains("https://gh/pull/9"));
@@ -281,7 +282,7 @@ mod tests {
             1,
             EventPayload::JobFailed { reason: "x".into() },
         )?;
-        assert!(seen.lock().map_err(|_| "poisoned")?.is_empty());
+        assert!(acquire(&seen, "seen")?.is_empty());
         Ok(())
     }
 

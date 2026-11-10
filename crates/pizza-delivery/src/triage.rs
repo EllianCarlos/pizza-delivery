@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use pizza_delivery_core::budget::{estimate_overrun, estimate_plan, samples, Defaults, Sample};
 use pizza_delivery_core::context::{assemble_context, Context, Section, CONTEXT_CAP_BYTES};
 use pizza_delivery_core::event::{Actor, EventPayload};
@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::agent::{Agent, Invocation};
 use crate::handler::Env;
+use crate::lock::acquire;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const TIE_BREAK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -94,10 +95,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 impl Triager<'_> {
     fn with_store<T>(&self, f: impl FnOnce(&mut dyn Store) -> Result<T, StoreError>) -> Result<T> {
-        let mut guard = self
-            .store
-            .lock()
-            .map_err(|_| anyhow!("store lock poisoned"))?;
+        let mut guard = acquire(self.store, "store")?;
         Ok(f(guard.as_mut())?)
     }
 
@@ -437,6 +435,7 @@ mod tests {
 
     use super::*;
     use crate::sqlite_store::SqliteStore;
+    use anyhow::anyhow;
     use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
     use pizza_delivery_core::{NewJob, Priority};
 
@@ -536,7 +535,7 @@ mod tests {
         }
 
         fn events(&self) -> Result<Vec<pizza_delivery_core::Event>> {
-            let guard = self.store.lock().map_err(|_| anyhow!("poisoned"))?;
+            let guard = acquire(&self.store, "store")?;
             Ok(guard.read_timeline(&JobId::new("J1"))?)
         }
 
@@ -545,7 +544,7 @@ mod tests {
         }
 
         fn job(&self) -> Result<Job> {
-            let guard = self.store.lock().map_err(|_| anyhow!("poisoned"))?;
+            let guard = acquire(&self.store, "store")?;
             guard
                 .list_jobs()?
                 .into_iter()

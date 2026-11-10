@@ -427,12 +427,7 @@ chain = [
     fn skill_driven_stages_route_only_to_skill_capable_adapters() {
         for stage in ["grill", "spec", "implement", "fix", "review"] {
             let needs = stage_capabilities(stage);
-            let routed = route(
-                &config(),
-                &req(stage, &needs),
-                &QuotaSnapshot::default(),
-                0,
-            );
+            let routed = route(&config(), &req(stage, &needs), &QuotaSnapshot::default(), 0);
             assert_eq!(needs, vec![Capability::Skills], "{stage}");
             let candidates = routed.map(|r| r.candidates).unwrap_or_default();
             assert!(!candidates.is_empty(), "{stage}");

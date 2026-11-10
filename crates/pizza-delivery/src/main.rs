@@ -6,6 +6,7 @@ mod config;
 mod git;
 mod handler;
 mod http;
+mod lock;
 mod mcp_broker;
 mod notify;
 mod process;
