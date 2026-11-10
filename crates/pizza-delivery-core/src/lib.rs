@@ -10,6 +10,7 @@ pub mod grill;
 pub mod handoff;
 pub mod id;
 pub mod job;
+pub mod mcp;
 pub mod prompt;
 pub mod quota;
 pub mod render;

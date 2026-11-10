@@ -35,6 +35,7 @@ use crate::agent::{Fleet, Invocation};
 use crate::git::Git;
 use crate::handler::Env;
 use crate::process::{kill_group, start_ticks, terminate_group};
+use pizza_delivery_core::mcp::McpEvent;
 
 pub struct WorkerConfig {
     pub data_dir: PathBuf,
@@ -49,6 +50,13 @@ pub struct WorkerConfig {
     pub budget_cap_tokens: u64,
     pub budget_defaults: Defaults,
     pub require_triage: bool,
+    pub mcp: Option<McpSetup>,
+}
+
+pub struct McpSetup {
+    pub broker: PathBuf,
+    pub catalog: PathBuf,
+    pub secrets: PathBuf,
 }
 
 pub struct Worker<'a> {
@@ -681,7 +689,41 @@ impl Worker<'_> {
                     .into_owned(),
             ],
         );
+        let mcp_log = self
+            .config
+            .data_dir
+            .join(run.relative.join("mcp-events.jsonl"));
+        if mcp_log.exists() {
+            std::fs::remove_file(&mcp_log)?;
+        }
+        let mcp_config = self
+            .config
+            .mcp
+            .as_ref()
+            .map(|setup| {
+                let path = self.config.data_dir.join(run.relative.join("mcp.json"));
+                let args = vec![
+                    "mcp-broker".to_owned(),
+                    "--catalog".to_owned(),
+                    setup.catalog.to_string_lossy().into_owned(),
+                    "--stage".to_owned(),
+                    claimed.name.clone(),
+                    "--agent".to_owned(),
+                    candidate.agent.clone(),
+                    "--log".to_owned(),
+                    mcp_log.to_string_lossy().into_owned(),
+                    "--secrets".to_owned(),
+                    setup.secrets.to_string_lossy().into_owned(),
+                ];
+                let config = serde_json::json!({"mcpServers": {"pizza-delivery": {
+                    "command": setup.broker,
+                    "args": args,
+                }}});
+                std::fs::write(&path, config.to_string()).map(|()| path)
+            })
+            .transpose()?;
         let invocation = Invocation {
+            mcp_config,
             prompt: rendered.text,
             model: candidate.model.clone(),
             cwd: run.worktree.clone(),
@@ -718,13 +760,14 @@ impl Worker<'_> {
                 EventPayload::EgressBlocked { host: host.clone() },
             )?;
         }
+        let activations = self.record_mcp(claimed, &mcp_log)?;
         let output = match output {
             Ok(output) => {
-                self.audit(claimed, &sandbox, blocked)?;
+                self.audit(claimed, &sandbox, blocked, activations)?;
                 output
             }
             Err(e) => {
-                self.audit(claimed, &sandbox, blocked)?;
+                self.audit(claimed, &sandbox, blocked, activations)?;
                 return Ok(Attempt::Settled(Verdict::Fail(format!("agent: {e:#}"))));
             }
         };
@@ -833,11 +876,30 @@ impl Worker<'_> {
         Ok(Some(f.text))
     }
 
+    fn record_mcp(&self, claimed: &Claimed, log: &Path) -> Result<Vec<String>> {
+        let mut activated = Vec::new();
+        for event in crate::mcp_broker::read_events(log) {
+            if let McpEvent::Activated { server, .. } = &event {
+                activated.push(server.clone());
+            }
+            self.append(
+                &claimed.job.id,
+                Some(claimed.stage_id.as_str()),
+                event.payload(),
+            )?;
+            if let Some(f) = event.feedback() {
+                self.record_feedback(claimed, Actor::Agent, vec![f.clone()])?;
+            }
+        }
+        Ok(activated)
+    }
+
     fn audit(
         &self,
         claimed: &Claimed,
         profile: &SandboxProfile,
         blocked_requests: Vec<String>,
+        mcp_activations: Vec<String>,
     ) -> Result<()> {
         self.append(
             &claimed.job.id,
@@ -847,7 +909,7 @@ impl Worker<'_> {
                 mounts: profile.mounts.iter().map(Mount::describe).collect(),
                 egress_allowlist: profile.egress_allowlist.clone(),
                 blocked_requests,
-                mcp_activations: Vec::new(),
+                mcp_activations,
                 diff_policy_result: None,
                 pushed_ref: None,
                 pr_url: None,
@@ -1263,6 +1325,7 @@ mod tests {
                     budget_cap_tokens: DEFAULT_CAP_TOKENS,
                     budget_defaults: Defaults::standard(),
                     require_triage: false,
+                    mcp: None,
                     trust: TrustConfig {
                         default_hosts: vec!["api.anthropic.com".to_owned()],
                         ..TrustConfig::default()

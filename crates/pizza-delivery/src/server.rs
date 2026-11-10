@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -21,7 +22,7 @@ use crate::triage::{
     analyze, AgentTieBreaker, ContextSource, ConventionsSource, Deps, EngramSource, LedgerSource,
     MnemonSource, SystemIndex, Triager,
 };
-use crate::worker::{Worker, WorkerConfig};
+use crate::worker::{McpSetup, Worker, WorkerConfig};
 use pizza_delivery_core::routing::AdapterKind;
 
 pub enum Bound {
@@ -126,6 +127,11 @@ fn worker_config(config: &Config) -> Result<WorkerConfig> {
         budget_cap_tokens: config.budget_cap_tokens,
         budget_defaults: config.budget_defaults,
         require_triage: true,
+        mcp: config.mcp_catalog.exists().then(|| McpSetup {
+            broker: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pizza-delivery")),
+            catalog: config.mcp_catalog.clone(),
+            secrets: config.mcp_secrets.clone(),
+        }),
     })
 }
 
