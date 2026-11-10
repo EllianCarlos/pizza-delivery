@@ -8,7 +8,7 @@ use pizza_delivery_core::budget::{
     actual_overrun, estimate_for, estimate_stage, tier_for, Defaults, SizeTier,
 };
 use pizza_delivery_core::classify::{classify, Classified, Failure, RawRun};
-use pizza_delivery_core::event::{Actor, EventPayload};
+use pizza_delivery_core::event::{Actor, Event, EventPayload};
 use pizza_delivery_core::feedback::parse_feedback;
 use pizza_delivery_core::grill;
 use pizza_delivery_core::handoff::validate;
@@ -19,6 +19,7 @@ use pizza_delivery_core::routing::{
     route, stage_capabilities, Candidate, RouteRequest, RoutingConfig, Skip,
 };
 use pizza_delivery_core::sandbox::{blocked_hosts, Mount, SandboxProfile, TrustConfig};
+use pizza_delivery_core::ship::{pr_title, render_pr_body, DiffPolicy};
 use pizza_delivery_core::spec;
 use pizza_delivery_core::stage::PIPELINE_STAGES;
 use pizza_delivery_core::triage::{
@@ -400,7 +401,12 @@ impl Worker<'_> {
                 self.append(job, stage, EventPayload::StageSucceeded {})?;
                 let events = self.with_store(|s| s.read_timeline(job))?;
                 if pipeline_done(&events) {
-                    self.append(job, None, EventPayload::JobCompleted {})?;
+                    match self.deliver(job, &events)? {
+                        Ok(()) => self.append(job, None, EventPayload::JobCompleted {})?,
+                        Err(reason) => {
+                            self.append(job, None, EventPayload::JobFailed { reason })?;
+                        }
+                    }
                 }
             }
             Verdict::NeedsHuman(reason) => {
@@ -475,16 +481,178 @@ impl Worker<'_> {
         kind: &str,
         relative: &Path,
     ) -> Result<()> {
+        self.record_file(job, Some(stage_id), kind, relative)
+    }
+
+    fn record_file(
+        &self,
+        job: &JobId,
+        stage_id: Option<&str>,
+        kind: &str,
+        relative: &Path,
+    ) -> Result<()> {
         let bytes = std::fs::read(self.config.data_dir.join(relative))?;
         self.append(
             job,
-            Some(stage_id),
+            stage_id,
             EventPayload::ArtifactRecorded {
                 kind: kind.to_owned(),
                 path: relative.to_string_lossy().into_owned(),
                 sha256: sha256_hex(&bytes),
             },
         )
+    }
+
+    fn handoffs(&self, events: &[Event]) -> Vec<(String, String)> {
+        let stages = fold_stages(events);
+        let mut latest: std::collections::BTreeMap<u32, (String, PathBuf)> =
+            std::collections::BTreeMap::new();
+        for event in events {
+            if let (EventPayload::HandoffWritten { path }, Some(id)) =
+                (&event.payload, &event.stage_id)
+            {
+                if let Some(stage) = stages.iter().find(|s| &s.id == id) {
+                    latest.insert(stage.n, (stage.name.clone(), PathBuf::from(path)));
+                }
+            }
+        }
+        latest
+            .into_values()
+            .filter_map(|(name, path)| {
+                std::fs::read_to_string(self.config.data_dir.join(path))
+                    .ok()
+                    .map(|text| (name, text))
+            })
+            .collect()
+    }
+
+    fn deliver(&self, job: &JobId, events: &[Event]) -> Result<std::result::Result<(), String>> {
+        let triaged = events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::TriageCompleted { .. }));
+        if !triaged {
+            return Ok(Ok(()));
+        }
+        if current_plan(events).iter().any(|s| s.name == "ship") {
+            self.ship(job, events)
+        } else {
+            self.report(job, events)?;
+            Ok(Ok(()))
+        }
+    }
+
+    fn report(&self, job: &JobId, events: &[Event]) -> Result<()> {
+        let Some(found) = self.find_job(job)? else {
+            return Ok(());
+        };
+        let body = render_pr_body(
+            job.as_str(),
+            &found.prompt,
+            &self.handoffs(events),
+            &DiffPolicy::evaluate(&[]),
+        );
+        let relative = PathBuf::from("jobs").join(job.as_str()).join("report.md");
+        let path = self.config.data_dir.join(&relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, body)?;
+        self.record_file(job, None, "report", &relative)
+    }
+
+    fn ship(&self, job: &JobId, events: &[Event]) -> Result<std::result::Result<(), String>> {
+        let Some(found) = self.find_job(job)? else {
+            return Ok(Err("ship: job vanished".to_owned()));
+        };
+        let Some(repo) = found.repo.as_deref().map(PathBuf::from) else {
+            return Ok(Err("ship: job has no repository".to_owned()));
+        };
+        let worktree = self.worktree_of(&repo, job);
+        let branch = format!("pizza/{job}");
+        let committed = match self.git.is_dirty(&worktree) {
+            Ok(true) => self
+                .git
+                .commit_wip(&worktree, "pizza-delivery: uncommitted changes")
+                .map(|_| ()),
+            Ok(false) => Ok(()),
+            Err(e) => Err(e),
+        };
+        let files = match committed.and_then(|()| self.git.changed_files(&repo, &worktree)) {
+            Ok(files) => files,
+            Err(e) => return Ok(Err(format!("ship: {e:#}"))),
+        };
+        let policy = DiffPolicy::evaluate(&files);
+        if let Some(risk) = policy.risk() {
+            let event = NewEvent {
+                id: self.env.new_ulid(),
+                job_id: job.clone(),
+                stage_id: None,
+                ts_ms: self.env.now_ms(),
+                actor: Actor::Daemon,
+                payload: EventPayload::FeedbackRecorded {
+                    kind: risk.kind,
+                    severity: risk.severity,
+                    text: risk.text,
+                    confidence: risk.confidence,
+                    alternatives: risk.alternatives,
+                    impact: risk.impact,
+                },
+            };
+            self.with_store(|s| s.append_event(event))?;
+        }
+        let remote = self
+            .config
+            .trust
+            .repos
+            .get(repo.to_string_lossy().as_ref())
+            .and_then(|t| t.push_remote.clone())
+            .unwrap_or_else(|| "origin".to_owned());
+        let audit = |pushed_ref: Option<String>, pr_url: Option<String>| {
+            self.append(
+                job,
+                None,
+                EventPayload::SandboxAudit {
+                    profile_hash: "daemon-ship".to_owned(),
+                    mounts: vec![],
+                    egress_allowlist: vec![],
+                    blocked_requests: vec![],
+                    mcp_activations: vec![],
+                    diff_policy_result: Some(policy.result()),
+                    pushed_ref,
+                    pr_url,
+                },
+            )
+        };
+        let pushed = match self.git.push(&worktree, &remote, &branch) {
+            Ok(pushed) => pushed,
+            Err(e) => {
+                audit(None, None)?;
+                return Ok(Err(format!("ship: push failed: {e:#}")));
+            }
+        };
+        let body = render_pr_body(job.as_str(), &found.prompt, &self.handoffs(events), &policy);
+        let relative = PathBuf::from("jobs").join(job.as_str()).join("pr-body.md");
+        let path = self.config.data_dir.join(&relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, &body)?;
+        self.record_file(job, None, "pr-body", &relative)?;
+        match self.git.open_draft_pr(
+            &worktree,
+            &pr_title(job.as_str(), &found.prompt),
+            &body,
+            &policy.labels(),
+        ) {
+            Ok(url) => {
+                audit(Some(pushed), Some(url))?;
+                Ok(Ok(()))
+            }
+            Err(e) => {
+                audit(Some(pushed), None)?;
+                Ok(Err(format!("ship: opening the pull request failed: {e:#}")))
+            }
+        }
     }
 
     fn beat(&self, stage_id: &str, stop: &AtomicBool) {
@@ -1219,9 +1387,40 @@ mod tests {
         pushed: AtomicBool,
         wip: Mutex<Vec<String>>,
         removed: Mutex<Vec<PathBuf>>,
+        files: Mutex<Vec<String>>,
+        pushes: Mutex<Vec<(String, String)>>,
+        prs: Mutex<Vec<(String, String, Vec<String>)>>,
+        push_fails: AtomicBool,
     }
 
     impl Git for FakeGit {
+        fn changed_files(&self, _repo: &Path, _worktree: &Path) -> Result<Vec<String>> {
+            Ok(self.files.lock().map_err(|_| anyhow!("poisoned"))?.clone())
+        }
+        fn push(&self, _worktree: &Path, remote: &str, branch: &str) -> Result<String> {
+            if self.push_fails.load(Ordering::SeqCst) {
+                return Err(anyhow!("remote rejected"));
+            }
+            self.pushes
+                .lock()
+                .map_err(|_| anyhow!("poisoned"))?
+                .push((remote.to_owned(), branch.to_owned()));
+            Ok(format!("{remote}/{branch}"))
+        }
+        fn open_draft_pr(
+            &self,
+            _worktree: &Path,
+            title: &str,
+            body: &str,
+            labels: &[&str],
+        ) -> Result<String> {
+            self.prs.lock().map_err(|_| anyhow!("poisoned"))?.push((
+                title.to_owned(),
+                body.to_owned(),
+                labels.iter().map(|l| (*l).to_owned()).collect(),
+            ));
+            Ok("https://github.com/o/r/pull/7".to_owned())
+        }
         fn ensure_worktree(
             &self,
             _repo: &Path,
@@ -2179,6 +2378,180 @@ chain = [{ agent = "claude" }, { agent = "opencode" }]
 
         assert_eq!(rig.job_state()?, JobState::Failed);
         assert_eq!(rig.worker().sweep()?, 0);
+        Ok(())
+    }
+
+    fn plan_of(rig: &Rig, names: &[&str]) -> Result<()> {
+        use pizza_delivery_core::triage::{Resolution, Template, Triage};
+        rig.worker().append(
+            &JobId::new("J1"),
+            None,
+            EventPayload::TriageCompleted {
+                triage: Triage {
+                    repo: Resolution {
+                        path: "/src/my repo".into(),
+                        confidence: 100,
+                        alternatives: vec![],
+                    },
+                    template: Template::BugFix,
+                    plan: names
+                        .iter()
+                        .map(|n| PlannedStage {
+                            name: (*n).into(),
+                            reason: "r".into(),
+                        })
+                        .collect(),
+                    risk_flags: vec![],
+                    task: "t".into(),
+                },
+            },
+        )
+    }
+
+    fn shipped_audit(rig: &Rig) -> Result<Option<EventPayload>> {
+        Ok(rig
+            .timeline()?
+            .into_iter()
+            .rev()
+            .find_map(|e| match e.payload {
+                EventPayload::SandboxAudit {
+                    pushed_ref: Some(_),
+                    ..
+                } => Some(e.payload),
+                _ => None,
+            }))
+    }
+
+    #[test]
+    fn shipping_pushes_the_job_branch_and_opens_a_draft_pr_recorded_in_the_ledger() -> Result<()> {
+        let rig = Rig::new(vec![good()])?;
+        plan_of(&rig, &["implement", "ship"])?;
+        *rig.git.files.lock().map_err(|_| anyhow!("poisoned"))? = vec!["src/a.rs".to_owned()];
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::Completed);
+        assert_eq!(
+            *rig.git.pushes.lock().map_err(|_| anyhow!("poisoned"))?,
+            vec![("origin".to_owned(), "pizza/J1".to_owned())]
+        );
+        let prs = rig.git.prs.lock().map_err(|_| anyhow!("poisoned"))?;
+        assert_eq!(prs.len(), 1);
+        assert!(prs[0].1.contains("J1") && prs[0].1.contains("## implement"));
+        assert!(prs[0].2.is_empty());
+        match shipped_audit(&rig)? {
+            Some(EventPayload::SandboxAudit {
+                pushed_ref,
+                pr_url,
+                diff_policy_result,
+                ..
+            }) => {
+                assert_eq!(pushed_ref.as_deref(), Some("origin/pizza/J1"));
+                assert_eq!(pr_url.as_deref(), Some("https://github.com/o/r/pull/7"));
+                assert_eq!(diff_policy_result.as_deref(), Some("clean"));
+            }
+            other => return Err(anyhow!("no ship audit: {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sensitive_changes_ship_as_a_labelled_draft_with_a_high_severity_risk() -> Result<()> {
+        let rig = Rig::new(vec![good()])?;
+        plan_of(&rig, &["implement", "ship"])?;
+        *rig.git.files.lock().map_err(|_| anyhow!("poisoned"))? =
+            vec!["src/a.rs".to_owned(), ".github/workflows/ci.yml".to_owned()];
+
+        rig.worker().tick()?;
+
+        let prs = rig.git.prs.lock().map_err(|_| anyhow!("poisoned"))?;
+        assert_eq!(prs[0].2, vec!["infra-change"]);
+        assert!(prs[0].1.contains(".github/workflows/ci.yml"));
+        let risks: Vec<_> = rig
+            .timeline()?
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::FeedbackRecorded { kind, severity, .. } => Some((kind, severity)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(risks, vec![("risk".to_owned(), "high".to_owned())]);
+        assert!(matches!(
+            shipped_audit(&rig)?,
+            Some(EventPayload::SandboxAudit { diff_policy_result: Some(r), .. }) if r.starts_with("sensitive")
+        ));
+        assert_eq!(rig.job_state()?, JobState::Completed);
+        Ok(())
+    }
+
+    #[test]
+    fn a_report_only_job_ends_with_a_report_artifact_and_never_ships() -> Result<()> {
+        let rig = Rig::new(vec![good()])?;
+        plan_of(&rig, &["investigate"])?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::Completed);
+        assert!(rig
+            .git
+            .pushes
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?
+            .is_empty());
+        assert!(rig
+            .git
+            .prs
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?
+            .is_empty());
+        let kinds: Vec<String> = rig
+            .timeline()?
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::ArtifactRecorded { kind, .. } => Some(kind),
+                _ => None,
+            })
+            .collect();
+        assert!(kinds.contains(&"report".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn a_rejected_push_fails_the_job_with_the_reason() -> Result<()> {
+        let rig = Rig::new(vec![good()])?;
+        plan_of(&rig, &["implement", "ship"])?;
+        rig.git.push_fails.store(true, Ordering::SeqCst);
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::Failed);
+        assert!(rig
+            .git
+            .prs
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?
+            .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn the_push_remote_comes_from_the_repos_trust_config() -> Result<()> {
+        let mut rig = Rig::new(vec![good()])?;
+        rig.config.trust.repos.insert(
+            "/src/my repo".to_owned(),
+            pizza_delivery_core::sandbox::RepoTrust {
+                push_remote: Some("fork".to_owned()),
+                ..Default::default()
+            },
+        );
+        plan_of(&rig, &["implement", "ship"])?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(
+            *rig.git.pushes.lock().map_err(|_| anyhow!("poisoned"))?,
+            vec![("fork".to_owned(), "pizza/J1".to_owned())]
+        );
         Ok(())
     }
 }

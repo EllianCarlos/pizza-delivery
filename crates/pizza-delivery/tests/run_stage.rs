@@ -43,9 +43,32 @@ fn the_job_worktree_is_a_pizza_branch_cut_from_the_default_branch() -> TestResul
         format!("pizza/{id}")
     );
     assert_eq!(
-        h.vcs(&worktree, &["rev-parse", "HEAD"])?,
+        h.vcs(&worktree, &["merge-base", "HEAD", "main"])?,
         h.vcs(&h.repo()?, &["rev-parse", "main"])?
     );
+    Ok(())
+}
+
+#[test]
+fn a_finished_job_is_pushed_and_its_draft_pr_url_is_ledgered() -> TestResult {
+    let h = Harness::new()?;
+    let id = h.submit_in_repo("do the thing")?;
+    let job = h.wait_for_end(&id)?;
+    assert_eq!(job["state"], "completed");
+
+    let remote = h.root().join("remotes").join("my-repo.git");
+    let branches = h.vcs(&remote, &["branch", "--list", &format!("pizza/{id}")])?;
+    assert!(branches.contains(&format!("pizza/{id}")));
+
+    let shipped = h
+        .ledger()?
+        .into_iter()
+        .filter(|r| r.job_id == id && r.kind == "sandbox-audit")
+        .find(|r| r.payload["pushed_ref"].is_string())
+        .ok_or("no ship audit")?;
+    assert_eq!(shipped.payload["pushed_ref"], format!("origin/pizza/{id}"));
+    assert_eq!(shipped.payload["pr_url"], "https://github.com/o/r/pull/1");
+    assert_eq!(shipped.payload["diff_policy_result"], "clean");
     Ok(())
 }
 
@@ -105,7 +128,8 @@ fn artifacts_are_indexed_in_the_ledger_with_hashes_of_the_files_on_disk() -> Tes
             "handoff",
             "raw-output",
             "handoff",
-            "review-report"
+            "review-report",
+            "pr-body"
         ]
     );
     for row in artifacts {

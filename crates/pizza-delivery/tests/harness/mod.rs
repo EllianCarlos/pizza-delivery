@@ -64,6 +64,22 @@ echo "not a handoff" > "$PIZZA_DELIVERY_HANDOFF"
 echo '{"type":"result","is_error":false}'
 "#;
 
+fn fake_gh_dir() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("pizza-delivery-fake-gh-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let staged = dir.join("gh.tmp");
+        let script = "#!/bin/sh\ncase \"$1\" in\npr) echo https://github.com/o/r/pull/1;;\nesac\n";
+        if fs::write(&staged, script).is_ok() {
+            let _ = fs::set_permissions(&staged, fs::Permissions::from_mode(0o755));
+            let _ = fs::rename(&staged, dir.join("gh"));
+        }
+        dir
+    })
+}
+
 pub struct Harness {
     root: TempDir,
     env: Vec<(String, String)>,
@@ -169,6 +185,13 @@ impl Harness {
             for args in setup {
                 self.vcs(&repo, args)?;
             }
+            let remote = self.root.path().join("remotes").join(format!("{name}.git"));
+            fs::create_dir_all(&remote)?;
+            self.vcs(&remote, &["init", "-q", "--bare"])?;
+            self.vcs(
+                &repo,
+                &["remote", "add", "origin", &remote.to_string_lossy()],
+            )?;
         }
         Ok(repo.canonicalize()?)
     }
@@ -186,8 +209,14 @@ impl Harness {
         if let Some(routing) = &self.routing {
             command.env("PIZZA_DELIVERY_ROUTING", routing);
         }
+        let path = format!(
+            "{}:{}",
+            fake_gh_dir().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let out: Output = command
             .args(args)
+            .env("PATH", path)
             .env("XDG_CONFIG_HOME", self.root.path().join("xdg"))
             .env("PIZZA_DELIVERY_DATA_DIR", self.data_dir())
             .env("PIZZA_DELIVERY_SOCKET", self.root.path().join("pd.sock"))

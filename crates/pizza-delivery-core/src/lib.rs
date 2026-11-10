@@ -20,6 +20,7 @@ pub mod review;
 pub mod routing;
 pub mod sandbox;
 pub mod schedule;
+pub mod ship;
 pub mod spec;
 pub mod stage;
 pub mod store;

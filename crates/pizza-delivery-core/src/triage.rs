@@ -197,6 +197,7 @@ pub enum Template {
     FullFeature,
     BugFix,
     Investigate,
+    Report,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +217,13 @@ pub struct Triage {
 
 pub const DEFAULT_MAX_STAGES: usize = 10;
 
+const REPORT_WORDS: [&str; 5] = [
+    "report only",
+    "report-only",
+    "just a report",
+    "no pull request",
+    "without a pr",
+];
 const INVESTIGATE_WORDS: [&str; 7] = [
     "investigate",
     "research",
@@ -258,7 +266,9 @@ fn has_any(haystack: &str, words: &[&str]) -> bool {
 
 pub fn classify(prompt: &str) -> Template {
     let lower = prompt.to_lowercase();
-    if has_any(&lower, &INVESTIGATE_WORDS) {
+    if has_any(&lower, &REPORT_WORDS) {
+        Template::Report
+    } else if has_any(&lower, &INVESTIGATE_WORDS) {
         Template::Investigate
     } else if has_any(&lower, &BUG_WORDS) {
         Template::BugFix
@@ -297,6 +307,7 @@ pub fn plan_for(template: Template) -> Vec<PlannedStage> {
             ship,
         ],
         Template::BugFix => vec![grill, implement, review, ship],
+        Template::Report => vec![stage("investigate", "gather findings into a report")],
         Template::Investigate => vec![
             stage("investigate", "gather findings before deciding anything"),
             stage("grill", "decide whether a pull request is needed"),
@@ -325,6 +336,7 @@ fn restate(prompt: &str, repo: &Resolution, template: Template) -> String {
             Template::FullFeature => "build a new capability from spec to pull request",
             Template::BugFix => "diagnose and fix a defect, then ship the fix",
             Template::Investigate => "investigate first, then decide whether a change is needed",
+            Template::Report => "investigate and end with a report, no pull request",
         }
     )
 }
@@ -684,6 +696,15 @@ mod tests {
             actor: crate::event::Actor::Daemon,
             payload,
         }
+    }
+
+    #[test]
+    fn report_only_prompts_get_a_plan_without_a_ship_stage() {
+        assert_eq!(
+            classify("investigate the flaky test, report only"),
+            Template::Report
+        );
+        assert_eq!(names(&plan_for(Template::Report)), vec!["investigate"]);
     }
 
     #[test]

@@ -17,6 +17,21 @@ pub trait Git: Send + Sync {
     fn is_dirty(&self, worktree: &Path) -> Result<bool>;
     fn is_pushed(&self, worktree: &Path) -> Result<bool>;
     fn remove_worktree(&self, repo: &Path, worktree: &Path) -> Result<()>;
+    fn changed_files(&self, _repo: &Path, _worktree: &Path) -> Result<Vec<String>> {
+        Err(anyhow!("changed_files is not supported"))
+    }
+    fn push(&self, _worktree: &Path, _remote: &str, _branch: &str) -> Result<String> {
+        Err(anyhow!("push is not supported"))
+    }
+    fn open_draft_pr(
+        &self,
+        _worktree: &Path,
+        _title: &str,
+        _body: &str,
+        _labels: &[&str],
+    ) -> Result<String> {
+        Err(anyhow!("open_draft_pr is not supported"))
+    }
 }
 
 pub struct SystemGit;
@@ -119,6 +134,56 @@ impl Git for SystemGit {
         let path = worktree.to_string_lossy();
         run(repo, &["worktree", "remove", &path]).map(|_| ())
     }
+
+    fn changed_files(&self, repo: &Path, worktree: &Path) -> Result<Vec<String>> {
+        let base = default_branch(repo)?;
+        let range = format!("{base}...HEAD");
+        Ok(run(worktree, &["diff", "--name-only", &range])?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn push(&self, worktree: &Path, remote: &str, branch: &str) -> Result<String> {
+        run(worktree, &["push", "--set-upstream", remote, branch])?;
+        Ok(format!("{remote}/{branch}"))
+    }
+
+    fn open_draft_pr(
+        &self,
+        worktree: &Path,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+    ) -> Result<String> {
+        let mut args = vec!["pr", "create", "--draft", "--title", title, "--body", body];
+        for label in labels {
+            let _ = gh(worktree, &["label", "create", label, "--force"]);
+            args.extend(["--label", label]);
+        }
+        let out = gh(worktree, &args)?;
+        out.lines()
+            .last()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("gh pr create printed no URL"))
+    }
+}
+
+fn gh(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("gh")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .context("run gh")?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    } else {
+        Err(anyhow!(
+            "gh {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 pub struct LockedGit<G> {
@@ -172,6 +237,24 @@ impl<G: Git> Git for LockedGit<G> {
 
     fn remove_worktree(&self, repo: &Path, worktree: &Path) -> Result<()> {
         self.serialized(repo, |g| g.remove_worktree(repo, worktree))
+    }
+
+    fn changed_files(&self, repo: &Path, worktree: &Path) -> Result<Vec<String>> {
+        self.inner.changed_files(repo, worktree)
+    }
+
+    fn push(&self, worktree: &Path, remote: &str, branch: &str) -> Result<String> {
+        self.inner.push(worktree, remote, branch)
+    }
+
+    fn open_draft_pr(
+        &self,
+        worktree: &Path,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+    ) -> Result<String> {
+        self.inner.open_draft_pr(worktree, title, body, labels)
     }
 }
 
@@ -232,5 +315,40 @@ mod tests {
     #[test]
     fn different_repos_are_not_serialized_against_each_other() {
         assert_eq!(overlaps_for(["/r1", "/r2"]), 1);
+    }
+
+    #[test]
+    fn changed_files_lists_what_the_job_branch_changed_since_the_default_branch() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        let commit = |msg: &str| {
+            run(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    msg,
+                ],
+            )
+        };
+        run(&repo, &["init", "-q", "-b", "main"])?;
+        commit("root")?;
+        let worktree = dir.path().join("wt");
+        SystemGit.ensure_worktree(&repo, &worktree, "pizza/J1", None)?;
+        std::fs::write(worktree.join("flake.nix"), "x")?;
+        SystemGit.commit_wip(&worktree, "work")?;
+
+        assert_eq!(
+            SystemGit.changed_files(&repo, &worktree)?,
+            vec!["flake.nix"]
+        );
+        Ok(())
     }
 }
