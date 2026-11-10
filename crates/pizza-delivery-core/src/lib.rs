@@ -28,6 +28,7 @@ pub mod stage;
 pub mod store;
 pub mod triage;
 pub mod usage;
+pub mod view;
 
 pub use api::{ApiError, ErrorKind, JobView, Request, Response};
 pub use event::{Actor, Event, EventPayload, FollowUp};

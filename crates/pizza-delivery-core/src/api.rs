@@ -52,7 +52,8 @@ pub enum Request {
     Stop,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct JobView {
     pub id: JobId,
     pub short_id: String,
@@ -61,8 +62,9 @@ pub struct JobView {
     pub submitted_at_ms: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum ErrorKind {
     NotFound,
     Ambiguous,
@@ -70,7 +72,8 @@ pub enum ErrorKind {
     Internal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct ApiError {
     pub kind: ErrorKind,
     pub message: String,

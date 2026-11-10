@@ -4,8 +4,9 @@ use crate::event::{Event, EventPayload};
 use crate::id::JobId;
 use crate::schedule::Priority;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum JobState {
     Queued,
     Running,

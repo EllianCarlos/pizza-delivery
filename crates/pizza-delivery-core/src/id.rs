@@ -4,8 +4,9 @@ use thiserror::Error;
 const MIN_SHORT_LEN: usize = 8;
 const LAST: &str = "@last";
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(transparent)]
+#[ts(export)]
 pub struct JobId(String);
 
 impl JobId {

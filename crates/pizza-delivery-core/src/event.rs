@@ -19,8 +19,9 @@ pub struct FollowUp {
     pub reply: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum Actor {
     Daemon,
     Agent,

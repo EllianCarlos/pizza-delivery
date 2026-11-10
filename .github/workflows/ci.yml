@@ -20,3 +20,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: TypeScript types are up to date
+        run: |
+          cargo test -p pizza-delivery-core --lib
+          git diff --exit-code -- web/src/generated
+          test -z "$(git ls-files --others --exclude-standard web/src/generated)"

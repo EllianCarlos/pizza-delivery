@@ -100,6 +100,18 @@ impl Store for NotifyingStore {
         self.inner.read_timeline(job)
     }
 
+    fn read_timeline_cursored(&self, job: &JobId) -> Result<Vec<(u64, Event)>, StoreError> {
+        self.inner.read_timeline_cursored(job)
+    }
+
+    fn head(&self) -> Result<u64, StoreError> {
+        self.inner.head()
+    }
+
+    fn events_since(&self, after: u64, limit: usize) -> Result<Vec<(u64, Event)>, StoreError> {
+        self.inner.events_since(after, limit)
+    }
+
     fn quota_events(&self) -> Result<Vec<Event>, StoreError> {
         self.inner.quota_events()
     }

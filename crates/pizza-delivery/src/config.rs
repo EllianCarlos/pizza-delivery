@@ -5,6 +5,8 @@ use pizza_delivery_core::routing::{ConfigError as RoutingError, RoutingConfig};
 use pizza_delivery_core::{Caps, DEFAULT_RETENTION_MS};
 use thiserror::Error;
 
+pub const DEFAULT_HTTP_PORT: u16 = 7878;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -27,6 +29,7 @@ pub struct Config {
     pub budget_defaults: Defaults,
     pub mcp_catalog: PathBuf,
     pub mcp_secrets: PathBuf,
+    pub http_port: u16,
     pub notify_command: Option<PathBuf>,
     pub notify_opener: PathBuf,
     pub notify_muted: String,
@@ -120,6 +123,9 @@ impl Config {
             mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
             mcp_catalog,
             mcp_secrets,
+            http_port: get("PIZZA_DELIVERY_HTTP_PORT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_HTTP_PORT),
             notify_command: match get("PIZZA_DELIVERY_NOTIFY").as_deref() {
                 Some("off") => None,
                 Some(command) => Some(PathBuf::from(command)),

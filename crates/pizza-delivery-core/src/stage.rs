@@ -41,8 +41,9 @@ pub fn pipeline_done(events: &[Event]) -> bool {
             .is_some_and(|s| s.state == StageState::Succeeded)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum StageState {
     Queued,
     Running,
@@ -61,7 +62,8 @@ impl StageState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct StageView {
     pub id: String,
     pub n: u32,
