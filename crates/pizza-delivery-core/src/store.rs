@@ -30,6 +30,7 @@ pub struct ClaimRequest {
     pub ttl_ms: i64,
     pub stage_id: String,
     pub event_ids: [String; 2],
+    pub require_triage: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +61,7 @@ pub trait Store: Send {
     fn enqueue_job(&mut self, job: NewJob) -> Result<Job, StoreError>;
     fn list_jobs(&self) -> Result<Vec<Job>, StoreError>;
     fn read_timeline(&self, job: &JobId) -> Result<Vec<Event>, StoreError>;
+    fn quota_events(&self) -> Result<Vec<Event>, StoreError>;
     fn append_event(&mut self, event: NewEvent) -> Result<Event, StoreError>;
     fn claim_stage(&mut self, request: ClaimRequest) -> Result<Option<Claimed>, StoreError>;
     fn heartbeat(&mut self, stage_id: &str, expires_ms: i64) -> Result<(), StoreError>;

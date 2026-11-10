@@ -3,6 +3,7 @@ use serde_json::json;
 use crate::api::JobView;
 use crate::event::Event;
 use crate::id::JobId;
+use crate::quota::QuotaView;
 use crate::stage::StageView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +78,39 @@ pub fn render_jobs(jobs: &[JobView], mode: OutputMode) -> String {
     }
 }
 
+pub fn render_quota(agents: &[QuotaView], now_ms: i64, mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Json => agents
+            .iter()
+            .map(|a| line(&serde_json::to_value(a).unwrap_or_default()))
+            .collect(),
+        OutputMode::Human if agents.is_empty() => "no quota signals yet\n".to_owned(),
+        OutputMode::Human => {
+            let rows: String = agents
+                .iter()
+                .map(|a| {
+                    let used = a
+                        .utilization_permille
+                        .map_or_else(|| "-".to_owned(), |u| format!("{}%", u / 10));
+                    let reset = match (a.resets_at_ms, a.reset_known) {
+                        (None, _) => "-".to_owned(),
+                        (Some(at), known) => format!(
+                            "in {}s{}",
+                            (at - now_ms).max(0) / 1000,
+                            if known { "" } else { " (default backoff)" }
+                        ),
+                    };
+                    format!("{:<10}  {:<9}  {:>5}  {}\n", a.agent, a.state, used, reset)
+                })
+                .collect();
+            format!(
+                "{:<10}  {:<9}  {:>5}  RESET\n{rows}",
+                "AGENT", "STATE", "USED"
+            )
+        }
+    }
+}
+
 fn count(value: Option<u64>) -> String {
     value.map_or_else(|| "-".to_owned(), |n| n.to_string())
 }
@@ -144,6 +178,33 @@ pub fn render_timeline(
 mod tests {
     use super::*;
     use crate::job::JobState;
+
+    fn exhausted_claude() -> QuotaView {
+        QuotaView {
+            agent: "claude".into(),
+            state: "exhausted".into(),
+            utilization_permille: Some(1000),
+            resets_at_ms: Some(65_000),
+            reset_known: true,
+        }
+    }
+
+    #[test]
+    fn quota_renders_one_json_line_per_agent_and_a_table_for_humans() {
+        let agents = [exhausted_claude()];
+        let json = render_quota(&agents, 5_000, OutputMode::Json);
+        let human = render_quota(&agents, 5_000, OutputMode::Human);
+        let first: serde_json::Value = serde_json::from_str(json.trim()).unwrap_or_default();
+        assert_eq!(first["agent"], "claude");
+        assert_eq!(first["state"], "exhausted");
+        assert!(human.contains("claude"));
+        assert!(human.contains("100%"));
+        assert!(human.contains("in 60s"));
+        assert_eq!(
+            render_quota(&[], 0, OutputMode::Human),
+            "no quota signals yet\n"
+        );
+    }
 
     fn view(short: &str, prompt: &str) -> JobView {
         JobView {

@@ -9,11 +9,51 @@ pub enum Outcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimit {
+    pub allowed: bool,
+    pub utilization_permille: Option<u32>,
+    pub resets_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentRun {
     pub session_id: Option<String>,
     pub usage: Usage,
     pub outcome: Outcome,
     pub slash_commands: Vec<String>,
+    pub rate_limit: Option<RateLimit>,
+    pub api_error_status: Option<u64>,
+    pub result_text: Option<String>,
+}
+
+fn epoch_ms(seconds: &Value) -> Option<i64> {
+    seconds
+        .as_i64()
+        .or_else(|| seconds.as_f64().map(|f| f as i64))
+        .map(|s| s.saturating_mul(1000))
+}
+
+fn rate_limit_of(lines: &[Value]) -> Option<RateLimit> {
+    let info = of_type(lines, "rate_limit_event")?.get("rate_limit_info")?;
+    let allowed = info
+        .get("status")
+        .and_then(Value::as_str)
+        .map_or(true, |s| s.starts_with("allowed"));
+    let hottest = info
+        .get("unifiedWindows")
+        .and_then(Value::as_object)
+        .and_then(|w| {
+            w.values()
+                .filter_map(|v| Some((v.get("utilization")?.as_f64()?, v.get("resetsAt"))))
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+        });
+    Some(RateLimit {
+        allowed,
+        utilization_permille: hottest.map(|(u, _)| (u.clamp(0.0, 1.0) * 1000.0).round() as u32),
+        resets_at_ms: hottest
+            .and_then(|(_, r)| r.and_then(epoch_ms))
+            .or_else(|| info.get("resetsAt").and_then(epoch_ms)),
+    })
 }
 
 fn parsed(stdout: &str) -> Vec<Value> {
@@ -65,6 +105,8 @@ fn usage_of(init: Option<&Value>, result: Option<&Value>) -> Usage {
             .and_then(Value::as_f64)
             .map(|usd| (usd * 1_000_000.0).round() as u64),
         wall_ms: None,
+        agent: None,
+        candidate_position: None,
     }
 }
 
@@ -100,6 +142,11 @@ pub fn parse_stream(stdout: &str) -> AgentRun {
             .or_else(|| init.and_then(|i| text(i, "session_id"))),
         usage: usage_of(init, result),
         outcome: outcome_of(result),
+        rate_limit: rate_limit_of(&lines),
+        api_error_status: result
+            .and_then(|r| r.get("api_error_status"))
+            .and_then(Value::as_u64),
+        result_text: result.and_then(|r| text(r, "result")),
         slash_commands: init
             .and_then(|i| i.get("slash_commands"))
             .and_then(Value::as_array)
@@ -157,6 +204,34 @@ mod tests {
             }
         ));
         assert_eq!(run.usage, Usage::default());
+    }
+
+    #[test]
+    fn the_recorded_rate_limit_event_yields_the_hottest_window_and_its_reset() {
+        let run = parse_stream(NORMAL);
+        assert_eq!(
+            run.rate_limit,
+            Some(RateLimit {
+                allowed: true,
+                utilization_permille: Some(290),
+                resets_at_ms: Some(1_794_288_600_000),
+            })
+        );
+    }
+
+    #[test]
+    fn a_rejected_rate_limit_event_is_not_allowed() {
+        let run = parse_stream(
+            "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":1000}}\n",
+        );
+        assert_eq!(
+            run.rate_limit,
+            Some(RateLimit {
+                allowed: false,
+                utilization_permille: None,
+                resets_at_ms: Some(1_000_000),
+            })
+        );
     }
 
     #[test]

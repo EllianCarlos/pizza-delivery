@@ -9,7 +9,7 @@ use listenfd::ListenFd;
 use pizza_delivery_core::api::{ApiError, ErrorKind};
 use pizza_delivery_core::{Request, Response, Store};
 
-use crate::agent::{Agent, ClaudeAgent};
+use crate::agent::{CliAgent, Fleet};
 use crate::config::Config;
 use crate::git::SystemGit;
 use crate::handler::{handle, Env, SystemEnv};
@@ -20,6 +20,7 @@ use crate::triage::{
     MnemonSource, SystemIndex, Triager,
 };
 use crate::worker::{Worker, WorkerConfig};
+use pizza_delivery_core::routing::AdapterKind;
 
 pub enum Bound {
     Listener(UnixListener),
@@ -66,7 +67,7 @@ pub fn run(config: &Config) -> Result<()> {
 fn with_deps<T>(
     store: &Mutex<Box<dyn Store>>,
     config: &Config,
-    agent: &ClaudeAgent,
+    agent: &CliAgent,
     f: impl FnOnce(Deps<'_>) -> T,
 ) -> T {
     let index = SystemIndex {
@@ -98,7 +99,7 @@ fn dry_run(
     prompt: &str,
     repo: Option<&str>,
 ) -> Response {
-    let agent = ClaudeAgent::new(&config.agent_command);
+    let agent = CliAgent::new(AdapterKind::Claude, &config.agent_command);
     let report = with_deps(store, config, &agent, |deps| analyze(prompt, repo, &deps));
     Response::Triaged {
         outcome: report.outcome,
@@ -107,7 +108,8 @@ fn dry_run(
 }
 
 fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop: &AtomicBool) {
-    let agent = ClaudeAgent::new(&config.agent_command);
+    let fleet = Fleet::from_routing(&config.routing);
+    let agent = CliAgent::new(AdapterKind::Claude, &config.agent_command);
     let trust = match load_trust(&config.trust_path) {
         Ok(trust) => trust,
         Err(e) => {
@@ -125,12 +127,14 @@ fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop
             .max(10),
         timeout: Duration::from_secs(config.stage_timeout_secs),
         budget_cap_tokens: config.budget_cap_tokens,
+        require_triage: true,
     };
     let worker = Worker {
         store,
         env,
         git: &SystemGit,
-        agent: &agent,
+        fleet: &fleet,
+        routing: &config.routing,
         config: &worker_config,
     };
     while !stop.load(Ordering::SeqCst) {

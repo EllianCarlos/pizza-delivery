@@ -12,4 +12,8 @@ pub struct Usage {
     pub cost_microusd: Option<u64>,
     #[serde(default)]
     pub wall_ms: Option<u64>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub candidate_position: Option<u32>,
 }

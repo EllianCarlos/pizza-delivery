@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::budget::{SizeTier, StageEstimate};
 use crate::id::JobId;
+use crate::quota::QuotaStatus;
 use crate::triage::{PlannedStage, Triage};
 use crate::usage::Usage;
 
@@ -55,6 +56,25 @@ pub enum EventPayload {
     },
     AgentFinished {
         usage: Usage,
+    },
+    QuotaSignal {
+        agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        status: QuotaStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        utilization_permille: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at_ms: Option<i64>,
+        reset_known: bool,
+    },
+    AgentFellBack {
+        agent: String,
+        reason: String,
+    },
+    JobParked {
+        until_ms: i64,
+        reason: String,
     },
     SandboxAudit {
         profile_hash: String,
@@ -136,6 +156,9 @@ impl EventPayload {
             EventPayload::StageStarted { .. } => "stage-started",
             EventPayload::AgentInvoked { .. } => "agent-invoked",
             EventPayload::AgentFinished { .. } => "agent-finished",
+            EventPayload::QuotaSignal { .. } => "quota-signal",
+            EventPayload::AgentFellBack { .. } => "agent-fell-back",
+            EventPayload::JobParked { .. } => "job-parked",
             EventPayload::SandboxAudit { .. } => "sandbox-audit",
             EventPayload::EgressBlocked { .. } => "egress-blocked",
             EventPayload::ArtifactRecorded { .. } => "artifact-recorded",

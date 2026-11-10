@@ -8,6 +8,7 @@ use crate::id::JobId;
 pub enum JobState {
     Queued,
     Running,
+    WaitingForQuota,
     Completed,
     Failed,
     NeedsHuman,
@@ -18,6 +19,7 @@ impl JobState {
         match self {
             JobState::Queued => "queued",
             JobState::Running => "running",
+            JobState::WaitingForQuota => "waiting-for-quota",
             JobState::Completed => "completed",
             JobState::Failed => "failed",
             JobState::NeedsHuman => "needs-human",
@@ -39,6 +41,7 @@ fn next_state(current: JobState, payload: &EventPayload) -> JobState {
     match payload {
         EventPayload::StageClaimed { .. } => JobState::Running,
         EventPayload::StageRetried { .. } => JobState::Queued,
+        EventPayload::JobParked { .. } => JobState::WaitingForQuota,
         EventPayload::JobCompleted {} => JobState::Completed,
         EventPayload::JobFailed { .. } => JobState::Failed,
         EventPayload::JobNeedsHuman { .. } => JobState::NeedsHuman,
@@ -118,6 +121,24 @@ mod tests {
                 last_seq: 1
             })
         );
+    }
+
+    #[test]
+    fn a_parked_job_waits_for_quota_until_a_claim_resumes_it() {
+        let claimed = EventPayload::StageClaimed {
+            holder: "w".into(),
+            attempt: 1,
+            lease_expires_ms: 9,
+        };
+        let parked = EventPayload::JobParked {
+            until_ms: 5,
+            reason: "q".into(),
+        };
+        let state = |events: &[Event]| fold(events).map(|j| j.state);
+        let mut history = vec![submitted(1), after(2, claimed.clone()), after(3, parked)];
+        assert_eq!(state(&history), Some(JobState::WaitingForQuota));
+        history.push(after(4, claimed));
+        assert_eq!(state(&history), Some(JobState::Running));
     }
 
     #[test]

@@ -7,17 +7,23 @@ use anyhow::{anyhow, Result};
 use pizza_delivery_core::budget::{
     actual_overrun, estimate_for, estimate_stage, tier_for, Defaults,
 };
-use pizza_delivery_core::claude::{parse_stream, Outcome};
+use pizza_delivery_core::classify::{classify, Classified, Failure, RawRun};
 use pizza_delivery_core::event::{Actor, EventPayload};
 use pizza_delivery_core::handoff::validate;
-use pizza_delivery_core::prompt::{render_stage_prompt, TEMPLATE_NAME, TEMPLATE_VERSION};
+use pizza_delivery_core::prompt::{
+    render_stage_prompt, with_interruption_note, TEMPLATE_NAME, TEMPLATE_VERSION,
+};
+use pizza_delivery_core::quota::{fold_quota, QuotaStatus};
+use pizza_delivery_core::routing::{
+    route, stage_capabilities, Candidate, RouteRequest, RoutingConfig, Skip,
+};
 use pizza_delivery_core::sandbox::{blocked_hosts, Mount, SandboxProfile, TrustConfig};
 use pizza_delivery_core::{
     fold_stages, ClaimRequest, Claimed, JobId, NewEvent, Store, StoreError, MAX_ATTEMPTS,
 };
 use sha2::{Digest, Sha256};
 
-use crate::agent::{Agent, Invocation};
+use crate::agent::{Fleet, Invocation};
 use crate::git::Git;
 use crate::handler::Env;
 use crate::process::{kill_group, start_ticks};
@@ -30,21 +36,41 @@ pub struct WorkerConfig {
     pub timeout: Duration,
     pub trust: TrustConfig,
     pub budget_cap_tokens: u64,
+    pub require_triage: bool,
 }
 
 pub struct Worker<'a> {
     pub store: &'a Mutex<Box<dyn Store>>,
     pub env: &'a dyn Env,
     pub git: &'a dyn Git,
-    pub agent: &'a dyn Agent,
+    pub fleet: &'a Fleet,
+    pub routing: &'a RoutingConfig,
     pub config: &'a WorkerConfig,
 }
 
+const DEFAULT_TIER: &str = "standard";
+const MIN_PARK_MS: i64 = 1_000;
+
 enum Verdict {
     Succeeded,
-    Park(String),
+    NeedsHuman(String),
     Retry(String),
     Fail(String),
+    Park { until_ms: i64, reason: String },
+}
+
+enum Attempt {
+    Settled(Verdict),
+    Quota { until_ms: i64, reason: String },
+    Provider(String),
+}
+
+struct StageRun {
+    repo: PathBuf,
+    relative: PathBuf,
+    handoff_rel: PathBuf,
+    handoff_path: PathBuf,
+    worktree: PathBuf,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -89,6 +115,7 @@ impl Worker<'_> {
             ttl_ms: self.config.lease_ttl_ms,
             stage_id: self.env.new_ulid(),
             event_ids: [self.env.new_ulid(), self.env.new_ulid()],
+            require_triage: self.config.require_triage,
         };
         match self.with_store(|s| s.claim_stage(request))? {
             Some(claimed) => self.run_claimed(&claimed).map(|()| true),
@@ -140,7 +167,7 @@ impl Worker<'_> {
                 self.append(job, stage, EventPayload::StageSucceeded {})?;
                 self.append(job, None, EventPayload::JobCompleted {})?;
             }
-            Verdict::Park(reason) => {
+            Verdict::NeedsHuman(reason) => {
                 self.append(
                     job,
                     stage,
@@ -152,6 +179,9 @@ impl Worker<'_> {
             }
             Verdict::Retry(reason) => {
                 self.append(job, stage, EventPayload::StageRetried { reason })?;
+            }
+            Verdict::Park { until_ms, reason } => {
+                self.append(job, stage, EventPayload::JobParked { until_ms, reason })?;
             }
             Verdict::Fail(reason) => {
                 self.append(
@@ -239,13 +269,8 @@ impl Worker<'_> {
             .join(job.id.as_str())
             .join("stages")
             .join(format!("{}-{}", claimed.n, claimed.name));
-        let dir = self.config.data_dir.join(&relative);
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(self.config.data_dir.join(&relative))?;
         let handoff_rel = relative.join("handoff.md");
-        let handoff_path = self.config.data_dir.join(&handoff_rel);
-        if handoff_path.exists() {
-            std::fs::remove_file(&handoff_path)?;
-        }
         let stage = Some(claimed.stage_id.as_str());
         self.append(
             &job.id,
@@ -254,38 +279,191 @@ impl Worker<'_> {
                 attempt: claimed.attempt,
             },
         )?;
-        let prompt = render_stage_prompt(
-            job.id.as_str(),
-            &claimed.name,
-            &job.prompt,
-            &handoff_path.to_string_lossy(),
+        let run = StageRun {
+            repo: repo.clone(),
+            relative,
+            handoff_path: self.config.data_dir.join(&handoff_rel),
+            handoff_rel,
+            worktree,
+        };
+        let timeline = self.with_store(|s| s.read_timeline(&job.id))?;
+        let quota = fold_quota(&self.with_store(|s| s.quota_events())?);
+        let required = stage_capabilities(&claimed.name);
+        let now = self.env.now_ms();
+        let routed = match route(
+            self.routing,
+            &RouteRequest {
+                stage: &claimed.name,
+                tier: DEFAULT_TIER,
+                repo: job.repo.as_deref(),
+                required: &required,
+            },
+            &quota,
+            now,
+        ) {
+            Ok(routed) => routed,
+            Err(e) => return Ok(Verdict::Fail(format!("routing: {e}"))),
+        };
+        let mut waits: Vec<i64> = routed
+            .skipped
+            .iter()
+            .map(|(_, skip)| match skip {
+                Skip::Exhausted { until_ms } => *until_ms,
+                Skip::Utilization { resets_at_ms } => {
+                    resets_at_ms.unwrap_or(now + self.routing.default_backoff_ms)
+                }
+            })
+            .collect();
+        let mut interrupted = timeline
+            .iter()
+            .any(|e| {
+                e.stage_id.as_deref() == stage
+                    && matches!(e.payload, EventPayload::JobParked { .. })
+            })
+            .then_some("a previous agent");
+        let mut last_error: Option<String> = None;
+        for (position, candidate) in routed.candidates.iter().enumerate() {
+            match self.try_candidate(claimed, &run, position, candidate, interrupted)? {
+                Attempt::Settled(verdict) => return Ok(verdict),
+                Attempt::Quota { until_ms, reason } => {
+                    waits.push(until_ms);
+                    self.fall_back(claimed, candidate, &reason)?;
+                }
+                Attempt::Provider(reason) => {
+                    last_error = Some(reason.clone());
+                    self.fall_back(claimed, candidate, &reason)?;
+                }
+            }
+            interrupted = Some("the previous agent");
+        }
+        Ok(match (waits.iter().min(), last_error) {
+            (Some(until), _) => Verdict::Park {
+                until_ms: (*until).max(self.env.now_ms() + MIN_PARK_MS),
+                reason: "every candidate is out of quota".to_owned(),
+            },
+            (None, Some(reason)) => Verdict::Fail(reason),
+            (None, None) => Verdict::Fail("no candidate could run".to_owned()),
+        })
+    }
+
+    fn fall_back(&self, claimed: &Claimed, candidate: &Candidate, reason: &str) -> Result<()> {
+        self.append(
+            &claimed.job.id,
+            Some(&claimed.stage_id),
+            EventPayload::AgentFellBack {
+                agent: candidate.agent.clone(),
+                reason: reason.to_owned(),
+            },
+        )
+    }
+
+    fn record_quota(
+        &self,
+        claimed: &Claimed,
+        candidate: &Candidate,
+        classified: &Classified,
+    ) -> Result<Option<i64>> {
+        let now = self.env.now_ms();
+        let exhausted_by_failure = match &classified.failure {
+            Some(Failure::QuotaExhausted { resets_at_ms, .. }) => Some(*resets_at_ms),
+            _ => None,
+        };
+        let obs = classified.observation.as_ref();
+        let signal = match (obs, exhausted_by_failure) {
+            (Some(o), _) if o.status == QuotaStatus::Exhausted => {
+                Some((o.status, o.utilization_permille, o.resets_at_ms))
+            }
+            (o, Some(reset)) => Some((
+                QuotaStatus::Exhausted,
+                o.and_then(|o| o.utilization_permille),
+                reset.or_else(|| o.and_then(|o| o.resets_at_ms)),
+            )),
+            (Some(o), None) => Some((o.status, o.utilization_permille, o.resets_at_ms)),
+            (None, None) => None,
+        };
+        let Some((status, utilization_permille, reset)) = signal else {
+            return Ok(None);
+        };
+        let resets_at_ms = match (status, reset) {
+            (QuotaStatus::Exhausted, None) => Some(now + self.routing.default_backoff_ms),
+            (_, known) => known,
+        };
+        self.append(
+            &claimed.job.id,
+            Some(&claimed.stage_id),
+            EventPayload::QuotaSignal {
+                agent: candidate.agent.clone(),
+                model: candidate.model.clone(),
+                status,
+                utilization_permille,
+                resets_at_ms,
+                reset_known: reset.is_some(),
+            },
+        )?;
+        Ok((status == QuotaStatus::Exhausted)
+            .then_some(resets_at_ms)
+            .flatten())
+    }
+
+    fn try_candidate(
+        &self,
+        claimed: &Claimed,
+        run: &StageRun,
+        position: usize,
+        candidate: &Candidate,
+        interrupted: Option<&str>,
+    ) -> Result<Attempt> {
+        let job = &claimed.job;
+        let stage = Some(claimed.stage_id.as_str());
+        let Some((kind, agent)) = self.fleet.get(&candidate.agent) else {
+            return Ok(Attempt::Settled(Verdict::Fail(format!(
+                "agent '{}' is not configured",
+                candidate.agent
+            ))));
+        };
+        if run.handoff_path.exists() {
+            std::fs::remove_file(&run.handoff_path)?;
+        }
+        let prompt = with_interruption_note(
+            &render_stage_prompt(
+                job.id.as_str(),
+                &claimed.name,
+                &job.prompt,
+                &run.handoff_path.to_string_lossy(),
+            ),
+            interrupted,
         );
         self.append(
             &job.id,
             stage,
             EventPayload::AgentInvoked {
-                agent: self.agent.name().to_owned(),
+                agent: candidate.agent.clone(),
                 template: TEMPLATE_NAME.to_owned(),
                 version: TEMPLATE_VERSION,
                 prompt_sha256: sha256_hex(prompt.as_bytes()),
             },
         )?;
-        let egress_rel = relative.join("egress-requests.log");
+        let egress_rel = run.relative.join("egress-requests.log");
         let egress_log = self.config.data_dir.join(&egress_rel);
         if egress_log.exists() {
             std::fs::remove_file(&egress_log)?;
         }
         let sandbox = self.config.trust.profile_for(
-            &repo.to_string_lossy(),
+            &run.repo.to_string_lossy(),
             &[
-                worktree.to_string_lossy().into_owned(),
-                dir.to_string_lossy().into_owned(),
+                run.worktree.to_string_lossy().into_owned(),
+                self.config
+                    .data_dir
+                    .join(&run.relative)
+                    .to_string_lossy()
+                    .into_owned(),
             ],
         );
         let invocation = Invocation {
             prompt,
-            cwd: worktree,
-            handoff_path: handoff_path.clone(),
+            model: candidate.model.clone(),
+            cwd: run.worktree.clone(),
+            handoff_path: run.handoff_path.clone(),
             timeout: self.config.timeout,
             sandbox: sandbox.clone(),
             egress_log: egress_log.clone(),
@@ -294,7 +472,7 @@ impl Worker<'_> {
         let stop = AtomicBool::new(false);
         let output = std::thread::scope(|scope| {
             let beat = scope.spawn(|| self.beat(&claimed.stage_id, &stop));
-            let result = self.agent.run(&invocation, &mut |pid| {
+            let result = agent.run(&invocation, &mut |pid| {
                 let start = start_ticks(pid).unwrap_or_default();
                 let _ = self.with_store(|s| s.set_lease_process(&claimed.stage_id, pid, start));
             });
@@ -318,40 +496,65 @@ impl Worker<'_> {
             }
             Err(e) => {
                 self.audit(claimed, &sandbox, blocked)?;
-                return Ok(Verdict::Fail(format!("agent: {e:#}")));
+                return Ok(Attempt::Settled(Verdict::Fail(format!("agent: {e:#}"))));
             }
         };
         let wall_ms = u64::try_from(self.env.now_ms() - started).ok();
-        let raw_rel = relative.join("raw-output.jsonl");
+        let suffix = if position == 0 {
+            String::new()
+        } else {
+            format!("-{position}")
+        };
+        let raw_rel = run.relative.join(format!("raw-output{suffix}.jsonl"));
         std::fs::write(self.config.data_dir.join(&raw_rel), &output.stdout)?;
         self.record_artifact(claimed, "raw-output", &raw_rel)?;
-        let run = parse_stream(&output.stdout);
-        let mut usage = run.usage;
+        if !output.stderr.is_empty() {
+            let err_rel = run.relative.join(format!("raw-stderr{suffix}.txt"));
+            std::fs::write(self.config.data_dir.join(&err_rel), &output.stderr)?;
+            self.record_artifact(claimed, "raw-stderr", &err_rel)?;
+        }
+        let classified = classify(
+            kind,
+            &RawRun {
+                exit_code: output.exit_code,
+                stdout: &output.stdout,
+                stderr: &output.stderr,
+                timed_out: output.timed_out,
+            },
+            None,
+        );
+        let mut usage = classified.usage.clone();
         usage.wall_ms = wall_ms;
+        usage.model = usage.model.or_else(|| candidate.model.clone());
+        usage.agent = Some(candidate.agent.clone());
+        usage.candidate_position = u32::try_from(position).ok();
         let actual_tokens = usage
             .input_tokens
             .zip(usage.output_tokens)
             .map(|(i, o)| i.saturating_add(o));
         self.append(&job.id, stage, EventPayload::AgentFinished { usage })?;
-        if let Some(reason) = self.record_budget(claimed, actual_tokens, wall_ms)? {
-            return Ok(Verdict::Park(reason));
+        let until = self.record_quota(claimed, candidate, &classified)?;
+        if let Some(reason) =
+            self.record_budget(claimed, &candidate.agent, actual_tokens, wall_ms)?
+        {
+            return Ok(Attempt::Settled(Verdict::NeedsHuman(reason)));
         }
-        if output.timed_out {
-            return Ok(Verdict::Retry("agent timed out".to_owned()));
-        }
-        match run.outcome {
-            Outcome::Failed {
+        Ok(match classified.failure {
+            None => Attempt::Settled(self.accept_handoff(claimed, &run.handoff_rel)?),
+            Some(Failure::QuotaExhausted { reason, .. }) => Attempt::Quota {
+                until_ms: until.unwrap_or(self.env.now_ms() + self.routing.default_backoff_ms),
                 reason,
-                retryable: true,
-            } => Ok(Verdict::Retry(reason)),
-            Outcome::Failed { reason, .. } => Ok(Verdict::Fail(reason)),
-            Outcome::Succeeded => self.accept_handoff(claimed, &handoff_rel),
-        }
+            },
+            Some(Failure::ProviderError(reason)) => Attempt::Provider(reason),
+            Some(Failure::Config(reason)) => Attempt::Settled(Verdict::Fail(reason)),
+            Some(other) => Attempt::Settled(Verdict::Retry(other.reason())),
+        })
     }
 
     fn record_budget(
         &self,
         claimed: &Claimed,
+        agent: &str,
         actual_tokens: Option<u64>,
         actual_wall_ms: Option<u64>,
     ) -> Result<Option<String>> {
@@ -362,7 +565,7 @@ impl Worker<'_> {
             estimate_stage(
                 &claimed.name,
                 tier_for(&claimed.name),
-                self.agent.name(),
+                agent,
                 &[],
                 &Defaults::standard(),
             )
@@ -373,7 +576,7 @@ impl Worker<'_> {
             EventPayload::StageBudgetRecorded {
                 stage: claimed.name.clone(),
                 tier: estimate.tier,
-                agent: self.agent.name().to_owned(),
+                agent: agent.to_owned(),
                 estimate_tokens: estimate.tokens,
                 estimate_wall_ms: estimate.wall_ms,
                 actual_tokens,
@@ -445,6 +648,7 @@ impl Worker<'_> {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicI64;
+    use std::sync::Arc;
 
     use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
     use pizza_delivery_core::event::Event;
@@ -452,7 +656,9 @@ mod tests {
     use pizza_delivery_core::NewJob;
 
     use super::*;
-    use crate::agent::AgentOutput;
+    use pizza_delivery_core::routing::AdapterKind;
+
+    use crate::agent::{Agent, AgentOutput};
     use crate::sqlite_store::SqliteStore;
 
     const HANDOFF: &str = "---\njob: J1\nstage: implement\n---\n\n## Goal\ng\n\n## What was done\nd\n\n## Decisions made\nd\n\n## Assumptions\na\n\n## Open questions\nq\n\n## Files touched\nf\n\n## Instructions for the next stage\ni\n";
@@ -486,19 +692,20 @@ mod tests {
     struct Script {
         handoff: Option<&'static str>,
         stdout: &'static str,
+        stderr: &'static str,
+        exit_code: i32,
     }
 
     struct FakeAgent {
+        tag: String,
         scripts: Mutex<VecDeque<Script>>,
-        egress: Option<&'static str>,
+        egress: Arc<Mutex<Option<&'static str>>>,
     }
 
     impl Agent for FakeAgent {
-        fn name(&self) -> &str {
-            "fake"
-        }
         fn run(&self, inv: &Invocation, _on_spawn: &mut dyn FnMut(u32)) -> Result<AgentOutput> {
-            if let Some(requests) = self.egress {
+            let requests = *self.egress.lock().map_err(|_| anyhow!("poisoned"))?;
+            if let Some(requests) = requests {
                 std::fs::write(&inv.egress_log, requests)?;
             }
             let script = self
@@ -507,11 +714,18 @@ mod tests {
                 .map_err(|_| anyhow!("poisoned"))?
                 .pop_front()
                 .ok_or_else(|| anyhow!("no scripted run left"))?;
+            std::fs::write(
+                inv.handoff_path
+                    .with_file_name(format!("prompt-{}.txt", self.tag)),
+                &inv.prompt,
+            )?;
             if let Some(text) = script.handoff {
                 std::fs::write(&inv.handoff_path, text)?;
             }
             Ok(AgentOutput {
                 stdout: script.stdout.to_owned(),
+                stderr: script.stderr.to_owned(),
+                exit_code: Some(script.exit_code),
                 timed_out: false,
             })
         }
@@ -522,12 +736,19 @@ mod tests {
         store: Mutex<Box<dyn Store>>,
         env: FakeEnv,
         git: FakeGit,
-        agent: FakeAgent,
+        fleet: Fleet,
+        routing: RoutingConfig,
         config: WorkerConfig,
+        egress: Arc<Mutex<Option<&'static str>>>,
     }
 
     impl Rig {
         fn new(scripts: Vec<Script>) -> Result<Self> {
+            Self::with_chain(vec![("claude", AdapterKind::Claude, scripts)], "")
+        }
+
+        fn with_chain(agents: Vec<(&str, AdapterKind, Vec<Script>)>, owner: &str) -> Result<Self> {
+            let egress = Arc::new(Mutex::new(None));
             let dir = tempfile::TempDir::new()?;
             let mut store = SqliteStore::open(&dir.path().join("l.db"))?;
             store.enqueue_job(NewJob {
@@ -545,6 +766,7 @@ mod tests {
                     heartbeat_ms: 100,
                     timeout: Duration::from_secs(5),
                     budget_cap_tokens: DEFAULT_CAP_TOKENS,
+                    require_triage: false,
                     trust: TrustConfig {
                         default_hosts: vec!["api.anthropic.com".to_owned()],
                         ..TrustConfig::default()
@@ -557,16 +779,30 @@ mod tests {
                     next: AtomicI64::new(1),
                 },
                 git: FakeGit,
-                agent: FakeAgent {
-                    scripts: Mutex::new(scripts.into()),
-                    egress: None,
-                },
+                egress: Arc::clone(&egress),
+                fleet: Fleet::new(
+                    agents
+                        .into_iter()
+                        .map(|(name, kind, scripts)| {
+                            (
+                                name.to_owned(),
+                                kind,
+                                Box::new(FakeAgent {
+                                    tag: name.to_owned(),
+                                    scripts: Mutex::new(scripts.into()),
+                                    egress: Arc::clone(&egress),
+                                }) as Box<dyn Agent>,
+                            )
+                        })
+                        .collect(),
+                ),
+                routing: RoutingConfig::builtin("claude").with_owner(owner)?,
             })
         }
 
-        fn with_egress(mut self, requests: &'static str) -> Self {
-            self.agent.egress = Some(requests);
-            self
+        fn with_egress(self, requests: &'static str) -> Result<Self> {
+            *self.egress.lock().map_err(|_| anyhow!("poisoned"))? = Some(requests);
+            Ok(self)
         }
 
         fn audits(&self) -> Result<Vec<EventPayload>> {
@@ -583,9 +819,18 @@ mod tests {
                 store: &self.store,
                 env: &self.env,
                 git: &self.git,
-                agent: &self.agent,
+                fleet: &self.fleet,
+                routing: &self.routing,
                 config: &self.config,
             }
+        }
+
+        fn with_store<T>(
+            &self,
+            f: impl FnOnce(&mut dyn Store) -> Result<T, StoreError>,
+        ) -> Result<T> {
+            let mut guard = self.store.lock().map_err(|_| anyhow!("poisoned"))?;
+            Ok(f(guard.as_mut())?)
         }
 
         fn timeline(&self) -> Result<Vec<Event>> {
@@ -611,6 +856,8 @@ mod tests {
         Script {
             handoff: Some(HANDOFF),
             stdout: OK_RESULT,
+            stderr: "",
+            exit_code: 0,
         }
     }
 
@@ -618,6 +865,8 @@ mod tests {
         Script {
             handoff: Some("not a handoff"),
             stdout: OK_RESULT,
+            stderr: "",
+            exit_code: 0,
         }
     }
 
@@ -695,7 +944,7 @@ mod tests {
     #[test]
     fn blocked_egress_is_ledgered_per_host_and_in_the_audit() -> Result<()> {
         let rig = Rig::new(vec![good()])?
-            .with_egress("api.anthropic.com\nevil.example\nevil.example\ntracker.io\n");
+            .with_egress("api.anthropic.com\nevil.example\nevil.example\ntracker.io\n")?;
         rig.worker().tick()?;
 
         let blocked: Vec<String> = rig
@@ -783,6 +1032,8 @@ mod tests {
             Script {
                 handoff: None,
                 stdout: OK_RESULT,
+                stderr: "",
+                exit_code: 0,
             },
             good(),
         ])?;
@@ -800,6 +1051,8 @@ mod tests {
         let rig = Rig::new(vec![Script {
             handoff: Some(HANDOFF),
             stdout: ERR_RESULT,
+            stderr: "",
+            exit_code: 1,
         }])?;
 
         rig.worker().tick()?;
@@ -839,6 +1092,7 @@ mod tests {
             ttl_ms: 1000,
             stage_id: "S0".into(),
             event_ids: ["EP0".into(), "EC0".into()],
+            require_triage: false,
         };
         let mut guard = rig.store.lock().map_err(|_| anyhow!("poisoned"))?;
         guard.claim_stage(crashed)?;
@@ -880,6 +1134,7 @@ mod tests {
             ttl_ms: 10,
             stage_id: format!("S{tag}"),
             event_ids: [format!("P{tag}"), format!("C{tag}")],
+            require_triage: false,
         };
         let mut guard = rig.store.lock().map_err(|_| anyhow!("poisoned"))?;
         guard.claim_stage(claim("0", 0))?;
@@ -894,6 +1149,249 @@ mod tests {
         rig.worker().reap()?;
 
         assert_eq!(rig.job_state()?, JobState::Failed);
+        Ok(())
+    }
+
+    const OPENCODE_OWNER: &str = r#"
+[agents.opencode]
+adapter = "opencode"
+command = "opencode"
+[agents.hermes]
+adapter = "hermes"
+command = "hermes"
+
+[[rules]]
+chain = [{ agent = "claude" }, { agent = "opencode" }]
+"#;
+
+    const QUOTA_429: &str = "{\"type\":\"result\",\"is_error\":true,\"terminal_reason\":\"api_error\",\"api_error_status\":429}\n";
+    const QUOTA_WITH_RESET: &str = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":10}}\n{\"type\":\"result\",\"is_error\":true,\"terminal_reason\":\"api_error\",\"api_error_status\":429}\n";
+
+    fn exhausted(stdout: &'static str) -> Script {
+        Script {
+            handoff: None,
+            stdout,
+            stderr: "",
+            exit_code: 1,
+        }
+    }
+
+    fn invoked(rig: &Rig) -> Result<Vec<String>> {
+        Ok(rig
+            .timeline()?
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::AgentInvoked { agent, .. } => Some(agent),
+                _ => None,
+            })
+            .collect())
+    }
+
+    #[test]
+    fn quota_exhaustion_falls_back_to_the_next_candidate_with_an_interruption_note() -> Result<()> {
+        let rig = Rig::with_chain(
+            vec![
+                ("claude", AdapterKind::Claude, vec![exhausted(QUOTA_429)]),
+                ("opencode", AdapterKind::Opencode, vec![good()]),
+            ],
+            OPENCODE_OWNER,
+        )?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::Completed);
+        assert_eq!(invoked(&rig)?, ["claude", "opencode"]);
+        let kinds = rig.kinds()?;
+        assert!(kinds.contains(&"quota-signal"));
+        assert!(kinds.contains(&"agent-fell-back"));
+        assert!(!kinds.contains(&"stage-retried"));
+        let stage_dir = rig._dir.path().join("jobs/J1/stages/1-implement");
+        let first = std::fs::read_to_string(stage_dir.join("prompt-claude.txt"))?;
+        let second = std::fs::read_to_string(stage_dir.join("prompt-opencode.txt"))?;
+        assert!(!first.contains("Interruption note"));
+        assert!(second.contains("Interruption note"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_fully_exhausted_chain_parks_the_job_until_the_earliest_known_reset_and_resumes_on_its_own(
+    ) -> Result<()> {
+        let rig = Rig::with_chain(
+            vec![
+                (
+                    "claude",
+                    AdapterKind::Claude,
+                    vec![exhausted(QUOTA_WITH_RESET), good()],
+                ),
+                (
+                    "opencode",
+                    AdapterKind::Opencode,
+                    vec![exhausted(
+                        "{\"type\":\"error\",\"error\":{\"message\":\"quota exceeded\"}}\n",
+                    )],
+                ),
+            ],
+            OPENCODE_OWNER,
+        )?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::WaitingForQuota);
+        let parked = rig.timeline()?.into_iter().find_map(|e| match e.payload {
+            EventPayload::JobParked { until_ms, .. } => Some(until_ms),
+            _ => None,
+        });
+        assert_eq!(parked, Some(10_000));
+        assert!(!rig.worker().tick()?);
+        rig.env.now.store(9_999, Ordering::SeqCst);
+        assert!(!rig.worker().tick()?);
+
+        rig.env.now.store(10_000, Ordering::SeqCst);
+        assert!(rig.worker().tick()?);
+
+        assert_eq!(rig.job_state()?, JobState::Completed);
+        let attempts: Vec<u32> = fold_stages(&rig.timeline()?)
+            .iter()
+            .map(|s| s.attempt)
+            .collect();
+        assert_eq!(attempts, [1]);
+        Ok(())
+    }
+
+    #[test]
+    fn exhaustion_without_a_known_reset_parks_for_the_default_backoff() -> Result<()> {
+        let rig = Rig::new(vec![exhausted(QUOTA_429)])?;
+
+        rig.worker().tick()?;
+
+        let timeline = rig.timeline()?;
+        let signal = timeline.iter().find_map(|e| match &e.payload {
+            EventPayload::QuotaSignal {
+                reset_known,
+                resets_at_ms,
+                ..
+            } => Some((*reset_known, *resets_at_ms)),
+            _ => None,
+        });
+        assert_eq!(signal, Some((false, Some(100 + 3_600_000))));
+        assert_eq!(rig.job_state()?, JobState::WaitingForQuota);
+        Ok(())
+    }
+
+    #[test]
+    fn a_candidate_known_to_be_exhausted_is_skipped_without_being_run() -> Result<()> {
+        let rig = Rig::with_chain(
+            vec![
+                (
+                    "claude",
+                    AdapterKind::Claude,
+                    vec![exhausted(QUOTA_WITH_RESET)],
+                ),
+                ("opencode", AdapterKind::Opencode, vec![good(), good()]),
+            ],
+            OPENCODE_OWNER,
+        )?;
+        rig.worker().tick()?;
+        rig.with_store(|s| {
+            s.enqueue_job(NewJob {
+                id: JobId::new("J2"),
+                event_id: "E2".into(),
+                prompt: "second".into(),
+                repo: Some("/src/my repo".into()),
+                submitted_at_ms: 0,
+            })
+            .map(|_| ())
+        })?;
+        rig.env.now.store(5_000, Ordering::SeqCst);
+
+        rig.worker().tick()?;
+
+        let second: Vec<String> = rig
+            .with_store(|s| s.read_timeline(&JobId::new("J2")))?
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::AgentInvoked { agent, .. } => Some(agent),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(second, ["opencode"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_configuration_error_fails_fast_without_retry_or_fallback() -> Result<()> {
+        let rig = Rig::with_chain(
+            vec![
+                (
+                    "hermes",
+                    AdapterKind::Hermes,
+                    vec![Script {
+                        handoff: None,
+                        stdout: "",
+                        stderr: "No usable credentials found for provider 'gemini'.",
+                        exit_code: 1,
+                    }],
+                ),
+                ("claude", AdapterKind::Claude, vec![good()]),
+            ],
+            "[[rules]]\nchain = [{ agent = \"hermes\" }, { agent = \"claude\" }]\n[agents.hermes]\nadapter = \"hermes\"\ncommand = \"hermes\"\n",
+        )?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::Failed);
+        assert_eq!(invoked(&rig)?, ["hermes"]);
+        let kinds = rig.kinds()?;
+        assert!(!kinds.contains(&"stage-retried"));
+        assert!(!kinds.contains(&"agent-fell-back"));
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_provider_errors_fall_back_and_fail_the_job_when_the_chain_runs_out() -> Result<()> {
+        let rig = Rig::with_chain(
+            vec![
+                ("claude", AdapterKind::Claude, vec![exhausted(ERR_RESULT)]),
+                (
+                    "opencode",
+                    AdapterKind::Opencode,
+                    vec![exhausted(
+                        "{\"type\":\"error\",\"error\":{\"type\":\"provider.no-route\"}}\n",
+                    )],
+                ),
+            ],
+            OPENCODE_OWNER,
+        )?;
+
+        rig.worker().tick()?;
+
+        assert_eq!(rig.job_state()?, JobState::Failed);
+        assert_eq!(invoked(&rig)?, ["claude", "opencode"]);
+        assert!(!rig.kinds()?.contains(&"job-parked"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_healthy_rate_limit_event_is_ledgered_as_an_allowed_quota_signal() -> Result<()> {
+        let rig = Rig::new(vec![Script {
+            handoff: Some(HANDOFF),
+            stdout: "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":50,\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.95,\"resetsAt\":50}}}}\n{\"type\":\"result\",\"is_error\":false}\n",
+            stderr: "",
+            exit_code: 0,
+        }])?;
+
+        rig.worker().tick()?;
+
+        let signal = rig.timeline()?.into_iter().find_map(|e| match e.payload {
+            EventPayload::QuotaSignal {
+                status,
+                utilization_permille,
+                ..
+            } => Some((status, utilization_permille)),
+            _ => None,
+        });
+        assert_eq!(signal, Some((QuotaStatus::Allowed, Some(950))));
+        assert_eq!(rig.job_state()?, JobState::Completed);
         Ok(())
     }
 }

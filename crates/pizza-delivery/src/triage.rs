@@ -329,6 +329,7 @@ impl TieBreaker for AgentTieBreaker<'_> {
     fn choose(&self, prompt: &str, top: &[Candidate]) -> Option<usize> {
         let invocation = Invocation {
             prompt: tiebreak_prompt(prompt, top),
+            model: None,
             cwd: self.cwd.clone(),
             handoff_path: self.cwd.join("tie-break-handoff.md"),
             timeout: TIE_BREAK_TIMEOUT,
