@@ -14,6 +14,7 @@ tui = ["dep:ratatui"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 listenfd.workspace = true
 pizza-delivery-core.workspace = true
 ratatui = { workspace = true, optional = true }

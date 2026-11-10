@@ -14,6 +14,7 @@ pizza-delivery-core = { path = "crates/pizza-delivery-core", version = "0.0.0" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 listenfd = "1"
 ratatui = "0.30"
 rusqlite = { version = "0.32", features = ["bundled"] }

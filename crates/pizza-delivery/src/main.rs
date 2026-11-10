@@ -123,6 +123,13 @@ enum Command {
     Daemon,
     /// Ask the running daemon to exit
     Stop,
+    /// Write systemd user units (socket and service) for non-Nix Linux
+    InstallService,
+    /// Print shell completions to stdout
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Open the terminal UI
     #[cfg(feature = "tui")]
     Tui,
@@ -323,7 +330,71 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
     }
 }
 
+const SOCKET_UNIT: &str = "[Unit]
+Description=pizza-delivery daemon socket
+
+[Socket]
+ListenStream=%t/pizza-delivery.sock
+
+[Install]
+WantedBy=sockets.target
+";
+
+fn service_unit(exe: &std::path::Path) -> String {
+    format!(
+        "[Unit]
+Description=pizza-delivery daemon
+Requires=pizza-delivery.socket
+After=pizza-delivery.socket
+
+[Service]
+ExecStart={} daemon
+Restart=on-failure
+",
+        exe.display()
+    )
+}
+
+fn install_service() -> ProcessExitCode {
+    let result = (|| -> anyhow::Result<PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .ok_or_else(|| anyhow::anyhow!("neither XDG_CONFIG_HOME nor HOME is set"))?;
+        let dir = base.join("systemd/user");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("pizza-delivery.socket"), SOCKET_UNIT)?;
+        std::fs::write(
+            dir.join("pizza-delivery.service"),
+            service_unit(&std::env::current_exe()?),
+        )?;
+        Ok(dir)
+    })();
+    match result {
+        Ok(dir) => {
+            println!("wrote units to {}", dir.display());
+            println!("systemctl --user daemon-reload");
+            println!("systemctl --user enable --now pizza-delivery.socket");
+            exit(ExitCode::Success)
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            exit(ExitCode::General)
+        }
+    }
+}
+
 fn run(cli: Cli) -> ProcessExitCode {
+    match cli.command {
+        Some(Command::InstallService) => return install_service(),
+        Some(Command::Completions { shell }) => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "pizza-delivery", &mut std::io::stdout());
+            return exit(ExitCode::Success);
+        }
+        _ => {}
+    }
     if let Some(Command::McpBroker {
         catalog,
         stage,
@@ -354,7 +425,9 @@ fn run(cli: Cli) -> ProcessExitCode {
                 exit(ExitCode::General)
             }
         },
-        Some(Command::McpBroker { .. }) => exit(ExitCode::General),
+        Some(Command::McpBroker { .. } | Command::InstallService | Command::Completions { .. }) => {
+            exit(ExitCode::General)
+        }
         #[cfg(feature = "tui")]
         Some(Command::Tui) => run_tui(&config),
         Some(Command::Stop) => present(
