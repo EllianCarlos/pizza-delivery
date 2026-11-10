@@ -1,6 +1,7 @@
 use pizza_delivery_core::api::{ApiError, ErrorKind, JobView};
 use pizza_delivery_core::{
-    resolve, short_id, Job, JobId, NewJob, Request, ResolveError, Response, Store, StoreError,
+    fold_stages, resolve, short_id, Job, JobId, NewJob, Request, ResolveError, Response, Store,
+    StoreError,
 };
 
 pub trait Env: Send + Sync {
@@ -58,14 +59,15 @@ fn view(job: &Job, all: &[JobId]) -> JobView {
 
 pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Response {
     match request {
-        Request::Submit { prompt } if prompt.trim().is_empty() => {
+        Request::Submit { prompt, .. } if prompt.trim().is_empty() => {
             error(ErrorKind::Usage, "prompt must not be empty", vec![])
         }
-        Request::Submit { prompt } => {
+        Request::Submit { prompt, repo } => {
             let new = NewJob {
                 id: JobId::new(env.new_ulid()),
                 event_id: env.new_ulid(),
                 prompt,
+                repo,
                 submitted_at_ms: env.now_ms(),
             };
             let result = store.enqueue_job(new).and_then(|job| {
@@ -105,6 +107,7 @@ pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Respons
             match (found, store.read_timeline(&id)) {
                 (Some(job), Ok(events)) => Response::Job {
                     job: view(job, &all),
+                    stages: fold_stages(&events),
                     events,
                 },
                 (None, _) => error(ErrorKind::NotFound, "job vanished", vec![]),

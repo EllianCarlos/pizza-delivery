@@ -4,12 +4,19 @@ use crate::event::Event;
 use crate::exit::ExitCode;
 use crate::id::JobId;
 use crate::job::JobState;
+use crate::stage::StageView;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
-    Submit { prompt: String },
-    Status { job: Option<String> },
+    Submit {
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repo: Option<String>,
+    },
+    Status {
+        job: Option<String>,
+    },
     Stop,
 }
 
@@ -51,11 +58,22 @@ impl ApiError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Response {
-    Submitted { id: JobId, short_id: String },
-    Jobs { jobs: Vec<JobView> },
-    Job { job: JobView, events: Vec<Event> },
+    Submitted {
+        id: JobId,
+        short_id: String,
+    },
+    Jobs {
+        jobs: Vec<JobView>,
+    },
+    Job {
+        job: JobView,
+        stages: Vec<StageView>,
+        events: Vec<Event>,
+    },
     Stopped,
-    Error { error: ApiError },
+    Error {
+        error: ApiError,
+    },
 }
 
 #[cfg(test)]

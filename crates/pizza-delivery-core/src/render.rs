@@ -3,6 +3,7 @@ use serde_json::json;
 use crate::api::JobView;
 use crate::event::Event;
 use crate::id::JobId;
+use crate::stage::StageView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -76,7 +77,30 @@ pub fn render_jobs(jobs: &[JobView], mode: OutputMode) -> String {
     }
 }
 
-pub fn render_timeline(job: &JobView, events: &[Event], mode: OutputMode) -> String {
+fn count(value: Option<u64>) -> String {
+    value.map_or_else(|| "-".to_owned(), |n| n.to_string())
+}
+
+fn stage_line(stage: &StageView) -> String {
+    let usage = stage.usage.as_ref();
+    format!(
+        "stage {} {:<10} {:<9} attempt {}  in {} out {} ms {}\n",
+        stage.n,
+        stage.name,
+        stage.state.as_str(),
+        stage.attempt,
+        count(usage.and_then(|u| u.input_tokens)),
+        count(usage.and_then(|u| u.output_tokens)),
+        count(usage.and_then(|u| u.wall_ms)),
+    )
+}
+
+pub fn render_timeline(
+    job: &JobView,
+    stages: &[StageView],
+    events: &[Event],
+    mode: OutputMode,
+) -> String {
     match mode {
         OutputMode::Json => line(&json!({
             "id": job.id,
@@ -84,6 +108,7 @@ pub fn render_timeline(job: &JobView, events: &[Event], mode: OutputMode) -> Str
             "state": job.state,
             "prompt": job.prompt,
             "submitted_at_ms": job.submitted_at_ms,
+            "stages": stages,
             "events": events,
         })),
         OutputMode::Human => {
@@ -93,18 +118,24 @@ pub fn render_timeline(job: &JobView, events: &[Event], mode: OutputMode) -> Str
                 job.state.as_str(),
                 one_line(&job.prompt)
             );
+            let stage_rows: String = stages.iter().map(stage_line).collect();
+            let stage_rows = if stage_rows.is_empty() {
+                stage_rows
+            } else {
+                format!("{stage_rows}\n")
+            };
             let rows: String = events
                 .iter()
                 .map(|e| {
                     format!(
-                        "{:>3}  {:<14}  {}\n",
+                        "{:>3}  {:<17}  {}\n",
                         e.seq,
                         e.payload.kind(),
                         e.actor.as_str()
                     )
                 })
                 .collect();
-            format!("{head}{rows}")
+            format!("{head}{stage_rows}{rows}")
         }
     }
 }
@@ -122,6 +153,24 @@ mod tests {
             prompt: prompt.into(),
             submitted_at_ms: 0,
         }
+    }
+
+    #[test]
+    fn human_timeline_lists_stages_with_unknown_usage_as_dashes() {
+        use crate::stage::{StageState, StageView};
+        let stage = StageView {
+            id: "S1".into(),
+            n: 1,
+            name: "implement".into(),
+            state: StageState::Succeeded,
+            attempt: 1,
+            usage: Some(crate::usage::Usage {
+                output_tokens: Some(8),
+                ..Default::default()
+            }),
+        };
+        let text = render_timeline(&view("AB", "p"), &[stage], &[], OutputMode::Human);
+        assert!(text.contains("stage 1 implement  succeeded attempt 1  in - out 8 ms -"));
     }
 
     #[test]

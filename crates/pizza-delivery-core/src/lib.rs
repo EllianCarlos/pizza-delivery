@@ -1,10 +1,15 @@
 pub mod api;
+pub mod claude;
 pub mod event;
 pub mod exit;
+pub mod handoff;
 pub mod id;
 pub mod job;
+pub mod prompt;
 pub mod render;
+pub mod stage;
 pub mod store;
+pub mod usage;
 
 pub use api::{ApiError, ErrorKind, JobView, Request, Response};
 pub use event::{Actor, Event, EventPayload};
@@ -12,4 +17,6 @@ pub use exit::ExitCode;
 pub use id::{resolve, short_id, JobId, ResolveError};
 pub use job::{apply, fold, Job, JobState};
 pub use render::{render_jobs, render_submitted, render_timeline, OutputMode};
-pub use store::{NewJob, Store, StoreError};
+pub use stage::{fold_stages, next_claim, ClaimPlan, StageState, StageView, MAX_ATTEMPTS};
+pub use store::{ClaimRequest, Claimed, ExpiredLease, NewEvent, NewJob, Store, StoreError};
+pub use usage::Usage;

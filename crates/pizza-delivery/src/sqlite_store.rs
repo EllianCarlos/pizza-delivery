@@ -2,8 +2,11 @@ use std::path::Path;
 
 use pizza_delivery_core::event::{Actor, Event, EventPayload};
 use pizza_delivery_core::job::{apply, JobState};
-use pizza_delivery_core::{Job, JobId, NewJob, Store, StoreError};
-use rusqlite::{params, Connection, Transaction};
+use pizza_delivery_core::{
+    next_claim, ClaimRequest, Claimed, ExpiredLease, Job, JobId, NewEvent, NewJob, Store,
+    StoreError,
+};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS events (
@@ -26,8 +29,17 @@ CREATE TABLE IF NOT EXISTS jobs (
     id              TEXT PRIMARY KEY,
     state           TEXT NOT NULL,
     prompt          TEXT NOT NULL,
+    repo            TEXT,
     submitted_at_ms INTEGER NOT NULL,
     last_seq        INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS leases (
+    stage_id   TEXT PRIMARY KEY,
+    job_id     TEXT NOT NULL,
+    holder     TEXT NOT NULL,
+    expires_ms INTEGER NOT NULL,
+    pid        INTEGER,
+    pid_start  INTEGER
 );
 ";
 
@@ -53,7 +65,7 @@ impl SqliteStore {
     }
 }
 
-fn append(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> {
+fn event_row(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> {
     let payload = serde_json::to_value(&event.payload).map_err(backend)?;
     let body = payload
         .get("payload")
@@ -79,12 +91,14 @@ fn append(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> {
 
 fn project(tx: &Transaction<'_>, job: &Job) -> Result<(), StoreError> {
     tx.execute(
-        "INSERT INTO jobs (id, state, prompt, submitted_at_ms, last_seq) VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO jobs (id, state, prompt, repo, submitted_at_ms, last_seq)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET state = excluded.state, last_seq = excluded.last_seq",
         params![
             job.id.as_str(),
             job.state.as_str(),
             job.prompt,
+            job.repo,
             job.submitted_at_ms,
             job.last_seq as i64
         ],
@@ -96,6 +110,9 @@ fn project(tx: &Transaction<'_>, job: &Job) -> Result<(), StoreError> {
 fn parse_state(raw: &str) -> Result<JobState, StoreError> {
     match raw {
         "queued" => Ok(JobState::Queued),
+        "running" => Ok(JobState::Running),
+        "completed" => Ok(JobState::Completed),
+        "failed" => Ok(JobState::Failed),
         other => Err(backend(format!("unknown job state '{other}'"))),
     }
 }
@@ -109,21 +126,150 @@ fn parse_actor(raw: &str) -> Result<Actor, StoreError> {
     }
 }
 
+type JobRow = (String, String, String, Option<String>, i64, i64);
+
+const JOB_COLUMNS: &str = "id, state, prompt, repo, submitted_at_ms, last_seq";
+
+fn map_job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+    ))
+}
+
+fn job_from_row(row: JobRow) -> Result<Job, StoreError> {
+    let (id, state, prompt, repo, submitted_at_ms, last_seq) = row;
+    Ok(Job {
+        id: JobId::new(id),
+        state: parse_state(&state)?,
+        prompt,
+        repo,
+        submitted_at_ms,
+        last_seq: last_seq as u64,
+    })
+}
+
+fn load_job(tx: &Transaction<'_>, id: &JobId) -> Result<Option<Job>, StoreError> {
+    let row = tx
+        .query_row(
+            &format!("SELECT {JOB_COLUMNS} FROM jobs WHERE id = ?1"),
+            params![id.as_str()],
+            map_job_row,
+        )
+        .optional()
+        .map_err(backend)?;
+    row.map(job_from_row).transpose()
+}
+
+fn timeline_in(conn: &Connection, job: &JobId) -> Result<Vec<Event>, StoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, stage_id, seq, ts_ms, actor, kind, payload
+             FROM events WHERE job_id = ?1 ORDER BY seq",
+        )
+        .map_err(backend)?;
+    let rows = stmt
+        .query_map(params![job.as_str()], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(backend)?;
+    let mut events = Vec::new();
+    for row in rows {
+        let (id, stage_id, seq, ts_ms, actor, kind, payload) = row.map_err(backend)?;
+        let body: serde_json::Value = serde_json::from_str(&payload).map_err(backend)?;
+        let payload: EventPayload =
+            serde_json::from_value(serde_json::json!({"kind": kind, "payload": body}))
+                .map_err(backend)?;
+        events.push(Event {
+            id,
+            job_id: job.clone(),
+            stage_id,
+            seq: seq as u64,
+            ts_ms,
+            actor: parse_actor(&actor)?,
+            payload,
+        });
+    }
+    Ok(events)
+}
+
+fn lease_effects(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> {
+    let Some(stage_id) = event.stage_id.as_deref() else {
+        return Ok(());
+    };
+    match &event.payload {
+        EventPayload::StageClaimed {
+            holder,
+            lease_expires_ms,
+            ..
+        } => tx
+            .execute(
+                "INSERT OR REPLACE INTO leases (stage_id, job_id, holder, expires_ms, pid, pid_start)
+                 VALUES (?1, ?2, ?3, ?4, NULL, NULL)",
+                params![stage_id, event.job_id.as_str(), holder, lease_expires_ms],
+            )
+            .map(|_| ())
+            .map_err(backend),
+        EventPayload::LeaseExpired { .. } | EventPayload::LeaseReleased { .. } => tx
+            .execute("DELETE FROM leases WHERE stage_id = ?1", params![stage_id])
+            .map(|_| ())
+            .map_err(backend),
+        _ => Ok(()),
+    }
+}
+
+fn append_in(tx: &Transaction<'_>, new: NewEvent) -> Result<(Event, Job), StoreError> {
+    let seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE job_id = ?1",
+            params![new.job_id.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(backend)?;
+    let event = Event {
+        id: new.id,
+        job_id: new.job_id,
+        stage_id: new.stage_id,
+        seq: seq as u64,
+        ts_ms: new.ts_ms,
+        actor: new.actor,
+        payload: new.payload,
+    };
+    let current = load_job(tx, &event.job_id)?;
+    let job = apply(current, &event).ok_or_else(|| backend("event for unknown job"))?;
+    event_row(tx, &event)?;
+    project(tx, &job)?;
+    lease_effects(tx, &event)?;
+    Ok((event, job))
+}
+
 impl Store for SqliteStore {
     fn enqueue_job(&mut self, new: NewJob) -> Result<Job, StoreError> {
-        let event = Event {
+        let event = NewEvent {
             id: new.event_id,
             job_id: new.id,
             stage_id: None,
-            seq: 1,
             ts_ms: new.submitted_at_ms,
             actor: Actor::Human,
-            payload: EventPayload::JobSubmitted { prompt: new.prompt },
+            payload: EventPayload::JobSubmitted {
+                prompt: new.prompt,
+                repo: new.repo,
+            },
         };
-        let job = apply(None, &event).ok_or_else(|| backend("submission produced no job"))?;
         let tx = self.conn.transaction().map_err(backend)?;
-        append(&tx, &event)?;
-        project(&tx, &job)?;
+        let (_, job) = append_in(&tx, event)?;
         tx.commit().map_err(backend)?;
         Ok(job)
     }
@@ -131,72 +277,129 @@ impl Store for SqliteStore {
     fn list_jobs(&self) -> Result<Vec<Job>, StoreError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, state, prompt, submitted_at_ms, last_seq FROM jobs ORDER BY id")
+            .prepare(&format!("SELECT {JOB_COLUMNS} FROM jobs ORDER BY id"))
             .map_err(backend)?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(backend)?;
-        let mut jobs = Vec::new();
-        for row in rows {
-            let (id, state, prompt, submitted_at_ms, last_seq) = row.map_err(backend)?;
-            jobs.push(Job {
-                id: JobId::new(id),
-                state: parse_state(&state)?,
-                prompt,
-                submitted_at_ms,
-                last_seq: last_seq as u64,
-            });
-        }
-        Ok(jobs)
+        let rows = stmt.query_map([], map_job_row).map_err(backend)?;
+        rows.map(|row| job_from_row(row.map_err(backend)?))
+            .collect()
     }
 
     fn read_timeline(&self, job: &JobId) -> Result<Vec<Event>, StoreError> {
+        timeline_in(&self.conn, job)
+    }
+
+    fn append_event(&mut self, event: NewEvent) -> Result<Event, StoreError> {
+        let tx = self.conn.transaction().map_err(backend)?;
+        let (event, _) = append_in(&tx, event)?;
+        tx.commit().map_err(backend)?;
+        Ok(event)
+    }
+
+    fn claim_stage(&mut self, request: ClaimRequest) -> Result<Option<Claimed>, StoreError> {
+        let candidates: Vec<Job> = self
+            .list_jobs()?
+            .into_iter()
+            .filter(|j| j.repo.is_some() && j.state == JobState::Queued)
+            .collect();
+        for job in candidates {
+            let events = timeline_in(&self.conn, &job.id)?;
+            let Some(plan) = next_claim(&events) else {
+                continue;
+            };
+            let [planned_id, claimed_id] = request.event_ids.clone();
+            let stage_id = plan
+                .existing_stage_id
+                .clone()
+                .unwrap_or_else(|| request.stage_id.clone());
+            let tx = self.conn.transaction().map_err(backend)?;
+            if plan.existing_stage_id.is_none() {
+                append_in(
+                    &tx,
+                    NewEvent {
+                        id: planned_id,
+                        job_id: job.id.clone(),
+                        stage_id: Some(stage_id.clone()),
+                        ts_ms: request.now_ms,
+                        actor: Actor::Daemon,
+                        payload: EventPayload::StagePlanned {
+                            n: plan.n,
+                            name: plan.name.clone(),
+                        },
+                    },
+                )?;
+            }
+            let (_, job) = append_in(
+                &tx,
+                NewEvent {
+                    id: claimed_id,
+                    job_id: job.id.clone(),
+                    stage_id: Some(stage_id.clone()),
+                    ts_ms: request.now_ms,
+                    actor: Actor::Daemon,
+                    payload: EventPayload::StageClaimed {
+                        holder: request.holder.clone(),
+                        attempt: plan.attempt,
+                        lease_expires_ms: request.now_ms + request.ttl_ms,
+                    },
+                },
+            )?;
+            tx.commit().map_err(backend)?;
+            return Ok(Some(Claimed {
+                job,
+                stage_id,
+                n: plan.n,
+                name: plan.name,
+                attempt: plan.attempt,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn heartbeat(&mut self, stage_id: &str, expires_ms: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE leases SET expires_ms = ?2 WHERE stage_id = ?1",
+                params![stage_id, expires_ms],
+            )
+            .map(|_| ())
+            .map_err(backend)
+    }
+
+    fn set_lease_process(
+        &mut self,
+        stage_id: &str,
+        pid: u32,
+        start: u64,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE leases SET pid = ?2, pid_start = ?3 WHERE stage_id = ?1",
+                params![stage_id, pid as i64, start as i64],
+            )
+            .map(|_| ())
+            .map_err(backend)
+    }
+
+    fn expired_leases(&self, now_ms: i64) -> Result<Vec<ExpiredLease>, StoreError> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, stage_id, seq, ts_ms, actor, kind, payload
-                 FROM events WHERE job_id = ?1 ORDER BY seq",
+                "SELECT job_id, stage_id, holder, pid, pid_start FROM leases
+                 WHERE expires_ms <= ?1 ORDER BY stage_id",
             )
             .map_err(backend)?;
         let rows = stmt
-            .query_map(params![job.as_str()], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
-                ))
+            .query_map(params![now_ms], |r| {
+                Ok(ExpiredLease {
+                    job_id: JobId::new(r.get::<_, String>(0)?),
+                    stage_id: r.get(1)?,
+                    holder: r.get(2)?,
+                    pid: r.get::<_, Option<i64>>(3)?.map(|p| p as u32),
+                    pid_start: r.get::<_, Option<i64>>(4)?.map(|p| p as u64),
+                })
             })
             .map_err(backend)?;
-        let mut events = Vec::new();
-        for row in rows {
-            let (id, stage_id, seq, ts_ms, actor, kind, payload) = row.map_err(backend)?;
-            let body: serde_json::Value = serde_json::from_str(&payload).map_err(backend)?;
-            let payload: EventPayload =
-                serde_json::from_value(serde_json::json!({"kind": kind, "payload": body}))
-                    .map_err(backend)?;
-            events.push(Event {
-                id,
-                job_id: job.clone(),
-                stage_id,
-                seq: seq as u64,
-                ts_ms,
-                actor: parse_actor(&actor)?,
-                payload,
-            });
-        }
-        Ok(events)
+        rows.map(|row| row.map_err(backend)).collect()
     }
 }
 
@@ -210,25 +413,121 @@ mod tests {
         Ok((dir, s))
     }
 
-    fn new_job(id: &str) -> NewJob {
+    fn new_job(id: &str, repo: Option<&str>) -> NewJob {
         NewJob {
             id: JobId::new(id),
             event_id: format!("E-{id}"),
             prompt: "p".into(),
+            repo: repo.map(str::to_owned),
             submitted_at_ms: 7,
         }
+    }
+
+    fn claim_request(tag: &str, now_ms: i64) -> ClaimRequest {
+        ClaimRequest {
+            holder: "w1".into(),
+            now_ms,
+            ttl_ms: 1000,
+            stage_id: format!("S-{tag}"),
+            event_ids: [format!("EP-{tag}"), format!("EC-{tag}")],
+        }
+    }
+
+    fn kinds(s: &SqliteStore, job: &str) -> Result<Vec<&'static str>, StoreError> {
+        Ok(s.read_timeline(&JobId::new(job))?
+            .iter()
+            .map(|e| e.payload.kind())
+            .collect())
     }
 
     #[test]
     fn enqueue_then_list_and_timeline() -> Result<(), Box<dyn std::error::Error>> {
         let (_d, mut s) = store()?;
-        s.enqueue_job(new_job("J1"))?;
-        s.enqueue_job(new_job("J2"))?;
+        s.enqueue_job(new_job("J1", None))?;
+        s.enqueue_job(new_job("J2", None))?;
         let ids: Vec<_> = s.list_jobs()?.into_iter().map(|j| j.id).collect();
         assert_eq!(ids, vec![JobId::new("J1"), JobId::new("J2")]);
         let tl = s.read_timeline(&JobId::new("J1"))?;
         assert_eq!(tl.len(), 1);
         assert_eq!(tl[0].payload.kind(), "job-submitted");
+        Ok(())
+    }
+
+    #[test]
+    fn jobs_without_a_repo_are_never_claimed() -> Result<(), Box<dyn std::error::Error>> {
+        let (_d, mut s) = store()?;
+        s.enqueue_job(new_job("J1", None))?;
+        assert_eq!(s.claim_stage(claim_request("a", 100))?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn claiming_plans_the_stage_ledgers_the_claim_and_runs_the_job(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_d, mut s) = store()?;
+        s.enqueue_job(new_job("J1", Some("/r")))?;
+
+        let claimed = s.claim_stage(claim_request("a", 100))?;
+
+        let claimed = claimed.ok_or("nothing claimed")?;
+        assert_eq!((claimed.n, claimed.attempt), (1, 1));
+        assert_eq!(claimed.job.state, JobState::Running);
+        assert_eq!(
+            kinds(&s, "J1")?,
+            vec!["job-submitted", "stage-planned", "stage-claimed"]
+        );
+        assert_eq!(s.claim_stage(claim_request("b", 101))?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unrenewed_lease_expires_and_a_heartbeat_keeps_it_alive(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_d, mut s) = store()?;
+        s.enqueue_job(new_job("J1", Some("/r")))?;
+        let claimed = s.claim_stage(claim_request("a", 100))?.ok_or("no claim")?;
+        assert!(s.expired_leases(1099)?.is_empty());
+
+        s.heartbeat(&claimed.stage_id, 5000)?;
+
+        assert!(s.expired_leases(4999)?.is_empty());
+        assert_eq!(s.expired_leases(5000)?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn releasing_a_lease_removes_it_and_a_retried_stage_is_reclaimed_as_attempt_two(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_d, mut s) = store()?;
+        s.enqueue_job(new_job("J1", Some("/r")))?;
+        let claimed = s.claim_stage(claim_request("a", 100))?.ok_or("no claim")?;
+        let event = |id: &str, payload| NewEvent {
+            id: id.into(),
+            job_id: JobId::new("J1"),
+            stage_id: Some(claimed.stage_id.clone()),
+            ts_ms: 200,
+            actor: Actor::Daemon,
+            payload,
+        };
+
+        s.append_event(event(
+            "E1",
+            EventPayload::LeaseExpired {
+                holder: "w1".into(),
+            },
+        ))?;
+        s.append_event(event(
+            "E2",
+            EventPayload::StageRetried {
+                reason: "lost".into(),
+            },
+        ))?;
+
+        assert!(s.expired_leases(i64::MAX)?.is_empty());
+        let again = s
+            .claim_stage(claim_request("b", 300))?
+            .ok_or("no reclaim")?;
+        assert_eq!((again.stage_id, again.attempt), (claimed.stage_id, 2));
         Ok(())
     }
 }

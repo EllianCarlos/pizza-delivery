@@ -1,10 +1,15 @@
+mod agent;
 mod client;
 mod config;
+mod git;
 mod handler;
+mod process;
 mod server;
 mod sqlite_store;
+mod worker;
 
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::process::ExitCode as ProcessExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -26,6 +31,10 @@ use config::Config;
 struct Cli {
     /// Prompt to enqueue as a new job
     prompt: Option<String>,
+
+    /// Repository the job works in
+    #[arg(long)]
+    repo: Option<PathBuf>,
 
     /// Emit JSON lines even on a terminal
     #[arg(long)]
@@ -69,8 +78,12 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
             print!("{}", render_jobs(&jobs, mode));
             exit(ExitCode::Success)
         }
-        Ok(Response::Job { job, events }) => {
-            print!("{}", render_timeline(&job, &events, mode));
+        Ok(Response::Job {
+            job,
+            stages,
+            events,
+        }) => {
+            print!("{}", render_timeline(&job, &stages, &events, mode));
             exit(ExitCode::Success)
         }
         Ok(Response::Stopped) => exit(ExitCode::Success),
@@ -121,7 +134,15 @@ fn run(cli: Cli) -> ProcessExitCode {
         None => match cli.prompt {
             Some(prompt) => request(
                 &config,
-                Request::Submit { prompt },
+                Request::Submit {
+                    prompt,
+                    repo: cli.repo.map(|r| {
+                        std::fs::canonicalize(&r)
+                            .unwrap_or(r)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                },
                 OutputMode::resolve(cli.json, tty),
             ),
             None => {

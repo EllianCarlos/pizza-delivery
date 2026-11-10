@@ -9,9 +9,12 @@ use listenfd::ListenFd;
 use pizza_delivery_core::api::{ApiError, ErrorKind};
 use pizza_delivery_core::{Request, Response, Store};
 
+use crate::agent::ClaudeAgent;
 use crate::config::Config;
+use crate::git::SystemGit;
 use crate::handler::{handle, Env, SystemEnv};
 use crate::sqlite_store::SqliteStore;
+use crate::worker::{Worker, WorkerConfig};
 
 pub enum Bound {
     Listener(UnixListener),
@@ -46,15 +49,57 @@ pub fn run(config: &Config) -> Result<()> {
     };
     std::fs::create_dir_all(&config.data_dir).context("create data directory")?;
     let store: Box<dyn Store> = Box::new(SqliteStore::open(&config.db_path())?);
-    serve(listener, store, Arc::new(SystemEnv))
+    serve(listener, store, Arc::new(SystemEnv), config)
 }
 
-pub fn serve(listener: UnixListener, store: Box<dyn Store>, env: Arc<dyn Env>) -> Result<()> {
+fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop: &AtomicBool) {
+    let agent = ClaudeAgent::new(&config.agent_command);
+    let worker_config = WorkerConfig {
+        data_dir: config.data_dir.clone(),
+        holder: format!("daemon-{}", std::process::id()),
+        lease_ttl_ms: config.lease_ttl_ms,
+        heartbeat_ms: u64::try_from(config.lease_ttl_ms / 3)
+            .unwrap_or(1000)
+            .max(10),
+        timeout: Duration::from_secs(config.stage_timeout_secs),
+    };
+    let worker = Worker {
+        store,
+        env,
+        git: &SystemGit,
+        agent: &agent,
+        config: &worker_config,
+    };
+    while !stop.load(Ordering::SeqCst) {
+        match worker.tick() {
+            Ok(true) => {}
+            Ok(false) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => {
+                eprintln!("worker: {e:#}");
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
+pub fn serve(
+    listener: UnixListener,
+    store: Box<dyn Store>,
+    env: Arc<dyn Env>,
+    config: &Config,
+) -> Result<()> {
     listener
         .set_nonblocking(true)
         .context("nonblocking listener")?;
     let store = Arc::new(Mutex::new(store));
     let stop = Arc::new(AtomicBool::new(false));
+    let worker_config = config.clone();
+    let worker_handle = {
+        let store = Arc::clone(&store);
+        let env = Arc::clone(&env);
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || work_loop(&store, env.as_ref(), &worker_config, &stop))
+    };
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -71,6 +116,7 @@ pub fn serve(listener: UnixListener, store: Box<dyn Store>, env: Arc<dyn Env>) -
             Err(e) => return Err(e).context("accept"),
         }
     }
+    drop(worker_handle);
     Ok(())
 }
 
