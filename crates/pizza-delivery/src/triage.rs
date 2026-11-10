@@ -85,6 +85,7 @@ pub struct Triager<'a> {
     pub deps: Deps<'a>,
     pub agent: &'a str,
     pub budget_cap_tokens: u64,
+    pub budget_defaults: Defaults,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -187,7 +188,7 @@ impl Triager<'_> {
             &triage.plan,
             self.agent,
             &self.history()?,
-            &Defaults::standard(),
+            &self.budget_defaults,
         );
         if let Some(f) = estimate_overrun(&estimates, self.budget_cap_tokens) {
             self.append(
@@ -523,6 +524,7 @@ mod tests {
                 },
                 agent: "claude",
                 budget_cap_tokens: DEFAULT_CAP_TOKENS,
+                budget_defaults: Defaults::standard(),
             };
             triager.tick()
         }

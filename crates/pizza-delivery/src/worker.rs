@@ -41,6 +41,7 @@ pub struct WorkerConfig {
     pub retention_ms: i64,
     pub trust: TrustConfig,
     pub budget_cap_tokens: u64,
+    pub budget_defaults: Defaults,
     pub require_triage: bool,
 }
 
@@ -786,7 +787,7 @@ impl Worker<'_> {
                 tier_for(&claimed.name),
                 agent,
                 &[],
-                &Defaults::standard(),
+                &self.config.budget_defaults,
             )
         });
         self.append(
@@ -1030,6 +1031,7 @@ mod tests {
                     caps: Caps::default(),
                     retention_ms: 1000,
                     budget_cap_tokens: DEFAULT_CAP_TOKENS,
+                    budget_defaults: Defaults::standard(),
                     require_triage: false,
                     trust: TrustConfig {
                         default_hosts: vec!["api.anthropic.com".to_owned()],

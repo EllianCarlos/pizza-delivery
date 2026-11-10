@@ -106,3 +106,22 @@ fn actual_usage_within_the_cap_does_not_park_the_job() -> TestResult {
     assert!(!has_high_budget_feedback(&h, &id)?);
     Ok(())
 }
+
+#[test]
+fn configured_tier_defaults_replace_the_built_in_cold_start_estimates() -> TestResult {
+    let h = Harness::with_agent(&agent_reporting(10))?
+        .with_env("PIZZA_DELIVERY_ESTIMATE_LARGE_TOKENS", "777")
+        .with_env("PIZZA_DELIVERY_ESTIMATE_LARGE_WALL_MS", "55");
+    let id = h.submit_in_repo("do the thing")?;
+    h.wait_for_end(&id)?;
+
+    assert_eq!(implement_estimate_tokens(&h, &id)?, 777);
+    let estimated = of_kind(&h, &id, "budget-estimated")?;
+    let wall = estimated
+        .first()
+        .and_then(|p| p["stages"].as_array())
+        .and_then(|s| s.iter().find(|s| s["stage"] == "implement"))
+        .map(|s| s["wall_ms"].clone());
+    assert_eq!(wall, Some(serde_json::json!(55)));
+    Ok(())
+}
