@@ -15,7 +15,8 @@ import { createApi } from "./api";
 import { usePolled } from "./hooks";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobView } from "./generated/JobView";
-import { pipelineLanes } from "./model";
+import { jobFromPath, landingTab, pipelineLanes } from "./model";
+import { enablePush, pushSupported } from "./push";
 import { ArtifactBrowser, DetailPanel, EventsPanel, InboxPanel } from "./panels";
 import { BoardView, PipelineView, TableView } from "./views";
 
@@ -69,7 +70,7 @@ function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onCl
 
 function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void }) {
   const [view, setView] = useState<ViewName>("table");
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(jobFromPath(window.location.pathname));
   const [submitting, setSubmitting] = useState(false);
   const details = usePolled<JobDetailView[]>(
     () => Promise.all(jobs.map((j) => api.job(j.short_id))),
@@ -94,7 +95,7 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
                 { id: "pipeline", text: "Pipeline" },
               ]}
             />
-            <Button variant="primary" onClick={() => setSubmitting(true)}>
+            <Button variant="primary" disabled={api.staleSince() !== null} onClick={() => setSubmitting(true)}>
               Submit job
             </Button>
           </SpaceBetween>
@@ -114,6 +115,13 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
 export function App() {
   const jobs = usePolled(() => api.jobs(), 3000);
   const list = jobs.data?.jobs ?? [];
+  const staleAt = api.staleSince();
+  const [pushError, setPushError] = useState<string | null>(null);
+  const [pushOn, setPushOn] = useState(false);
+  const initialTab = jobFromPath(window.location.pathname)
+    ? "jobs"
+    : landingTab(window.innerWidth);
+  const [tab, setTab] = useState<string>(initialTab);
   return (
     <AppLayout
       navigationHide
@@ -121,7 +129,30 @@ export function App() {
       content={
         <SpaceBetween size="m">
           {jobs.error && <Alert type="error">{jobs.error}</Alert>}
+          {staleAt !== null && (
+            <Alert type="warning" header="Offline">
+              Showing a read-only snapshot from {new Date(staleAt).toLocaleString()}.
+            </Alert>
+          )}
+          {pushError && <Alert type="error">{pushError}</Alert>}
+          {pushSupported() && !pushOn && (
+            <Button
+              onClick={async () => {
+                try {
+                  await enablePush(api);
+                  setPushOn(true);
+                  setPushError(null);
+                } catch (e) {
+                  setPushError(e instanceof Error ? e.message : String(e));
+                }
+              }}
+            >
+              Enable notifications
+            </Button>
+          )}
           <Tabs
+            activeTabId={tab}
+            onChange={({ detail }) => setTab(detail.activeTabId)}
             tabs={[
               { id: "jobs", label: "Jobs", content: <JobsPage jobs={list} onChanged={() => void jobs.refresh()} /> },
               { id: "inbox", label: "Inbox", content: <InboxPanel api={api} /> },

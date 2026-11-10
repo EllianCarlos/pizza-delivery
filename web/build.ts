@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist", { recursive: true });
@@ -15,6 +15,8 @@ if (!result.success) {
   process.exit(1);
 }
 
+await cp("public", "dist", { recursive: true });
+
 await writeFile(
   "dist/index.html",
   `<!doctype html>
@@ -23,6 +25,10 @@ await writeFile(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>pizza-delivery</title>
+    <meta name="theme-color" content="#0f1b2a" />
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
