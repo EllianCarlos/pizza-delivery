@@ -8,6 +8,7 @@ use anyhow::{anyhow, Result};
 use pizza_delivery_core::context::{assemble_context, Context, Section, CONTEXT_CAP_BYTES};
 use pizza_delivery_core::event::{Actor, EventPayload};
 use pizza_delivery_core::job::JobState;
+use pizza_delivery_core::sandbox::SandboxProfile;
 use pizza_delivery_core::triage::{
     conclude, parse_choice, reply_text, resolve_repo, tiebreak_prompt, Candidate, Outcome, Project,
 };
@@ -293,6 +294,8 @@ impl TieBreaker for AgentTieBreaker<'_> {
             cwd: self.cwd.clone(),
             handoff_path: self.cwd.join("tie-break-handoff.md"),
             timeout: TIE_BREAK_TIMEOUT,
+            sandbox: SandboxProfile::default(),
+            egress_log: self.cwd.join("tie-break-egress.log"),
         };
         let output = self.agent.run(&invocation, &mut |_| {}).ok()?;
         if output.timed_out {

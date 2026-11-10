@@ -55,6 +55,19 @@ pub enum EventPayload {
     AgentFinished {
         usage: Usage,
     },
+    SandboxAudit {
+        profile_hash: String,
+        mounts: Vec<String>,
+        egress_allowlist: Vec<String>,
+        blocked_requests: Vec<String>,
+        mcp_activations: Vec<String>,
+        diff_policy_result: Option<String>,
+        pushed_ref: Option<String>,
+        pr_url: Option<String>,
+    },
+    EgressBlocked {
+        host: String,
+    },
     ArtifactRecorded {
         kind: String,
         path: String,
@@ -110,6 +123,8 @@ impl EventPayload {
             EventPayload::StageStarted { .. } => "stage-started",
             EventPayload::AgentInvoked { .. } => "agent-invoked",
             EventPayload::AgentFinished { .. } => "agent-finished",
+            EventPayload::SandboxAudit { .. } => "sandbox-audit",
+            EventPayload::EgressBlocked { .. } => "egress-blocked",
             EventPayload::ArtifactRecorded { .. } => "artifact-recorded",
             EventPayload::HandoffWritten { .. } => "handoff-written",
             EventPayload::StageSucceeded { .. } => "stage-succeeded",
@@ -153,6 +168,33 @@ mod tests {
             serde_json::to_value(&p).ok(),
             Some(serde_json::json!({"kind":"job-submitted","payload":{"prompt":"x"}}))
         );
+    }
+
+    #[test]
+    fn audit_fields_are_always_present_even_when_unknown() {
+        let p = EventPayload::SandboxAudit {
+            profile_hash: "h".into(),
+            mounts: vec![],
+            egress_allowlist: vec![],
+            blocked_requests: vec![],
+            mcp_activations: vec![],
+            diff_policy_result: None,
+            pushed_ref: None,
+            pr_url: None,
+        };
+        let v = serde_json::to_value(&p).unwrap_or_default();
+        for key in [
+            "profile_hash",
+            "mounts",
+            "egress_allowlist",
+            "blocked_requests",
+            "mcp_activations",
+            "diff_policy_result",
+            "pushed_ref",
+            "pr_url",
+        ] {
+            assert!(v["payload"].get(key).is_some(), "missing {key}");
+        }
     }
 
     #[test]
