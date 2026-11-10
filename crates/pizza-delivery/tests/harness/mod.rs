@@ -345,6 +345,20 @@ impl Harness {
         Ok((status, json))
     }
 
+    pub fn raw_get(&self, path: &str) -> TestResult<(u16, String, String)> {
+        self.run(&["status"])?;
+        let mut stream = TcpStream::connect(("127.0.0.1", self.http_port))?;
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )?;
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw)?;
+        let (head, body) = raw.split_once("\r\n\r\n").ok_or("malformed response")?;
+        let status = head.split_whitespace().nth(1).ok_or("no status")?.parse()?;
+        Ok((status, head.to_owned(), body.to_owned()))
+    }
+
     pub fn get(&self, path: &str) -> TestResult<serde_json::Value> {
         let (status, body) = self.http("GET", path, None)?;
         assert_eq!(status, 200, "GET {path}: {body}");

@@ -342,6 +342,7 @@ pub fn serve(
                 env: Arc::clone(&env),
                 stop: Arc::clone(&stop),
                 kill_grace,
+                data_dir: config.data_dir.clone(),
             };
             std::thread::spawn(move || http::listen(http_listener, api));
         }
