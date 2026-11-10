@@ -12,6 +12,13 @@ fn is_normal(priority: &Priority) -> bool {
     *priority == Priority::Normal
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUp {
+    pub parent: JobId,
+    pub entries: Vec<String>,
+    pub reply: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Actor {
@@ -39,6 +46,8 @@ pub enum EventPayload {
         repo: Option<String>,
         #[serde(default, skip_serializing_if = "is_normal")]
         priority: Priority,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_up: Option<FollowUp>,
     },
     JobCompleted {},
     JobCancelled {},
@@ -139,6 +148,9 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         impact: Option<String>,
     },
+    FeedbackDismissed {
+        entry: String,
+    },
     PlanAmended {
         after: String,
         stages: Vec<PlannedStage>,
@@ -207,6 +219,7 @@ impl EventPayload {
             EventPayload::ContextRead { .. } => "context-read",
             EventPayload::TriageCompleted { .. } => "triage-completed",
             EventPayload::FeedbackRecorded { .. } => "feedback-recorded",
+            EventPayload::FeedbackDismissed { .. } => "feedback-dismissed",
             EventPayload::PlanAmended { .. } => "plan-amended",
             EventPayload::JobNeedsHuman { .. } => "job-needs-human",
             EventPayload::BudgetEstimated { .. } => "budget-estimated",
@@ -242,6 +255,7 @@ mod tests {
             prompt: "x".into(),
             repo: None,
             priority: Priority::Normal,
+            follow_up: None,
         };
         assert_eq!(p.kind(), "job-submitted");
         assert_eq!(

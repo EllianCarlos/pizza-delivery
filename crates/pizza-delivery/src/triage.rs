@@ -503,6 +503,7 @@ mod tests {
                 prompt: prompt.into(),
                 repo: repo.map(str::to_owned),
                 priority: Priority::Normal,
+                follow_up: None,
                 submitted_at_ms: 0,
             })?;
             Ok(Self {

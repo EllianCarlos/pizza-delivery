@@ -18,8 +18,8 @@ use std::process::ExitCode as ProcessExitCode;
 use clap::{CommandFactory, Parser, Subcommand};
 use pizza_delivery_core::triage::render_triage;
 use pizza_delivery_core::{
-    render_jobs, render_quota, render_submitted, render_timeline, ExitCode, OutputMode, Priority,
-    Request, Response,
+    render_dismissed, render_inbox, render_inbox_entry, render_jobs, render_quota, render_replied,
+    render_submitted, render_timeline, ExitCode, OutputMode, Priority, Request, Response,
 };
 
 use client::{send, ClientError, Start};
@@ -88,6 +88,32 @@ enum Command {
     },
     /// Cancel a job, terminate its running stage and keep its worktree
     Cancel { job: String },
+    /// List feedback entries, show one, or dismiss entries
+    Inbox {
+        /// Include dismissed entries
+        #[arg(long)]
+        all: bool,
+        /// Emit JSON lines even on a terminal
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<InboxAction>,
+    },
+    /// Answer feedback entries of one job with a new follow-up job
+    Reply {
+        /// A job (all its open entries) or entry ids
+        #[arg(required = true)]
+        targets: Vec<String>,
+        /// Reply text; opens $EDITOR when omitted
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Queue priority of the follow-up job (default high)
+        #[arg(long, value_enum)]
+        priority: Option<PriorityArg>,
+        /// Emit JSON lines even on a terminal
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the daemon in the foreground (socket-activated or started on demand)
     Daemon,
     /// Ask the running daemon to exit
@@ -137,6 +163,39 @@ fn run_broker(
             eprintln!("error: {e:#}");
             exit(ExitCode::General)
         }
+    }
+}
+
+#[derive(Subcommand)]
+enum InboxAction {
+    /// Show one entry in full
+    Show { entry: String },
+    /// Dismiss entries without creating a job
+    Dismiss {
+        #[arg(required = true)]
+        entries: Vec<String>,
+    },
+}
+
+fn edit_reply() -> Result<String, String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_owned());
+    let path = std::env::temp_dir().join(format!("pizza-delivery-reply-{}.md", std::process::id()));
+    std::fs::write(&path, "").map_err(|e| e.to_string())?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh")
+        .arg(&path)
+        .status()
+        .map_err(|e| e.to_string());
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(&path);
+    match status {
+        Ok(s) if s.success() => text,
+        Ok(s) => Err(format!("editor exited with {s}")),
+        Err(e) => Err(e),
     }
 }
 
@@ -196,6 +255,26 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
         }
         Ok(Response::Cancelled { id, short_id }) => {
             print!("{}", render_submitted(&id, &short_id, mode));
+            exit(ExitCode::Success)
+        }
+        Ok(Response::Inbox { entries }) => {
+            print!("{}", render_inbox(&entries, mode));
+            exit(ExitCode::Success)
+        }
+        Ok(Response::InboxEntry { entry }) => {
+            print!("{}", render_inbox_entry(&entry, mode));
+            exit(ExitCode::Success)
+        }
+        Ok(Response::Dismissed { entries }) => {
+            print!("{}", render_dismissed(&entries, mode));
+            exit(ExitCode::Success)
+        }
+        Ok(Response::Replied {
+            id,
+            short_id,
+            answered,
+        }) => {
+            print!("{}", render_replied(&id, &short_id, &answered, mode));
             exit(ExitCode::Success)
         }
         Ok(Response::Stopped) => exit(ExitCode::Success),
@@ -258,6 +337,40 @@ fn run(cli: Cli) -> ProcessExitCode {
             Request::Cancel { job },
             OutputMode::resolve(cli.json, tty),
         ),
+        Some(Command::Inbox { all, json, action }) => {
+            let req = match action {
+                None => Request::Inbox { all },
+                Some(InboxAction::Show { entry }) => Request::InboxShow { entry },
+                Some(InboxAction::Dismiss { entries }) => Request::Dismiss { entries },
+            };
+            request(&config, req, OutputMode::resolve(json || cli.json, tty))
+        }
+        Some(Command::Reply {
+            targets,
+            message,
+            priority,
+            json,
+        }) => {
+            let text = match message {
+                Some(text) => text,
+                None => match edit_reply() {
+                    Ok(text) => text,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return exit(ExitCode::General);
+                    }
+                },
+            };
+            request(
+                &config,
+                Request::Reply {
+                    targets,
+                    text,
+                    priority: priority.map(Into::into),
+                },
+                OutputMode::resolve(json || cli.json, tty),
+            )
+        }
         Some(Command::Status {
             quota: true, json, ..
         }) => request(

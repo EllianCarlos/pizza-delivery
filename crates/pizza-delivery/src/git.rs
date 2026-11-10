@@ -6,7 +6,13 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 
 pub trait Git: Send + Sync {
-    fn ensure_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()>;
+    fn ensure_worktree(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        branch: &str,
+        base: Option<&str>,
+    ) -> Result<()>;
     fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>>;
     fn is_dirty(&self, worktree: &Path) -> Result<bool>;
     fn is_pushed(&self, worktree: &Path) -> Result<bool>;
@@ -42,16 +48,38 @@ fn default_branch(repo: &Path) -> Result<String> {
 }
 
 impl Git for SystemGit {
-    fn ensure_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
+    fn ensure_worktree(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        branch: &str,
+        base: Option<&str>,
+    ) -> Result<()> {
         if worktree.join(".git").exists() {
             return Ok(());
         }
         if let Some(parent) = worktree.parent() {
             std::fs::create_dir_all(parent).context("create worktree parent")?;
         }
-        let base = default_branch(repo)?;
+        let start = match base {
+            Some(base)
+                if run(
+                    repo,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("refs/heads/{base}"),
+                    ],
+                )
+                .is_ok() =>
+            {
+                base.to_owned()
+            }
+            _ => default_branch(repo)?,
+        };
         let path = worktree.to_string_lossy();
-        run(repo, &["worktree", "add", "-b", branch, &path, &base]).map(|_| ())
+        run(repo, &["worktree", "add", "-b", branch, &path, &start]).map(|_| ())
     }
 
     fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>> {
@@ -120,8 +148,14 @@ impl<G> LockedGit<G> {
 }
 
 impl<G: Git> Git for LockedGit<G> {
-    fn ensure_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
-        self.serialized(repo, |g| g.ensure_worktree(repo, worktree, branch))
+    fn ensure_worktree(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        branch: &str,
+        base: Option<&str>,
+    ) -> Result<()> {
+        self.serialized(repo, |g| g.ensure_worktree(repo, worktree, branch, base))
     }
 
     fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>> {
@@ -155,7 +189,7 @@ mod tests {
     }
 
     impl Git for Probe {
-        fn ensure_worktree(&self, _: &Path, _: &Path, _: &str) -> Result<()> {
+        fn ensure_worktree(&self, _: &Path, _: &Path, _: &str, _: Option<&str>) -> Result<()> {
             if self.inside.fetch_add(1, Ordering::SeqCst) > 0 {
                 self.overlaps.fetch_add(1, Ordering::SeqCst);
             }
@@ -183,7 +217,7 @@ mod tests {
             for repo in repos {
                 let git = &git;
                 scope.spawn(move || {
-                    let _ = git.ensure_worktree(Path::new(repo), Path::new("/w"), "b");
+                    let _ = git.ensure_worktree(Path::new(repo), Path::new("/w"), "b", None);
                 });
             }
         });

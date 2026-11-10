@@ -319,6 +319,7 @@ impl Store for SqliteStore {
                 prompt: new.prompt,
                 repo: new.repo,
                 priority: new.priority,
+                follow_up: new.follow_up,
             },
         };
         let tx = self.conn.transaction().map_err(backend)?;
@@ -511,6 +512,7 @@ mod tests {
             prompt: "p".into(),
             repo: repo.map(str::to_owned),
             priority: Priority::Normal,
+            follow_up: None,
             submitted_at_ms: 7,
         }
     }
@@ -539,6 +541,7 @@ mod tests {
         NewJob {
             repo: Some(repo.to_owned()),
             priority,
+            follow_up: None,
             submitted_at_ms: at,
             ..new_job(id, None)
         }
