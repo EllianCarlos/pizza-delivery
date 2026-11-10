@@ -1,11 +1,157 @@
 use super::*;
 
+const FAKE_ENGRAM: &str = r#"#!/bin/sh
+F="$0.store"
+N="$0.n"
+die() { echo "$*" >&2; exit 1; }
+cmd=$1
+[ $# -gt 0 ] && shift
+case "$cmd" in
+save)
+  [ $# -ge 2 ] || die "usage: engram save <title> <content> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--topic TOPIC_KEY]"
+  title=$1
+  content=$2
+  shift 2
+  type=manual
+  project=""
+  key=""
+  while [ $# -gt 0 ]; do
+    [ $# -ge 2 ] || die "flag $1 needs a value"
+    case "$1" in
+      --type) type=$2 ;;
+      --project) project=$2 ;;
+      --scope) ;;
+      --topic) key=$2 ;;
+      *) die "unknown flag: $1" ;;
+    esac
+    shift 2
+  done
+  existing=""
+  if [ -n "$key" ] && [ -f "$F" ]; then
+    existing=$(awk -F'|' -v k="$key" -v p="$project" '$2==k && $3==p {print $1; exit}' "$F")
+  fi
+  if [ -n "$existing" ]; then
+    id=$existing
+    awk -F'|' -v id="$id" '$1!=id' "$F" > "$F.tmp"
+    mv "$F.tmp" "$F"
+  else
+    id=$(( $(cat "$N" 2>/dev/null || echo 0) + 1 ))
+    echo $id > "$N"
+  fi
+  printf '%s|%s|%s|%s|%s|%s\n' "$id" "$key" "$project" "$type" "$title" "$content" >> "$F"
+  echo "Memory saved: #$id \"$title\" ($type)"
+  ;;
+search)
+  [ $# -ge 1 ] || die "usage: engram search <query> [--type TYPE] [--project PROJECT] [--scope SCOPE] [--limit N]"
+  q=$1
+  shift
+  project=""
+  while [ $# -gt 0 ]; do
+    [ $# -ge 2 ] || die "flag $1 needs a value"
+    case "$1" in
+      --project) project=$2 ;;
+      --type|--scope|--limit) ;;
+      *) die "unknown flag: $1" ;;
+    esac
+    shift 2
+  done
+  out=""
+  n=0
+  if [ -f "$F" ]; then
+    while IFS='|' read -r id key proj type title content; do
+      [ -z "$project" ] || [ "$proj" = "$project" ] || continue
+      case "$title $content" in *"$q"*) ;; *) continue ;; esac
+      n=$((n + 1))
+      out="$out[$n] #$id ($type) — $title
+    $content
+    2026-01-01 00:00:00 | project: $proj | scope: project
+
+"
+    done < "$F"
+  fi
+  if [ "$n" -eq 0 ]; then
+    echo "No memories found for: \"$q\""
+  else
+    printf 'Found %s memories:\n\n%s' "$n" "$out"
+  fi
+  ;;
+*)
+  die "Unknown command: $cmd"
+  ;;
+esac
+"#;
+
+const FAKE_MNEMON: &str = r#"#!/bin/sh
+F="$0.store"
+N="$0.n"
+die() { echo "$*" >&2; exit 1; }
+nl='
+'
+cmd=$1
+[ $# -gt 0 ] && shift
+case "$cmd" in
+remember)
+  [ $# -ge 1 ] || die "remember needs content"
+  content=$1
+  shift
+  tags=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --no-diff) shift ;;
+      --tags) tags=$2; shift 2 ;;
+      --cat|--source|--imp|--entities) shift 2 ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+  topic=${content%%"$nl"*}
+  body=""
+  case "$content" in *"$nl"*) body=${content#*"$nl"} ;; esac
+  id="m$(( $(cat "$N" 2>/dev/null || echo 0) + 1 ))"
+  echo "${id#m}" > "$N"
+  printf '%s|%s|%s|%s\n' "$id" "$tags" "$topic" "$body" >> "$F"
+  printf '{\n  "action": "added",\n  "id": "%s"\n}\n' "$id"
+  ;;
+recall)
+  [ $# -ge 1 ] || die "recall needs a keyword"
+  q=$1
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --basic) shift ;;
+      --limit|--cat|--intent|--source) shift 2 ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+  hits=""
+  if [ -f "$F" ]; then
+    while IFS='|' read -r id tags topic body; do
+      case "$topic $body $tags" in *"$q"*) ;; *) continue ;; esac
+      jt=$(echo "$tags" | sed 's/[^,][^,]*/"&"/g')
+      hit="{\"insight\":{\"id\":\"$id\",\"content\":\"$topic\\n$body\",\"tags\":[$jt]},\"score\":0.45}"
+      if [ -z "$hits" ]; then hits=$hit; else hits="$hits,$hit"; fi
+    done < "$F"
+  fi
+  printf '{"results":[%s],"meta":{"hint":"sparse_results"}}\n' "$hits"
+  ;;
+forget)
+  [ $# -eq 1 ] || die "forget needs an id"
+  grep -q "^$1|" "$F" 2>/dev/null || die "insight $1 not found"
+  grep -v "^$1|" "$F" > "$F.tmp"
+  mv "$F.tmp" "$F"
+  echo '{"action":"forgotten"}'
+  ;;
+*)
+  die "Unknown command: $cmd"
+  ;;
+esac
+"#;
+
 fn install_memory(rig: &mut Rig) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let engram = rig.config.data_dir.join("engram");
     let mnemon = rig.config.data_dir.join("mnemon");
-    for path in [&engram, &mnemon] {
-        std::fs::write(path, FAKE_MEMORY_CLI)?;
+    for (path, script) in [(&engram, FAKE_ENGRAM), (&mnemon, FAKE_MNEMON)] {
+        std::fs::write(path, script)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     }
     rig.config.memory = Some(MemorySetup { engram, mnemon });
@@ -56,18 +202,21 @@ fn triple(store: &str, topic: &str, action: &str) -> (String, String, String) {
 const FIX_PLAN: &str =
     "{\"kind\":\"fix\",\"topic\":\"Login bug\",\"content\":\"hash before compare\"}\n";
 
+const NIX_PLAN: &str =
+    "{\"kind\":\"cross-repo\",\"topic\":\"Nix\",\"content\":\"flakes everywhere\"}\n";
+
 #[test]
-fn a_completed_job_saves_project_facts_to_engram_and_reconciles_them_by_job_tag() -> Result<()>
+fn a_completed_job_saves_project_facts_to_engram_and_reconciles_them_by_job_marker() -> Result<()>
 {
     let mut rig = Rig::new(vec![good(), plan(FIX_PLAN)])?;
     install_memory(&mut rig)?;
 
     rig.worker().tick()?;
 
-    let saved = memory_store(&rig, "engram");
-    assert!(saved.contains("\"topic\":\"Login bug\""));
-    assert!(saved.contains("\"pizza-delivery\""));
-    assert!(saved.contains("\"job:J1\""));
+    assert_eq!(
+        memory_store(&rig, "engram"),
+        "1|pizza-delivery/login-bug|my repo|bugfix|Login bug|[pizza-delivery job:J1] hash before compare\n"
+    );
     assert_eq!(memory_store(&rig, "mnemon"), "");
     assert_eq!(
         write_backs(&rig)?,
@@ -90,21 +239,22 @@ fn a_completed_job_saves_project_facts_to_engram_and_reconciles_them_by_job_tag(
 }
 
 #[test]
-fn a_second_write_updates_our_own_memory_instead_of_duplicating_it() -> Result<()> {
+fn a_second_write_updates_our_own_engram_memory_by_topic_key_instead_of_duplicating_it(
+) -> Result<()> {
     let mut rig = Rig::new(vec![good(), plan(FIX_PLAN)])?;
     install_memory(&mut rig)?;
     seed_memory(
         &rig,
         "engram",
-        "{\"id\":\"7\",\"topic\":\"Login bug\",\"content\":\"old\",\"tags\":[\"pizza-delivery\",\"job:J0\"]}",
+        "7|pizza-delivery/login-bug|my repo|bugfix|Login bug|[pizza-delivery job:J0] old",
     )?;
 
     rig.worker().tick()?;
 
-    let saved = memory_store(&rig, "engram");
-    assert_eq!(saved.lines().count(), 1);
-    assert!(saved.contains("hash before compare"));
-    assert!(saved.contains("\"job:J1\""));
+    assert_eq!(
+        memory_store(&rig, "engram"),
+        "7|pizza-delivery/login-bug|my repo|bugfix|Login bug|[pizza-delivery job:J1] hash before compare\n"
+    );
     assert_eq!(
         write_backs(&rig)?,
         vec![triple("engram", "Login bug", "updated")]
@@ -116,8 +266,7 @@ fn a_second_write_updates_our_own_memory_instead_of_duplicating_it() -> Result<(
 fn a_contradiction_with_a_foreign_memory_adds_a_risk_and_skips_the_write() -> Result<()> {
     let mut rig = Rig::new(vec![good(), plan(FIX_PLAN)])?;
     install_memory(&mut rig)?;
-    let foreign =
-        "{\"id\":\"f1\",\"topic\":\"Login bug\",\"content\":\"mine\",\"tags\":[\"owner\"]}";
+    let foreign = "7||my repo|bugfix|Login bug|mine";
     seed_memory(&rig, "engram", foreign)?;
 
     rig.worker().tick()?;
@@ -132,7 +281,7 @@ fn a_contradiction_with_a_foreign_memory_adds_a_risk_and_skips_the_write() -> Re
         })
         .collect();
     assert_eq!(risks.len(), 1);
-    assert!(risks[0].contains("f1"));
+    assert!(risks[0].contains("id 7"));
     assert_eq!(
         write_backs(&rig)?,
         vec![triple("engram", "Login bug", "contradiction")]
@@ -152,11 +301,45 @@ fn owner_directives_need_a_reply_and_cross_repo_facts_go_to_mnemon_only() -> Res
 
     rig.worker().tick()?;
 
-    let saved = memory_store(&rig, "mnemon");
-    assert!(saved.contains("Nix"));
-    assert!(!saved.contains("Style"));
+    assert_eq!(
+        memory_store(&rig, "mnemon"),
+        "m1|pizza-delivery,job:J1|Nix|flakes everywhere\n"
+    );
     assert_eq!(memory_store(&rig, "engram"), "");
     assert!(write_backs(&rig)?.contains(&triple("mnemon", "Style", "skipped-unconfirmed")));
+    assert!(write_backs(&rig)?.contains(&triple("mnemon", "Nix", "saved")));
+    Ok(())
+}
+
+#[test]
+fn a_second_cross_repo_write_replaces_our_own_mnemon_memory_without_a_duplicate() -> Result<()> {
+    let mut rig = Rig::new(vec![good(), plan(NIX_PLAN)])?;
+    install_memory(&mut rig)?;
+    seed_memory(&rig, "mnemon", "m9|pizza-delivery,job:J0|Nix|flakes")?;
+
+    rig.worker().tick()?;
+
+    assert_eq!(
+        memory_store(&rig, "mnemon"),
+        "m1|pizza-delivery,job:J1|Nix|flakes everywhere\n"
+    );
+    assert_eq!(write_backs(&rig)?, vec![triple("mnemon", "Nix", "updated")]);
+    Ok(())
+}
+
+#[test]
+fn a_foreign_mnemon_memory_is_never_replaced() -> Result<()> {
+    let mut rig = Rig::new(vec![good(), plan(NIX_PLAN)])?;
+    install_memory(&mut rig)?;
+    seed_memory(&rig, "mnemon", "m9|owner|Nix|flakes")?;
+
+    rig.worker().tick()?;
+
+    assert_eq!(memory_store(&rig, "mnemon"), "m9|owner|Nix|flakes\n");
+    assert_eq!(
+        write_backs(&rig)?,
+        vec![triple("mnemon", "Nix", "contradiction")]
+    );
     Ok(())
 }
 
@@ -216,36 +399,3 @@ fn a_cancelled_job_is_not_memorized() -> Result<()> {
     assert_eq!(memory_store(&rig, "engram"), "");
     Ok(())
 }
-
-const FAKE_MEMORY_CLI: &str = r#"#!/bin/sh
-F="$0.store"
-verb=$1
-shift
-case "$verb" in
-search|recall)
-  [ -f "$F" ] && grep -F -- "$1" "$F"
-  exit 0
-  ;;
-save|remember|update)
-  if [ "$verb" = update ]; then
-id=$1
-shift
-grep -v "\"id\":\"$id\"," "$F" > "$F.tmp"
-mv "$F.tmp" "$F"
-  else
-id=$(( $(cat "$F.n" 2>/dev/null || echo 0) + 1 ))
-echo $id > "$F.n"
-  fi
-  topic=$1
-  content=$2
-  shift 2
-  tags=""
-  while [ $# -gt 0 ]; do
-if [ "$1" = "--tag" ]; then tags="$tags\"$2\","; fi
-shift
-  done
-  printf '{"id":"%s","topic":"%s","content":"%s","tags":[%s]}\n' "$id" "$topic" "$content" "${tags%,}" >> "$F"
-  echo "$id"
-  ;;
-esac
-"#;

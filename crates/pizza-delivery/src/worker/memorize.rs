@@ -56,22 +56,20 @@ impl Worker<'_> {
         store: MemoryStore,
         query: &str,
         project: &str,
-    ) -> Result<Vec<pizza_delivery_core::memorize::Existing>> {
-        let verb = if store == MemoryStore::Engram {
-            "search"
-        } else {
-            "recall"
+    ) -> Result<Vec<Existing>> {
+        let args: Vec<String> = match store {
+            MemoryStore::Engram => ["search", query, "--project", project, "--limit", "50"]
+                .map(str::to_owned)
+                .to_vec(),
+            MemoryStore::Mnemon => ["recall", query, "--limit", "50"]
+                .map(str::to_owned)
+                .to_vec(),
         };
-        let mut args = vec![
-            verb.to_owned(),
-            query.to_owned(),
-            "--format".to_owned(),
-            "json".to_owned(),
-        ];
-        if store == MemoryStore::Engram {
-            args.extend(["--project".to_owned(), project.to_owned()]);
-        }
-        Ok(parse_existing(&self.memory_cli(store, &args)?))
+        let out = self.memory_cli(store, &args)?;
+        Ok(match store {
+            MemoryStore::Engram => parse_engram_search(&out),
+            MemoryStore::Mnemon => parse_mnemon_recall(&out),
+        })
     }
 
     pub(super) fn memory_write(
@@ -82,39 +80,57 @@ impl Worker<'_> {
         project: &str,
     ) -> Result<(String, String)> {
         let store = entry.kind.store();
-        let tags = [
-            "--tag".to_owned(),
-            OWN_TAG.to_owned(),
-            "--tag".to_owned(),
-            job_tag(job.as_str()),
-        ];
-        let mut args = match decision {
-            MemoryDecision::Update { id } => vec![
-                "update".to_owned(),
-                id.clone(),
-                entry.topic.clone(),
-                entry.content.clone(),
-            ],
-            _ => vec![
-                if store == MemoryStore::Engram {
-                    "save"
-                } else {
-                    "remember"
-                }
-                .to_owned(),
-                entry.topic.clone(),
-                entry.content.clone(),
-            ],
+        let replaced = match decision {
+            MemoryDecision::Update { id } => Some(id.as_str()),
+            _ => None,
         };
-        args.extend(tags);
-        if store == MemoryStore::Engram {
-            args.extend(["--project".to_owned(), project.to_owned()]);
-        }
-        let out = self.memory_cli(store, &args)?;
-        Ok(match decision {
-            MemoryDecision::Update { id } => (id.clone(), "updated".to_owned()),
-            _ => (out.trim().to_owned(), "saved".to_owned()),
-        })
+        let id = match store {
+            MemoryStore::Engram => {
+                let out = self.memory_cli(
+                    store,
+                    &[
+                        "save".to_owned(),
+                        entry.topic.trim().to_owned(),
+                        engram_content(job.as_str(), entry),
+                        "--type".to_owned(),
+                        entry.kind.engram_type().to_owned(),
+                        "--project".to_owned(),
+                        project.to_owned(),
+                        "--scope".to_owned(),
+                        "project".to_owned(),
+                        "--topic".to_owned(),
+                        engram_topic_key(&entry.topic),
+                    ],
+                )?;
+                parse_engram_saved(&out)
+                    .or_else(|| replaced.map(str::to_owned))
+                    .ok_or_else(|| anyhow!("engram save returned no id: {}", out.trim()))?
+            }
+            MemoryStore::Mnemon => {
+                let out = self.memory_cli(
+                    store,
+                    &[
+                        "remember".to_owned(),
+                        mnemon_content(entry),
+                        "--tags".to_owned(),
+                        mnemon_tags(job.as_str()),
+                        "--cat".to_owned(),
+                        entry.kind.mnemon_category().to_owned(),
+                        "--source".to_owned(),
+                        "agent".to_owned(),
+                        "--no-diff".to_owned(),
+                    ],
+                )?;
+                let id = parse_mnemon_saved(&out)
+                    .ok_or_else(|| anyhow!("mnemon remember returned no id: {}", out.trim()))?;
+                if let Some(old) = replaced {
+                    self.memory_cli(store, &["forget".to_owned(), old.to_owned()])?;
+                }
+                id
+            }
+        };
+        let action = if replaced.is_some() { "updated" } else { "saved" };
+        Ok((id, action.to_owned()))
     }
 
     pub(super) fn memorize(&self, job: &JobId, events: &[Event]) -> Result<()> {

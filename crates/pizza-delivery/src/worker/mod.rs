@@ -13,9 +13,10 @@ use pizza_delivery_core::feedback::parse_feedback;
 use pizza_delivery_core::grill;
 use pizza_delivery_core::handoff::validate;
 use pizza_delivery_core::memorize::{
-    contradiction_risk, decide, job_tag, parse_existing, parse_plan, prompt as memorize_prompt,
-    should_memorize, Decision as MemoryDecision, Entry, Store as MemoryStore, ARTIFACT_KIND,
-    OWN_TAG,
+    contradiction_risk, decide, engram_content, engram_topic_key, job_tag, mnemon_content,
+    mnemon_tags, parse_engram_saved, parse_engram_search, parse_mnemon_recall, parse_mnemon_saved,
+    parse_plan, prompt as memorize_prompt, should_memorize, Decision as MemoryDecision, Entry,
+    Existing, Store as MemoryStore, ARTIFACT_KIND,
 };
 use pizza_delivery_core::prompt::{render, Rendered, Templates, Vars};
 use pizza_delivery_core::quota::{fold_quota, QuotaStatus};
