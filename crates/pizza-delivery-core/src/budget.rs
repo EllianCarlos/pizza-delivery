@@ -118,6 +118,8 @@ pub fn estimate_overrun(estimates: &[StageEstimate], cap: u64) -> Option<Feedbac
             "estimated {total} tokens exceeds the job budget cap of {cap}; running anyway"
         ),
         confidence: None,
+        alternatives: Vec::new(),
+        impact: None,
     })
 }
 
@@ -141,6 +143,8 @@ pub fn actual_overrun(events: &[Event], cap: u64) -> Option<Feedback> {
         severity: "high".to_owned(),
         text: format!("actual usage of {total} tokens exceeds the job budget cap of {cap}"),
         confidence: None,
+        alternatives: Vec::new(),
+        impact: None,
     })
 }
 

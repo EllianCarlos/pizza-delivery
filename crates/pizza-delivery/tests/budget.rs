@@ -3,12 +3,11 @@ mod harness;
 use harness::{Harness, TestResult, VALID_HANDOFF_AGENT};
 
 fn agent_reporting(tokens: u64) -> String {
-    VALID_HANDOFF_AGENT.replace(
-        r#"{"type":"result","is_error":false}"#,
-        &format!(
-            r#"{{"type":"result","is_error":false,"usage":{{"input_tokens":{tokens},"output_tokens":0}}}}"#
-        ),
-    )
+    let plain = r#"echo '{"type":"result","is_error":false}'"#;
+    let reporting = format!(
+        r#"case "$PIZZA_DELIVERY_HANDOFF" in *-implement/*) echo '{{"type":"result","is_error":false,"usage":{{"input_tokens":{tokens},"output_tokens":0}}}}';; *) {plain};; esac"#
+    );
+    VALID_HANDOFF_AGENT.replace(plain, &reporting)
 }
 
 fn of_kind(h: &Harness, id: &str, kind: &str) -> TestResult<Vec<serde_json::Value>> {
@@ -47,7 +46,10 @@ fn a_cold_start_job_is_estimated_from_defaults_and_the_actual_is_recorded_beside
 
     assert_eq!(implement_estimate_tokens(&h, &id)?, 1_000_000);
     let recorded = of_kind(&h, &id, "stage-budget-recorded")?;
-    let payload = recorded.first().ok_or("no recorded actuals")?;
+    let payload = recorded
+        .iter()
+        .find(|p| p["stage"] == "implement")
+        .ok_or("no recorded actuals")?;
     assert_eq!(payload["tier"], "large");
     assert_eq!(payload["estimate_tokens"], 1_000_000);
     assert_eq!(payload["actual_tokens"], 1234);

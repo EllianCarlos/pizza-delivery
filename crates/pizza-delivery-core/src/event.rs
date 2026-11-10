@@ -134,6 +134,10 @@ pub enum EventPayload {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         confidence: Option<u8>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alternatives: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        impact: Option<String>,
     },
     PlanAmended {
         after: String,

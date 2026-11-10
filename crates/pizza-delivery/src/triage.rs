@@ -151,6 +151,8 @@ impl Triager<'_> {
                     severity: f.severity.clone(),
                     text: f.text.clone(),
                     confidence: f.confidence,
+                    alternatives: f.alternatives.clone(),
+                    impact: f.impact.clone(),
                 },
             )?;
         }
@@ -198,6 +200,8 @@ impl Triager<'_> {
                     severity: f.severity,
                     text: f.text,
                     confidence: f.confidence,
+                    alternatives: f.alternatives,
+                    impact: f.impact,
                 },
             )?;
         }

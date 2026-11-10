@@ -1,9 +1,45 @@
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, EventPayload};
+use crate::triage::current_plan;
 use crate::usage::Usage;
 
 pub const STAGE_NAME: &str = "implement";
+
+pub const PIPELINE_STAGES: [&str; 6] =
+    ["grill", "spec", "investigate", "implement", "fix", "review"];
+
+pub fn pipeline(events: &[Event]) -> Vec<String> {
+    let triaged = events
+        .iter()
+        .any(|e| matches!(e.payload, EventPayload::TriageCompleted { .. }));
+    let runnable: Vec<String> = current_plan(events)
+        .into_iter()
+        .map(|s| s.name)
+        .filter(|name| PIPELINE_STAGES.contains(&name.as_str()))
+        .collect();
+    if triaged && !runnable.is_empty() {
+        runnable
+    } else {
+        vec![STAGE_NAME.to_owned()]
+    }
+}
+
+pub fn fix_rounds(events: &[Event]) -> u32 {
+    let rounds = fold_stages(events)
+        .iter()
+        .filter(|s| s.name == "fix")
+        .count();
+    u32::try_from(rounds).unwrap_or(u32::MAX)
+}
+
+pub fn pipeline_done(events: &[Event]) -> bool {
+    let stages = fold_stages(events);
+    stages.len() >= pipeline(events).len()
+        && stages
+            .last()
+            .is_some_and(|s| s.state == StageState::Succeeded)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -107,13 +143,23 @@ pub fn next_claim(events: &[Event], now_ms: i64) -> Option<ClaimPlan> {
     if finished {
         return None;
     }
-    match fold_stages(events).into_iter().last() {
-        None => Some(ClaimPlan {
+    let stages = fold_stages(events);
+    let planned = pipeline(events);
+    match stages.last().cloned() {
+        None => planned.first().map(|name| ClaimPlan {
             existing_stage_id: None,
             n: 1,
-            name: STAGE_NAME.to_owned(),
+            name: name.clone(),
             attempt: 1,
         }),
+        Some(stage) if stage.state == StageState::Succeeded => {
+            planned.get(stages.len()).map(|name| ClaimPlan {
+                existing_stage_id: None,
+                n: stage.n + 1,
+                name: name.clone(),
+                attempt: 1,
+            })
+        }
         Some(stage) if stage.state == StageState::Queued => Some(ClaimPlan {
             existing_stage_id: Some(stage.id),
             n: stage.n,
@@ -301,6 +347,115 @@ mod tests {
                 attempt: 1,
                 usage: Some(usage)
             }]
+        );
+    }
+
+    fn triaged(names: &[&str]) -> Event {
+        use crate::triage::{PlannedStage, Resolution, Template, Triage};
+        ev(
+            2,
+            None,
+            EventPayload::TriageCompleted {
+                triage: Triage {
+                    repo: Resolution {
+                        path: "/r".into(),
+                        confidence: 100,
+                        alternatives: vec![],
+                    },
+                    template: Template::BugFix,
+                    plan: names
+                        .iter()
+                        .map(|n| PlannedStage {
+                            name: (*n).into(),
+                            reason: "r".into(),
+                        })
+                        .collect(),
+                    risk_flags: vec![],
+                    task: "t".into(),
+                },
+            },
+        )
+    }
+
+    fn planned_n(seq: u64, id: &str, n: u32, name: &str) -> Event {
+        ev(
+            seq,
+            Some(id),
+            EventPayload::StagePlanned {
+                n,
+                name: name.into(),
+            },
+        )
+    }
+
+    fn succeeded(seq: u64, id: &str) -> Event {
+        ev(seq, Some(id), EventPayload::StageSucceeded {})
+    }
+
+    #[test]
+    fn a_triaged_job_runs_its_plan_in_order_skipping_stages_without_a_template() {
+        let mut events = vec![
+            submitted(),
+            triaged(&["grill", "implement", "review", "ship"]),
+        ];
+        let first = next_claim(&events, 0);
+        assert_eq!(
+            first.map(|p| (p.n, p.name, p.existing_stage_id)),
+            Some((1, "grill".to_owned(), None))
+        );
+        events.extend([planned_n(3, "S1", 1, "grill"), succeeded(4, "S1")]);
+        assert_eq!(
+            next_claim(&events, 0).map(|p| (p.n, p.name, p.attempt)),
+            Some((2, "implement".to_owned(), 1))
+        );
+        events.extend([planned_n(5, "S2", 2, "implement"), succeeded(6, "S2")]);
+        events.extend([planned_n(7, "S3", 3, "review"), succeeded(8, "S3")]);
+        assert_eq!(next_claim(&events, 0), None);
+        assert!(pipeline_done(&events));
+    }
+
+    #[test]
+    fn a_job_without_triage_runs_the_single_implement_stage() {
+        assert_eq!(pipeline(&[submitted()]), vec!["implement".to_owned()]);
+        assert!(!pipeline_done(&[submitted()]));
+        assert!(pipeline_done(&[submitted(), planned(), succeeded(3, "S1")]));
+    }
+
+    #[test]
+    fn an_amended_plan_adds_the_fix_and_re_review_stages_and_counts_fix_rounds() {
+        use crate::triage::PlannedStage;
+        let stage = |n: &str| PlannedStage {
+            name: n.into(),
+            reason: "r".into(),
+        };
+        let mut events = vec![
+            submitted(),
+            triaged(&["implement", "review", "ship"]),
+            planned_n(3, "S1", 1, "implement"),
+            succeeded(4, "S1"),
+            planned_n(5, "S2", 2, "review"),
+            succeeded(6, "S2"),
+        ];
+        assert!(pipeline_done(&events));
+        events.push(ev(
+            7,
+            None,
+            EventPayload::PlanAmended {
+                after: "review".into(),
+                stages: vec![stage("fix"), stage("review")],
+            },
+        ));
+        assert!(!pipeline_done(&events));
+        assert_eq!(fix_rounds(&events), 0);
+        assert_eq!(
+            next_claim(&events, 0).map(|p| p.name),
+            Some("fix".to_owned())
+        );
+        events.extend([planned_n(8, "S3", 3, "fix"), succeeded(9, "S3")]);
+        assert_eq!(fix_rounds(&events), 1);
+        assert_eq!(
+            next_claim(&events, 0).map(|p| (p.n, p.name)),
+            Some((4, "review".to_owned()))
         );
     }
 }

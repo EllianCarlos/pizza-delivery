@@ -13,6 +13,22 @@ use tempfile::TempDir;
 pub type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 pub const VALID_HANDOFF_AGENT: &str = r#"#!/bin/sh
+STAGE_DIR=$(dirname "$PIZZA_DELIVERY_HANDOFF")
+STAGE=$(basename "$STAGE_DIR" | sed 's/^[0-9]*-//')
+JOB=$(basename "$(dirname "$(dirname "$STAGE_DIR")")")
+case "$STAGE" in
+grill)
+printf '## Round 1\n- Q: which approach?\n  A: the simple one\n  confidence: 90\n' > "$STAGE_DIR/grill.md"
+;;
+spec)
+mkdir -p "docs/specs/$JOB/tickets"
+printf '## Problem\np\n\n## Solution\ns\n\n## Acceptance criteria\n- a\n\n## Seams\n- cli\n' > "docs/specs/$JOB/spec.md"
+printf -- '---\nid: t1\nblocked_by: []\n---\nbody\n' > "docs/specs/$JOB/tickets/t1.md"
+;;
+review)
+printf '## Findings\nNone\n\n## Summary\nok\n' > "$STAGE_DIR/review.md"
+;;
+esac
 cat > "$PIZZA_DELIVERY_HANDOFF" <<'DOC'
 ---
 job: J
