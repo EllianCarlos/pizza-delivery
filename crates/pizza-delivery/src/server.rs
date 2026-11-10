@@ -15,6 +15,7 @@ use crate::agent::{CliAgent, Fleet};
 use crate::config::Config;
 use crate::git::{Git, LockedGit, SystemGit};
 use crate::handler::{handle, Env, SystemEnv};
+use crate::notify::{MakoNotifier, NotifyingStore};
 use crate::process::stop_leased_group;
 use crate::sandbox::{ensure_compatible, load_trust, SystemProbe};
 use crate::sqlite_store::SqliteStore;
@@ -23,6 +24,7 @@ use crate::triage::{
     MnemonSource, SystemIndex, Triager,
 };
 use crate::worker::{McpSetup, Worker, WorkerConfig};
+use pizza_delivery_core::notify::{parse_muted, Dispatcher};
 use pizza_delivery_core::routing::AdapterKind;
 
 pub enum Bound {
@@ -252,6 +254,20 @@ pub fn serve(
     listener
         .set_nonblocking(true)
         .context("nonblocking listener")?;
+    let store: Box<dyn Store> = match &config.notify_command {
+        Some(command) => Box::new(NotifyingStore::new(
+            store,
+            Dispatcher::new(
+                Box::new(MakoNotifier::new(
+                    command.clone(),
+                    config.notify_opener.clone(),
+                )),
+                parse_muted(&config.notify_muted),
+                config.web_url.clone(),
+            ),
+        )),
+        None => store,
+    };
     let store = Arc::new(Mutex::new(store));
     let stop = Arc::new(AtomicBool::new(false));
     let git = Arc::new(LockedGit::new(SystemGit));
