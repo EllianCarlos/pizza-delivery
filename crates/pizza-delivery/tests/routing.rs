@@ -119,7 +119,7 @@ chain = [{ agent = "flaky" }]
 }
 
 #[test]
-fn a_configuration_error_fails_the_job_at_once_without_retry_or_fallback() -> TestResult {
+fn skill_driven_stages_are_never_run_by_an_adapter_without_skills() -> TestResult {
     let h = Harness::with_routing(
         &[
             ("first", CREDENTIALS_MISSING_AGENT),
@@ -141,11 +141,16 @@ chain = [{ agent = "first" }, { agent = "second" }]
 
     let job = h.wait_for_end(&id)?;
 
-    assert_eq!(job["state"], "failed");
-    let kinds = kinds(&h, &id)?;
-    assert_eq!(kinds.iter().filter(|k| *k == "agent-invoked").count(), 1);
-    assert!(!kinds.contains(&"stage-retried".to_owned()));
-    assert!(!kinds.contains(&"agent-fell-back".to_owned()));
+    assert_eq!(job["state"], "completed");
+    let rows: Vec<_> = h.ledger()?.into_iter().filter(|r| r.job_id == id).collect();
+    let invoked: Vec<_> = rows
+        .iter()
+        .filter(|r| r.kind == "agent-invoked")
+        .map(|r| r.payload["agent"].clone())
+        .collect();
+    assert!(!invoked.is_empty());
+    assert!(invoked.iter().all(|a| a == "second"), "{invoked:?}");
+    assert!(!rows.iter().any(|r| r.kind == "agent-fell-back"));
     Ok(())
 }
 
