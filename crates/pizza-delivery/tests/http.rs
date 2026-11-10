@@ -164,6 +164,45 @@ fn events_resume_from_a_cursor() -> TestResult {
 }
 
 #[test]
+fn artifact_content_is_readable_by_its_position_in_the_job() -> TestResult {
+    let h = harness()?;
+    let id = finished_job(&h)?;
+
+    let detail = h.get(&format!("/api/jobs/{id}"))?;
+    let recorded: Vec<&serde_json::Value> = detail["events"]
+        .as_array()
+        .ok_or("no events")?
+        .iter()
+        .filter(|e| e["kind"] == "artifact-recorded")
+        .collect();
+    assert!(!recorded.is_empty());
+    let path = recorded[0]["payload"]["path"].as_str().ok_or("no path")?;
+
+    let artifact = h.get(&format!("/api/jobs/{id}/artifacts/0"))?;
+    assert_eq!(artifact["path"], path);
+    let on_disk = std::fs::read_to_string(h.data_dir().join(path))?;
+    assert_eq!(artifact["content"], on_disk.as_str());
+
+    let (status, body) = h.http("GET", &format!("/api/jobs/{id}/artifacts/999"), None)?;
+    assert_eq!(status, 404);
+    assert_eq!(body["kind"], "not-found");
+    Ok(())
+}
+
+#[test]
+fn the_web_ui_is_served_from_the_root() -> TestResult {
+    let h = harness()?;
+    let (status, head, body) = h.raw_get("/")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: text/html"), "{head}");
+    assert!(body.contains("<div id=\"root\">"), "{body}");
+    let (status, head, _) = h.raw_get("/app.js")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("javascript"), "{head}");
+    Ok(())
+}
+
+#[test]
 fn stream_resumes_from_last_event_id_and_delivers_live_events() -> TestResult {
     let h = harness()?;
     finished_job(&h)?;

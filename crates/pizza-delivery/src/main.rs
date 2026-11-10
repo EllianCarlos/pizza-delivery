@@ -1,4 +1,5 @@
 mod agent;
+mod assets;
 mod client;
 mod config;
 mod git;
