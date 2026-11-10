@@ -15,6 +15,7 @@ pizza-delivery-core = { path = "crates/pizza-delivery-core", version = "0.0.0" }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 listenfd = "1"
 ring = "0.17"
 ratatui = "0.30"

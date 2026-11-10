@@ -15,6 +15,7 @@ tui = ["dep:ratatui"]
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 listenfd.workspace = true
 pizza-delivery-core.workspace = true
 ring.workspace = true
