@@ -22,10 +22,11 @@ fn a_stage_runs_to_success_with_a_valid_handoff() -> TestResult {
 
     assert_eq!(job["state"], "completed");
     let stages = job["stages"].as_array().ok_or("no stages")?;
-    assert_eq!(stages.len(), 1);
-    assert_eq!(stages[0]["state"], "succeeded");
-    assert_eq!(stages[0]["attempt"], 1);
-    assert_eq!(stages[0]["name"], "implement");
+    let names: Vec<_> = stages.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert_eq!(names, vec!["grill", "spec", "implement", "review"]);
+    assert!(stages
+        .iter()
+        .all(|s| s["state"] == "succeeded" && s["attempt"] == 1));
     Ok(())
 }
 
@@ -63,7 +64,7 @@ fn the_agent_runs_in_the_worktree_as_the_leader_of_its_own_process_group() -> Te
         .join("jobs")
         .join(&id)
         .join("stages")
-        .join("1-implement");
+        .join("3-implement");
     let cwd = std::fs::read_to_string(stage_dir.join("cwd.txt"))?;
     let pgrp = std::fs::read_to_string(stage_dir.join("pgrp.txt"))?;
     let mut parts = pgrp.split_whitespace();
@@ -89,7 +90,24 @@ fn artifacts_are_indexed_in_the_ledger_with_hashes_of_the_files_on_disk() -> Tes
         .iter()
         .map(|r| r.payload["kind"].as_str().unwrap_or_default().to_owned())
         .collect();
-    assert_eq!(kinds, vec!["context", "raw-output", "handoff"]);
+    assert_eq!(
+        kinds,
+        vec![
+            "context",
+            "raw-output",
+            "handoff",
+            "grill-transcript",
+            "raw-output",
+            "handoff",
+            "spec",
+            "ticket",
+            "raw-output",
+            "handoff",
+            "raw-output",
+            "handoff",
+            "review-report"
+        ]
+    );
     for row in artifacts {
         let path = row.payload["path"].as_str().ok_or("no path")?;
         let bytes = std::fs::read(h.data_dir().join(path))?;

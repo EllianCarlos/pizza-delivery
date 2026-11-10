@@ -9,19 +9,25 @@ use pizza_delivery_core::budget::{
 };
 use pizza_delivery_core::classify::{classify, Classified, Failure, RawRun};
 use pizza_delivery_core::event::{Actor, EventPayload};
+use pizza_delivery_core::feedback::parse_feedback;
+use pizza_delivery_core::grill;
 use pizza_delivery_core::handoff::validate;
-use pizza_delivery_core::prompt::{
-    render_stage_prompt, with_interruption_note, TEMPLATE_NAME, TEMPLATE_VERSION,
-};
+use pizza_delivery_core::prompt::{render, Rendered, Templates, Vars};
 use pizza_delivery_core::quota::{fold_quota, QuotaStatus};
+use pizza_delivery_core::review::{self, Decision};
 use pizza_delivery_core::routing::{
     route, stage_capabilities, Candidate, RouteRequest, RoutingConfig, Skip,
 };
 use pizza_delivery_core::sandbox::{blocked_hosts, Mount, SandboxProfile, TrustConfig};
+use pizza_delivery_core::spec;
+use pizza_delivery_core::stage::PIPELINE_STAGES;
+use pizza_delivery_core::triage::{
+    amend_plan, current_plan, Feedback, PlannedStage, DEFAULT_MAX_STAGES,
+};
 use pizza_delivery_core::{
-    fold_stages, is_cancelled, may_retry, render_interruption_note, retry_history, stage_timeout,
-    worktree_removable, Caps, ClaimRequest, Claimed, Interruption, Job, JobId, JobState, NewEvent,
-    RetryCause, Store, StoreError, Tier, WorktreeFacts,
+    fix_rounds, fold_stages, is_cancelled, may_retry, pipeline_done, render_interruption_note,
+    retry_history, stage_timeout, worktree_removable, Caps, ClaimRequest, Claimed, Interruption,
+    Job, JobId, JobState, NewEvent, RetryCause, Store, StoreError, Tier, WorktreeFacts,
 };
 use sha2::{Digest, Sha256};
 
@@ -116,6 +122,10 @@ fn stage_dir(job: &JobId, n: u32, name: &str) -> PathBuf {
         .join(job.as_str())
         .join("stages")
         .join(format!("{n}-{name}"))
+}
+
+fn spec_dir(job: &JobId) -> String {
+    format!("docs/specs/{}", job.as_str())
 }
 
 fn note_path(dir: &Path, attempt: u32) -> PathBuf {
@@ -368,7 +378,10 @@ impl Worker<'_> {
         match verdict {
             Verdict::Succeeded => {
                 self.append(job, stage, EventPayload::StageSucceeded {})?;
-                self.append(job, None, EventPayload::JobCompleted {})?;
+                let events = self.with_store(|s| s.read_timeline(job))?;
+                if pipeline_done(&events) {
+                    self.append(job, None, EventPayload::JobCompleted {})?;
+                }
             }
             Verdict::NeedsHuman(reason) => {
                 self.append(
@@ -634,23 +647,21 @@ impl Worker<'_> {
         if run.handoff_path.exists() {
             std::fs::remove_file(&run.handoff_path)?;
         }
-        let prompt = with_interruption_note(
-            &render_stage_prompt(
-                job.id.as_str(),
-                &claimed.name,
-                &job.prompt,
-                &run.handoff_path.to_string_lossy(),
-            ),
-            note,
-        );
+        let Some(rendered) = self.render_prompt(claimed, run)? else {
+            return Ok(Attempt::Settled(Verdict::Fail(format!(
+                "no prompt template for stage '{}'",
+                claimed.name
+            ))));
+        };
+        let rendered = rendered.with_interruption_note(note);
         self.append(
             &job.id,
             stage,
             EventPayload::AgentInvoked {
                 agent: candidate.agent.clone(),
-                template: TEMPLATE_NAME.to_owned(),
-                version: TEMPLATE_VERSION,
-                prompt_sha256: sha256_hex(prompt.as_bytes()),
+                template: rendered.template.clone(),
+                version: rendered.version,
+                prompt_sha256: rendered.prompt_sha256.clone(),
             },
         )?;
         let egress_rel = run.relative.join("egress-requests.log");
@@ -670,7 +681,7 @@ impl Worker<'_> {
             ],
         );
         let invocation = Invocation {
-            prompt,
+            prompt: rendered.text,
             model: candidate.model.clone(),
             cwd: run.worktree.clone(),
             handoff_path: run.handoff_path.clone(),
@@ -757,7 +768,7 @@ impl Worker<'_> {
             return Ok(Attempt::Settled(Verdict::NeedsHuman(reason)));
         }
         Ok(match classified.failure {
-            None => Attempt::Settled(self.accept_handoff(claimed, &run.handoff_rel)?),
+            None => Attempt::Settled(self.accept_output(claimed, run)?),
             Some(Failure::QuotaExhausted { reason, .. }) => Attempt::Quota {
                 until_ms: until.unwrap_or(self.env.now_ms() + self.routing.default_backoff_ms),
                 reason,
@@ -814,6 +825,8 @@ impl Worker<'_> {
                 severity: f.severity,
                 text: f.text.clone(),
                 confidence: f.confidence,
+                alternatives: f.alternatives,
+                impact: f.impact,
             },
         )?;
         Ok(Some(f.text))
@@ -841,7 +854,91 @@ impl Worker<'_> {
         )
     }
 
-    fn accept_handoff(&self, claimed: &Claimed, handoff_rel: &Path) -> Result<Verdict> {
+    fn templates(&self) -> Templates {
+        PIPELINE_STAGES
+            .iter()
+            .fold(Templates::embedded(), |templates, name| {
+                let text = std::fs::read_to_string(
+                    self.config
+                        .data_dir
+                        .join("prompts")
+                        .join(format!("{name}.md")),
+                );
+                match text {
+                    Ok(text) => templates
+                        .clone()
+                        .with_override(name, &text)
+                        .unwrap_or(templates),
+                    Err(_) => templates,
+                }
+            })
+    }
+
+    fn read_data(&self, relative: &str) -> Option<String> {
+        std::fs::read_to_string(self.config.data_dir.join(relative)).ok()
+    }
+
+    fn render_prompt(&self, claimed: &Claimed, run: &StageRun) -> Result<Option<Rendered>> {
+        let events = self.with_store(|s| s.read_timeline(&claimed.job.id))?;
+        let previous = events.iter().rev().find_map(|e| match &e.payload {
+            EventPayload::HandoffWritten { path }
+                if e.stage_id.as_deref() != Some(claimed.stage_id.as_str()) =>
+            {
+                self.read_data(path)
+            }
+            _ => None,
+        });
+        let report = events.iter().rev().find_map(|e| match &e.payload {
+            EventPayload::ArtifactRecorded { kind, path, .. } if kind == "review-report" => {
+                self.read_data(path)
+            }
+            _ => None,
+        });
+        let artifact_dir = self.config.data_dir.join(&run.relative);
+        Ok(render(
+            &self.templates(),
+            &Vars {
+                job: claimed.job.id.as_str(),
+                stage: &claimed.name,
+                task: &claimed.job.prompt,
+                handoff_path: &run.handoff_path.to_string_lossy(),
+                artifact_dir: &artifact_dir.to_string_lossy(),
+                spec_dir: &spec_dir(&claimed.job.id),
+                previous_handoff: previous.as_deref(),
+                review_report: report.as_deref(),
+            },
+        ))
+    }
+
+    fn record_feedback(
+        &self,
+        claimed: &Claimed,
+        actor: Actor,
+        entries: Vec<Feedback>,
+    ) -> Result<()> {
+        for f in entries {
+            let event = NewEvent {
+                id: self.env.new_ulid(),
+                job_id: claimed.job.id.clone(),
+                stage_id: Some(claimed.stage_id.clone()),
+                ts_ms: self.env.now_ms(),
+                actor,
+                payload: EventPayload::FeedbackRecorded {
+                    kind: f.kind,
+                    severity: f.severity,
+                    text: f.text,
+                    confidence: f.confidence,
+                    alternatives: f.alternatives,
+                    impact: f.impact,
+                },
+            };
+            self.with_store(|s| s.append_event(event))?;
+        }
+        Ok(())
+    }
+
+    fn accept_output(&self, claimed: &Claimed, run: &StageRun) -> Result<Verdict> {
+        let handoff_rel = run.handoff_rel.as_path();
         let path = self.config.data_dir.join(handoff_rel);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Ok(Verdict::Retry(
@@ -850,21 +947,154 @@ impl Worker<'_> {
             ));
         };
         self.record_artifact(&claimed.job.id, &claimed.stage_id, "handoff", handoff_rel)?;
-        match validate(&text) {
-            Ok(_) => {
-                self.append(
-                    &claimed.job.id,
-                    Some(&claimed.stage_id),
-                    EventPayload::HandoffWritten {
-                        path: handoff_rel.to_string_lossy().into_owned(),
-                    },
-                )?;
-                Ok(Verdict::Succeeded)
-            }
-            Err(e) => Ok(Verdict::Retry(
+        if let Err(e) = validate(&text) {
+            return Ok(Verdict::Retry(
                 RetryCause::InvalidHandoff,
                 format!("invalid handoff: {e}"),
-            )),
+            ));
+        }
+        let outcome = match claimed.name.as_str() {
+            "grill" => self.accept_grill(claimed, run)?,
+            "spec" => self.accept_spec(claimed, run)?,
+            "review" => self.accept_review(claimed, run)?,
+            _ => Ok(Vec::new()),
+        };
+        let extra = match outcome {
+            Ok(extra) => extra,
+            Err(reason) => return Ok(Verdict::Retry(RetryCause::InvalidHandoff, reason)),
+        };
+        self.append(
+            &claimed.job.id,
+            Some(&claimed.stage_id),
+            EventPayload::HandoffWritten {
+                path: handoff_rel.to_string_lossy().into_owned(),
+            },
+        )?;
+        self.record_feedback(claimed, Actor::Agent, parse_feedback(&text))?;
+        self.record_feedback(claimed, Actor::Daemon, extra)?;
+        if claimed.name == "review" {
+            self.plan_review_follow_up(claimed, run)?;
+        }
+        Ok(Verdict::Succeeded)
+    }
+
+    fn accept_grill(
+        &self,
+        claimed: &Claimed,
+        run: &StageRun,
+    ) -> Result<Result<Vec<Feedback>, String>> {
+        let rel = run.relative.join("grill.md");
+        let Some(transcript) = self.read_data(&rel.to_string_lossy()) else {
+            return Ok(Ok(Vec::new()));
+        };
+        self.record_artifact(&claimed.job.id, &claimed.stage_id, "grill-transcript", &rel)?;
+        Ok(Ok(
+            grill::assess(&transcript, grill::DEFAULT_ROUND_CAP).feedback
+        ))
+    }
+
+    fn accept_spec(
+        &self,
+        claimed: &Claimed,
+        run: &StageRun,
+    ) -> Result<Result<Vec<Feedback>, String>> {
+        let dir = run.worktree.join(spec_dir(&claimed.job.id));
+        let Ok(spec_text) = std::fs::read_to_string(dir.join("spec.md")) else {
+            return Ok(Err("invalid spec: agent wrote no spec.md".to_owned()));
+        };
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join("tickets"))
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().is_some_and(|x| x == "md"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        let tickets: Vec<(String, String)> = files
+            .iter()
+            .filter_map(|p| {
+                let name = p.file_name()?.to_string_lossy().into_owned();
+                Some((name, std::fs::read_to_string(p).ok()?))
+            })
+            .collect();
+        if let Err(e) = spec::validate(&spec_text, &tickets) {
+            return Ok(Err(format!("invalid spec: {e}")));
+        }
+        let worktree_rel = run
+            .worktree
+            .strip_prefix(&self.config.data_dir)
+            .unwrap_or(&run.worktree)
+            .join(spec_dir(&claimed.job.id));
+        self.record_artifact(
+            &claimed.job.id,
+            &claimed.stage_id,
+            "spec",
+            &worktree_rel.join("spec.md"),
+        )?;
+        for file in &files {
+            if let Some(name) = file.file_name() {
+                self.record_artifact(
+                    &claimed.job.id,
+                    &claimed.stage_id,
+                    "ticket",
+                    &worktree_rel.join("tickets").join(name),
+                )?;
+            }
+        }
+        Ok(Ok(Vec::new()))
+    }
+
+    fn accept_review(
+        &self,
+        claimed: &Claimed,
+        run: &StageRun,
+    ) -> Result<Result<Vec<Feedback>, String>> {
+        let rel = run.relative.join("review.md");
+        let Some(report) = self.read_data(&rel.to_string_lossy()) else {
+            return Ok(Err("invalid review: agent wrote no review.md".to_owned()));
+        };
+        if let Err(e) = review::parse_report(&report) {
+            return Ok(Err(format!("invalid review: {e}")));
+        }
+        self.record_artifact(&claimed.job.id, &claimed.stage_id, "review-report", &rel)?;
+        Ok(Ok(Vec::new()))
+    }
+
+    fn plan_review_follow_up(&self, claimed: &Claimed, run: &StageRun) -> Result<()> {
+        let report = self
+            .read_data(&run.relative.join("review.md").to_string_lossy())
+            .unwrap_or_default();
+        let findings = review::parse_report(&report).unwrap_or_default();
+        let events = self.with_store(|s| s.read_timeline(&claimed.job.id))?;
+        let added = vec![
+            PlannedStage {
+                name: "fix".to_owned(),
+                reason: "fix the blocking review findings".to_owned(),
+            },
+            PlannedStage {
+                name: "review".to_owned(),
+                reason: "re-review after the fix".to_owned(),
+            },
+        ];
+        let can_plan = amend_plan(
+            &current_plan(&events),
+            "review",
+            added.clone(),
+            DEFAULT_MAX_STAGES,
+        )
+        .is_ok();
+        match review::decide(&findings, fix_rounds(&events), can_plan) {
+            Decision::Clean => Ok(()),
+            Decision::Fix => self.append(
+                &claimed.job.id,
+                None,
+                EventPayload::PlanAmended {
+                    after: "review".to_owned(),
+                    stages: added,
+                },
+            ),
+            Decision::Leftover(entries) => self.record_feedback(claimed, Actor::Daemon, entries),
         }
     }
 }

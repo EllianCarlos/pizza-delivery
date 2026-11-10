@@ -48,7 +48,7 @@ fn next_state(current: JobState, payload: &EventPayload) -> JobState {
     match payload {
         EventPayload::JobCancelled {} => JobState::Cancelled,
         EventPayload::StageClaimed { .. } => JobState::Running,
-        EventPayload::StageRetried { .. } => JobState::Queued,
+        EventPayload::StageRetried { .. } | EventPayload::StageSucceeded {} => JobState::Queued,
         EventPayload::JobParked { .. } => JobState::WaitingForQuota,
         EventPayload::JobCompleted {} => JobState::Completed,
         EventPayload::JobFailed { .. } => JobState::Failed,

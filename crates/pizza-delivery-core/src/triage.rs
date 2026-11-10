@@ -371,6 +371,10 @@ pub struct Feedback {
     pub severity: String,
     pub text: String,
     pub confidence: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +406,8 @@ pub fn conclude(prompt: &str, resolution: Option<Resolution>) -> Outcome {
                 text: "no repository matched the prompt; pass --repo or name the project"
                     .to_owned(),
                 confidence: None,
+                alternatives: Vec::new(),
+                impact: None,
             }],
         },
         Some(resolution) => {
@@ -415,6 +421,8 @@ pub fn conclude(prompt: &str, resolution: Option<Resolution>) -> Outcome {
                         resolution.alternatives.len() + 1
                     ),
                     confidence: Some(resolution.confidence),
+                    alternatives: Vec::new(),
+                    impact: None,
                 }]
             } else {
                 vec![]

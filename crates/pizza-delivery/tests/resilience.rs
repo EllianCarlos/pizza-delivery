@@ -71,7 +71,7 @@ wait
         h.data_dir()
             .join("jobs")
             .join(&id)
-            .join("stages/1-implement/pids.txt"),
+            .join("stages/1-grill/pids.txt"),
     )?;
     assert_eq!(pids.split_whitespace().count(), 4);
     for pid in pids.split_whitespace() {
@@ -109,7 +109,7 @@ fn a_crash_is_recovered_as_a_new_attempt_with_a_note_and_without_duplicate_work(
         .filter(|r| r.kind == "stage-claimed")
         .map(|r| r.payload["attempt"].clone())
         .collect();
-    assert_eq!(attempts, vec![1, 2]);
+    assert_eq!(attempts, vec![1, 2, 1, 1]);
     assert_eq!(rows.iter().filter(|r| r.kind == "job-completed").count(), 1);
     assert!(rows.iter().any(|r| r.kind == "lease-expired"));
     let retried = rows.iter().find(|r| r.kind == "stage-retried");
@@ -121,11 +121,11 @@ fn a_crash_is_recovered_as_a_new_attempt_with_a_note_and_without_duplicate_work(
         h.data_dir()
             .join("jobs")
             .join(&id)
-            .join("stages/1-implement/interruption-1.md"),
+            .join("stages/1-grill/interruption-1.md"),
     )?;
     assert!(note.contains("crash"));
     let log = h.vcs(&worktree(&h, &id), &["log", "--format=%s"])?;
-    assert!(log.contains("wip: implement attempt 1 interrupted (crash)"));
+    assert!(log.contains("wip: grill attempt 1 interrupted (crash)"));
     Ok(())
 }
 
@@ -150,7 +150,8 @@ fn assert_never_overlapping(log: &[String]) {
         .iter()
         .map(|l| l.split_whitespace().next().unwrap_or(""))
         .collect();
-    assert_eq!(kinds, vec!["start", "end", "start", "end"]);
+    assert!(!kinds.is_empty());
+    assert!(kinds.chunks(2).all(|pair| pair == ["start", "end"]));
 }
 
 #[test]
@@ -225,7 +226,13 @@ fn queued_jobs_run_by_priority_then_submit_time() -> TestResult {
         .into_iter()
         .filter_map(|l| l.strip_prefix("start ").map(str::to_owned))
         .collect();
-    assert_eq!(started, vec![blocker, urgent, normal]);
+    let mut order: Vec<String> = Vec::new();
+    for id in started {
+        if !order.contains(&id) {
+            order.push(id);
+        }
+    }
+    assert_eq!(order, vec![blocker, urgent, normal]);
     Ok(())
 }
 
@@ -284,9 +291,14 @@ fn shutdown_lets_the_running_stage_finish_and_claims_nothing_new() -> TestResult
     assert_eq!(h.run(&["stop"])?.code, 0);
 
     wait_until("the running stage to finish", 20, || {
-        Ok(kinds(&h, &first)?.contains(&"job-completed".to_owned()))
+        Ok(kinds(&h, &first)?.contains(&"stage-succeeded".to_owned()))
     })?;
     std::thread::sleep(Duration::from_millis(500));
     assert!(!kinds(&h, &second)?.contains(&"stage-claimed".to_owned()));
+    let claims = kinds(&h, &first)?
+        .iter()
+        .filter(|k| *k == "stage-claimed")
+        .count();
+    assert_eq!(claims, 1);
     Ok(())
 }

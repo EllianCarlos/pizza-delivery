@@ -5,6 +5,8 @@ pub mod claude;
 pub mod context;
 pub mod event;
 pub mod exit;
+pub mod feedback;
+pub mod grill;
 pub mod handoff;
 pub mod id;
 pub mod job;
@@ -12,9 +14,11 @@ pub mod prompt;
 pub mod quota;
 pub mod render;
 pub mod resilience;
+pub mod review;
 pub mod routing;
 pub mod sandbox;
 pub mod schedule;
+pub mod spec;
 pub mod stage;
 pub mod store;
 pub mod triage;
@@ -33,6 +37,8 @@ pub use resilience::{
     WorktreeFacts, DEFAULT_RETENTION_MS, TOTAL_RETRY_CAP,
 };
 pub use schedule::{pick, Candidate, Caps, Priority, Slot};
-pub use stage::{fold_stages, next_claim, ClaimPlan, StageState, StageView};
+pub use stage::{
+    fix_rounds, fold_stages, next_claim, pipeline, pipeline_done, ClaimPlan, StageState, StageView,
+};
 pub use store::{ClaimRequest, Claimed, ExpiredLease, NewEvent, NewJob, Store, StoreError};
 pub use usage::Usage;
