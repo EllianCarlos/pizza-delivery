@@ -9,6 +9,7 @@ pub mod feedback;
 pub mod grill;
 pub mod handoff;
 pub mod id;
+pub mod inbox;
 pub mod job;
 pub mod prompt;
 pub mod quota;
@@ -25,12 +26,15 @@ pub mod triage;
 pub mod usage;
 
 pub use api::{ApiError, ErrorKind, JobView, Request, Response};
-pub use event::{Actor, Event, EventPayload};
+pub use event::{Actor, Event, EventPayload, FollowUp};
 pub use exit::ExitCode;
 pub use id::{resolve, short_id, JobId, ResolveError};
 pub use job::{apply, fold, Job, JobState};
 pub use quota::{fold_quota, quota_views, QuotaSnapshot, QuotaStatus, QuotaView};
-pub use render::{render_jobs, render_quota, render_submitted, render_timeline, OutputMode};
+pub use render::{
+    render_dismissed, render_inbox, render_inbox_entry, render_jobs, render_quota, render_replied,
+    render_submitted, render_timeline, OutputMode,
+};
 pub use resilience::{
     base_timeout, classify_failure, is_cancelled, may_retry, render_interruption_note,
     retry_history, stage_timeout, worktree_removable, Interruption, RetryCause, Tier,

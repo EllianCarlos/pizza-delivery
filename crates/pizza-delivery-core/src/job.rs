@@ -71,6 +71,7 @@ pub fn apply(state: Option<Job>, event: &Event) -> Option<Job> {
                 prompt,
                 repo,
                 priority,
+                ..
             },
             None,
         ) => Some(Job {
@@ -113,6 +114,7 @@ mod tests {
                 prompt: "do it".into(),
                 repo: Some("/r".into()),
                 priority: Priority::High,
+                follow_up: None,
             },
         }
     }

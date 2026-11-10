@@ -4,6 +4,7 @@ use crate::context::SourceUse;
 use crate::event::Event;
 use crate::exit::ExitCode;
 use crate::id::JobId;
+use crate::inbox::InboxEntry;
 use crate::job::JobState;
 use crate::quota::QuotaView;
 use crate::schedule::Priority;
@@ -32,6 +33,22 @@ pub enum Request {
         job: Option<String>,
     },
     Quota,
+    Inbox {
+        #[serde(default)]
+        all: bool,
+    },
+    InboxShow {
+        entry: String,
+    },
+    Dismiss {
+        entries: Vec<String>,
+    },
+    Reply {
+        targets: Vec<String>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<Priority>,
+    },
     Stop,
 }
 
@@ -96,6 +113,20 @@ pub enum Response {
     Cancelled {
         id: JobId,
         short_id: String,
+    },
+    Inbox {
+        entries: Vec<InboxEntry>,
+    },
+    InboxEntry {
+        entry: InboxEntry,
+    },
+    Dismissed {
+        entries: Vec<String>,
+    },
+    Replied {
+        id: JobId,
+        short_id: String,
+        answered: Vec<String>,
     },
     Stopped,
     Error {

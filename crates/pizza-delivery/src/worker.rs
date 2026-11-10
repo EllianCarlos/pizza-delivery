@@ -192,6 +192,17 @@ impl Worker<'_> {
             .join(job.as_str())
     }
 
+    fn parent_branch(&self, job: &JobId) -> Result<Option<String>> {
+        let events = self.with_store(|s| s.read_timeline(job))?;
+        Ok(events.iter().find_map(|e| match &e.payload {
+            EventPayload::JobSubmitted {
+                follow_up: Some(follow_up),
+                ..
+            } => Some(format!("pizza/{}", follow_up.parent)),
+            _ => None,
+        }))
+    }
+
     fn find_job(&self, id: &JobId) -> Result<Option<Job>> {
         Ok(self
             .with_store(|s| s.list_jobs())?
@@ -488,10 +499,13 @@ impl Worker<'_> {
             return Ok(Verdict::Fail("job has no repository".to_owned()));
         };
         let worktree = self.worktree_of(&repo, &job.id);
-        if let Err(e) = self
-            .git
-            .ensure_worktree(&repo, &worktree, &format!("pizza/{}", job.id))
-        {
+        let base = self.parent_branch(&job.id)?;
+        if let Err(e) = self.git.ensure_worktree(
+            &repo,
+            &worktree,
+            &format!("pizza/{}", job.id),
+            base.as_deref(),
+        ) {
             return Ok(Verdict::Fail(format!("worktree: {e:#}")));
         }
         let relative = stage_dir(&job.id, claimed.n, &claimed.name);
@@ -1146,7 +1160,13 @@ mod tests {
     }
 
     impl Git for FakeGit {
-        fn ensure_worktree(&self, _repo: &Path, worktree: &Path, _branch: &str) -> Result<()> {
+        fn ensure_worktree(
+            &self,
+            _repo: &Path,
+            worktree: &Path,
+            _branch: &str,
+            _base: Option<&str>,
+        ) -> Result<()> {
             Ok(std::fs::create_dir_all(worktree)?)
         }
         fn commit_wip(&self, _worktree: &Path, message: &str) -> Result<Option<String>> {
@@ -1248,6 +1268,7 @@ mod tests {
                 prompt: "do it".into(),
                 repo: Some("/src/my repo".into()),
                 priority: Priority::Normal,
+                follow_up: None,
                 submitted_at_ms: 0,
             })?;
             Ok(Self {
@@ -1822,6 +1843,7 @@ chain = [{ agent = "claude" }, { agent = "opencode" }]
                 prompt: "second".into(),
                 repo: Some("/src/my repo".into()),
                 priority: Priority::Normal,
+                follow_up: None,
                 submitted_at_ms: 0,
             })
             .map(|_| ())
