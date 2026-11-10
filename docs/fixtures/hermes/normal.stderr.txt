@@ -1,0 +1,3 @@
+No usable credentials found for provider 'gemini'. Set GOOGLE_API_KEY, GEMINI_API_KEY.
+
+session_id: 20261109_224624_ba3816
