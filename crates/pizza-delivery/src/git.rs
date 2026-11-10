@@ -1,18 +1,24 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 
 pub trait Git: Send + Sync {
     fn ensure_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()>;
+    fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>>;
+    fn is_dirty(&self, worktree: &Path) -> Result<bool>;
+    fn is_pushed(&self, worktree: &Path) -> Result<bool>;
+    fn remove_worktree(&self, repo: &Path, worktree: &Path) -> Result<()>;
 }
 
 pub struct SystemGit;
 
-fn run(repo: &Path, args: &[&str]) -> Result<String> {
+fn run(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
-        .arg(repo)
+        .arg(dir)
         .args(args)
         .output()
         .context("run git")?;
@@ -46,5 +52,151 @@ impl Git for SystemGit {
         let base = default_branch(repo)?;
         let path = worktree.to_string_lossy();
         run(repo, &["worktree", "add", "-b", branch, &path, &base]).map(|_| ())
+    }
+
+    fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>> {
+        if !self.is_dirty(worktree)? {
+            return Ok(None);
+        }
+        run(worktree, &["add", "-A"])?;
+        run(
+            worktree,
+            &[
+                "-c",
+                "user.name=pizza-delivery",
+                "-c",
+                "user.email=pizza-delivery@localhost",
+                "commit",
+                "--no-verify",
+                "--no-gpg-sign",
+                "-m",
+                message,
+            ],
+        )?;
+        run(worktree, &["rev-parse", "--short", "HEAD"]).map(Some)
+    }
+
+    fn is_dirty(&self, worktree: &Path) -> Result<bool> {
+        Ok(!run(worktree, &["status", "--porcelain"])?.is_empty())
+    }
+
+    fn is_pushed(&self, worktree: &Path) -> Result<bool> {
+        if run(worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_err() {
+            return Ok(false);
+        }
+        Ok(run(worktree, &["rev-list", "--count", "@{upstream}..HEAD"])? == "0")
+    }
+
+    fn remove_worktree(&self, repo: &Path, worktree: &Path) -> Result<()> {
+        let path = worktree.to_string_lossy();
+        run(repo, &["worktree", "remove", &path]).map(|_| ())
+    }
+}
+
+pub struct LockedGit<G> {
+    inner: G,
+    locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+}
+
+impl<G> LockedGit<G> {
+    pub fn new(inner: G) -> Self {
+        Self {
+            inner,
+            locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn serialized<T>(&self, repo: &Path, f: impl FnOnce(&G) -> Result<T>) -> Result<T> {
+        let lock = {
+            let mut locks = self
+                .locks
+                .lock()
+                .map_err(|_| anyhow!("git lock poisoned"))?;
+            Arc::clone(locks.entry(repo.to_owned()).or_default())
+        };
+        let _held = lock.lock().map_err(|_| anyhow!("repo lock poisoned"))?;
+        f(&self.inner)
+    }
+}
+
+impl<G: Git> Git for LockedGit<G> {
+    fn ensure_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
+        self.serialized(repo, |g| g.ensure_worktree(repo, worktree, branch))
+    }
+
+    fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>> {
+        self.inner.commit_wip(worktree, message)
+    }
+
+    fn is_dirty(&self, worktree: &Path) -> Result<bool> {
+        self.inner.is_dirty(worktree)
+    }
+
+    fn is_pushed(&self, worktree: &Path) -> Result<bool> {
+        self.inner.is_pushed(worktree)
+    }
+
+    fn remove_worktree(&self, repo: &Path, worktree: &Path) -> Result<()> {
+        self.serialized(repo, |g| g.remove_worktree(repo, worktree))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Probe {
+        inside: AtomicUsize,
+        overlaps: AtomicUsize,
+    }
+
+    impl Git for Probe {
+        fn ensure_worktree(&self, _: &Path, _: &Path, _: &str) -> Result<()> {
+            if self.inside.fetch_add(1, Ordering::SeqCst) > 0 {
+                self.overlaps.fetch_add(1, Ordering::SeqCst);
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            self.inside.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn commit_wip(&self, _: &Path, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn is_dirty(&self, _: &Path) -> Result<bool> {
+            Ok(false)
+        }
+        fn is_pushed(&self, _: &Path) -> Result<bool> {
+            Ok(false)
+        }
+        fn remove_worktree(&self, _: &Path, _: &Path) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn overlaps_for(repos: [&str; 2]) -> usize {
+        let git = LockedGit::new(Probe::default());
+        std::thread::scope(|scope| {
+            for repo in repos {
+                let git = &git;
+                scope.spawn(move || {
+                    let _ = git.ensure_worktree(Path::new(repo), Path::new("/w"), "b");
+                });
+            }
+        });
+        git.inner.overlaps.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn administration_of_the_same_repo_never_overlaps() {
+        assert_eq!(overlaps_for(["/r", "/r"]), 0);
+    }
+
+    #[test]
+    fn different_repos_are_not_serialized_against_each_other() {
+        assert_eq!(overlaps_for(["/r1", "/r2"]), 1);
     }
 }

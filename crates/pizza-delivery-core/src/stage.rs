@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use crate::event::{Event, EventPayload};
 use crate::usage::Usage;
 
-pub const MAX_ATTEMPTS: u32 = 2;
 pub const STAGE_NAME: &str = "implement";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +80,9 @@ pub fn next_claim(events: &[Event]) -> Option<ClaimPlan> {
     let finished = events.iter().any(|e| {
         matches!(
             e.payload,
-            EventPayload::JobCompleted {} | EventPayload::JobFailed { .. }
+            EventPayload::JobCompleted {}
+                | EventPayload::JobFailed { .. }
+                | EventPayload::JobCancelled {}
         )
     });
     if finished {
@@ -129,6 +130,7 @@ mod tests {
             EventPayload::JobSubmitted {
                 prompt: "p".into(),
                 repo: Some("/r".into()),
+                priority: Default::default(),
             },
         )
     }
@@ -179,7 +181,10 @@ mod tests {
         let retried = ev(
             4,
             Some("S1"),
-            EventPayload::StageRetried { reason: "x".into() },
+            EventPayload::StageRetried {
+                reason: "x".into(),
+                cause: Default::default(),
+            },
         );
         let plan = next_claim(&[submitted(), planned(), claimed(3, 1), retried]);
         assert_eq!(

@@ -2,17 +2,19 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use listenfd::ListenFd;
 use pizza_delivery_core::api::{ApiError, ErrorKind};
-use pizza_delivery_core::{Request, Response, Store};
+use pizza_delivery_core::{ExpiredLease, JobId, Request, Response, Store};
 
 use crate::agent::ClaudeAgent;
 use crate::config::Config;
-use crate::git::SystemGit;
+use crate::git::{Git, LockedGit, SystemGit};
 use crate::handler::{handle, Env, SystemEnv};
+use crate::process::stop_leased_group;
 use crate::sqlite_store::SqliteStore;
 use crate::worker::{Worker, WorkerConfig};
 
@@ -52,26 +54,39 @@ pub fn run(config: &Config) -> Result<()> {
     serve(listener, store, Arc::new(SystemEnv), config)
 }
 
-fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop: &AtomicBool) {
-    let agent = ClaudeAgent::new(&config.agent_command);
-    let worker_config = WorkerConfig {
+fn worker_config(config: &Config) -> WorkerConfig {
+    WorkerConfig {
         data_dir: config.data_dir.clone(),
         holder: format!("daemon-{}", std::process::id()),
         lease_ttl_ms: config.lease_ttl_ms,
         heartbeat_ms: u64::try_from(config.lease_ttl_ms / 3)
             .unwrap_or(1000)
             .max(10),
-        timeout: Duration::from_secs(config.stage_timeout_secs),
-    };
+        timeout: config.stage_timeout_secs.map(Duration::from_secs),
+        kill_grace: Duration::from_millis(config.kill_grace_ms),
+        caps: config.caps,
+        retention_ms: config.retention_ms,
+    }
+}
+
+fn work_loop(
+    store: &Mutex<Box<dyn Store>>,
+    env: &dyn Env,
+    git: &dyn Git,
+    config: &Config,
+    stop: &AtomicBool,
+) {
+    let agent = ClaudeAgent::new(&config.agent_command);
+    let worker_config = worker_config(config);
     let worker = Worker {
         store,
         env,
-        git: &SystemGit,
+        git,
         agent: &agent,
         config: &worker_config,
     };
     while !stop.load(Ordering::SeqCst) {
-        match worker.tick() {
+        match worker.run_once() {
             Ok(true) => {}
             Ok(false) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => {
@@ -79,6 +94,46 @@ fn work_loop(store: &Mutex<Box<dyn Store>>, env: &dyn Env, config: &Config, stop
                 std::thread::sleep(Duration::from_millis(500));
             }
         }
+    }
+}
+
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+fn janitor_loop(
+    store: &Mutex<Box<dyn Store>>,
+    env: &dyn Env,
+    git: &dyn Git,
+    config: &Config,
+    stop: &AtomicBool,
+) {
+    let agent = ClaudeAgent::new(&config.agent_command);
+    let worker_config = worker_config(config);
+    let worker = Worker {
+        store,
+        env,
+        git,
+        agent: &agent,
+        config: &worker_config,
+    };
+    let mut last_sweep = Instant::now();
+    while !stop.load(Ordering::SeqCst) {
+        if let Err(e) = worker.reap() {
+            eprintln!("janitor: {e:#}");
+        }
+        if last_sweep.elapsed() >= SWEEP_EVERY {
+            last_sweep = Instant::now();
+            if let Err(e) = worker.sweep() {
+                eprintln!("janitor: {e:#}");
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn join_within(handles: Vec<JoinHandle<()>>, grace: Duration) {
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline && handles.iter().any(|h| !h.is_finished()) {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -93,13 +148,47 @@ pub fn serve(
         .context("nonblocking listener")?;
     let store = Arc::new(Mutex::new(store));
     let stop = Arc::new(AtomicBool::new(false));
-    let worker_config = config.clone();
-    let worker_handle = {
-        let store = Arc::clone(&store);
-        let env = Arc::clone(&env);
-        let stop = Arc::clone(&stop);
-        std::thread::spawn(move || work_loop(&store, env.as_ref(), &worker_config, &stop))
-    };
+    let git = Arc::new(LockedGit::new(SystemGit));
+    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    {
+        let agent = ClaudeAgent::new(&config.agent_command);
+        let worker_config = worker_config(config);
+        let recovery = Worker {
+            store: store.as_ref(),
+            env: env.as_ref(),
+            git: git.as_ref(),
+            agent: &agent,
+            config: &worker_config,
+        };
+        if let Err(e) = recovery.reap() {
+            eprintln!("recovery: {e:#}");
+        }
+    }
+    for _ in 0..config.caps.global.max(1) {
+        let (store, env, git, stop) = (
+            Arc::clone(&store),
+            Arc::clone(&env),
+            Arc::clone(&git),
+            Arc::clone(&stop),
+        );
+        let config = config.clone();
+        handles.push(std::thread::spawn(move || {
+            work_loop(&store, env.as_ref(), git.as_ref(), &config, &stop)
+        }));
+    }
+    {
+        let (store, env, git, stop) = (
+            Arc::clone(&store),
+            Arc::clone(&env),
+            Arc::clone(&git),
+            Arc::clone(&stop),
+        );
+        let config = config.clone();
+        std::thread::spawn(move || {
+            janitor_loop(&store, env.as_ref(), git.as_ref(), &config, &stop)
+        });
+    }
+    let kill_grace = Duration::from_millis(config.kill_grace_ms);
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -107,7 +196,7 @@ pub fn serve(
                 let env = Arc::clone(&env);
                 let stop = Arc::clone(&stop);
                 std::thread::spawn(move || {
-                    let _ = connection(stream, &store, env.as_ref(), &stop);
+                    let _ = connection(stream, &store, env.as_ref(), &stop, kill_grace);
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -116,8 +205,23 @@ pub fn serve(
             Err(e) => return Err(e).context("accept"),
         }
     }
-    drop(worker_handle);
+    join_within(handles, Duration::from_millis(config.shutdown_grace_ms));
     Ok(())
+}
+
+fn stop_running_stage(store: &Mutex<Box<dyn Store>>, job: &JobId, grace: Duration) {
+    let lease = store
+        .lock()
+        .ok()
+        .and_then(|guard| guard.lease_of_job(job).ok().flatten());
+    if let Some(ExpiredLease {
+        pid: Some(pid),
+        pid_start: Some(start),
+        ..
+    }) = lease
+    {
+        stop_leased_group(pid, start, grace);
+    }
 }
 
 fn connection(
@@ -125,6 +229,7 @@ fn connection(
     store: &Mutex<Box<dyn Store>>,
     env: &dyn Env,
     stop: &AtomicBool,
+    kill_grace: Duration,
 ) -> Result<()> {
     stream.set_nonblocking(false)?;
     let mut line = String::new();
@@ -138,6 +243,9 @@ fn connection(
             };
             if stopping {
                 stop.store(true, Ordering::SeqCst);
+            }
+            if let Response::Cancelled { id, .. } = &response {
+                stop_running_stage(store, id, kill_grace);
             }
             response
         }

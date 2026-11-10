@@ -50,6 +50,7 @@ echo '{"type":"result","is_error":false}'
 
 pub struct Harness {
     root: TempDir,
+    envs: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -86,7 +87,15 @@ impl Harness {
         let agent = root.path().join("fake-agent");
         fs::write(&agent, script)?;
         fs::set_permissions(&agent, fs::Permissions::from_mode(0o755))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            envs: Vec::new(),
+        })
+    }
+
+    pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        self.envs.push((key.to_owned(), value.to_owned()));
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -140,6 +149,7 @@ impl Harness {
             .env("PIZZA_DELIVERY_DATA_DIR", self.data_dir())
             .env("PIZZA_DELIVERY_SOCKET", self.root.path().join("pd.sock"))
             .env("PIZZA_DELIVERY_AGENT", self.root.path().join("fake-agent"))
+            .envs(self.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .env_remove("NO_COLOR")
             .stdin(Stdio::null())
             .output()?;
@@ -173,7 +183,10 @@ impl Harness {
         loop {
             let cli = self.run(&["status", id])?;
             let job = cli.json_lines()?.into_iter().next().ok_or("no status")?;
-            if matches!(job["state"].as_str(), Some("completed" | "failed")) {
+            if matches!(
+                job["state"].as_str(),
+                Some("completed" | "failed" | "cancelled")
+            ) {
                 return Ok(job);
             }
             if Instant::now() > deadline {

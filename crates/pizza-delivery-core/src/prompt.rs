@@ -12,9 +12,20 @@ pub fn render_stage_prompt(job_id: &str, stage: &str, task: &str, handoff_path: 
     )
 }
 
+pub fn with_interruption_note(prompt: &str, note: &str) -> String {
+    format!("{prompt}\n\nA previous attempt of this stage was interrupted. Read this before continuing:\n\n{note}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_interruption_note_is_appended_to_the_prompt() {
+        let prompt = with_interruption_note("base", "# Interruption note");
+        assert!(prompt.starts_with("base"));
+        assert!(prompt.ends_with("# Interruption note"));
+    }
 
     #[test]
     fn the_prompt_carries_autonomy_preamble_task_and_handoff_location() {

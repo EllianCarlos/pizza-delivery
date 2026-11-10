@@ -13,6 +13,7 @@ pub struct Invocation {
     pub cwd: PathBuf,
     pub handoff_path: PathBuf,
     pub timeout: Duration,
+    pub grace: Duration,
 }
 
 pub struct AgentOutput {
@@ -36,8 +37,6 @@ impl ClaudeAgent {
         }
     }
 }
-
-const GRACE: Duration = Duration::from_secs(5);
 
 impl Agent for ClaudeAgent {
     fn name(&self) -> &str {
@@ -79,7 +78,7 @@ impl Agent for ClaudeAgent {
                 timed_out = true;
                 terminate_group(pid);
                 let grace_started = Instant::now();
-                while grace_started.elapsed() < GRACE
+                while grace_started.elapsed() < inv.grace
                     && child.try_wait().context("wait for agent")?.is_none()
                 {
                     std::thread::sleep(Duration::from_millis(20));

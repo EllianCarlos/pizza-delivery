@@ -4,6 +4,7 @@ use crate::event::Event;
 use crate::exit::ExitCode;
 use crate::id::JobId;
 use crate::job::JobState;
+use crate::schedule::Priority;
 use crate::stage::StageView;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,6 +14,11 @@ pub enum Request {
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<Priority>,
+    },
+    Cancel {
+        job: String,
     },
     Status {
         job: Option<String>,
@@ -69,6 +75,10 @@ pub enum Response {
         job: JobView,
         stages: Vec<StageView>,
         events: Vec<Event>,
+    },
+    Cancelled {
+        id: JobId,
+        short_id: String,
     },
     Stopped,
     Error {
