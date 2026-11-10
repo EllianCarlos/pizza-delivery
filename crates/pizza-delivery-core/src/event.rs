@@ -149,6 +149,26 @@ pub enum EventPayload {
     BudgetEstimated {
         stages: Vec<StageEstimate>,
     },
+    McpRequested {
+        server: String,
+    },
+    McpActivated {
+        server: String,
+        egress: Vec<String>,
+        write: bool,
+    },
+    McpDenied {
+        server: String,
+        reason: String,
+    },
+    McpDeactivated {
+        server: String,
+        reason: String,
+    },
+    McpCalls {
+        server: String,
+        count: u64,
+    },
     StageBudgetRecorded {
         stage: String,
         tier: SizeTier,
@@ -190,6 +210,11 @@ impl EventPayload {
             EventPayload::PlanAmended { .. } => "plan-amended",
             EventPayload::JobNeedsHuman { .. } => "job-needs-human",
             EventPayload::BudgetEstimated { .. } => "budget-estimated",
+            EventPayload::McpRequested { .. } => "mcp-requested",
+            EventPayload::McpActivated { .. } => "mcp-activated",
+            EventPayload::McpDenied { .. } => "mcp-denied",
+            EventPayload::McpDeactivated { .. } => "mcp-deactivated",
+            EventPayload::McpCalls { .. } => "mcp-calls",
             EventPayload::StageBudgetRecorded { .. } => "stage-budget-recorded",
         }
     }

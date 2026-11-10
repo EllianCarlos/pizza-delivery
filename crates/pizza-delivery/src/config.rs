@@ -25,6 +25,8 @@ pub struct Config {
     pub mnemon_command: PathBuf,
     pub budget_cap_tokens: u64,
     pub budget_defaults: Defaults,
+    pub mcp_catalog: PathBuf,
+    pub mcp_secrets: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +70,12 @@ impl Config {
         let trust_path = get("PIZZA_DELIVERY_TRUST")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("trust.json"));
+        let mcp_catalog = get("PIZZA_DELIVERY_MCP_CATALOG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("mcp-catalog.toml"));
+        let mcp_secrets = get("PIZZA_DELIVERY_SECRETS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("secrets"));
         let number =
             |key: &str, default: u64| get(key).and_then(|v| v.parse().ok()).unwrap_or(default);
         let routing_file = get("PIZZA_DELIVERY_ROUTING")
@@ -106,6 +114,8 @@ impl Config {
             engram_db: path_or("PIZZA_DELIVERY_ENGRAM_DB", home.join(".engram/engram.db")),
             engram_command: path_or("PIZZA_DELIVERY_ENGRAM", PathBuf::from("engram")),
             mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
+            mcp_catalog,
+            mcp_secrets,
             budget_cap_tokens: number("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", DEFAULT_CAP_TOKENS),
             budget_defaults: {
                 let std = Defaults::standard();

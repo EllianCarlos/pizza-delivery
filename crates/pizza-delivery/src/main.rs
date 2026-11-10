@@ -3,6 +3,7 @@ mod client;
 mod config;
 mod git;
 mod handler;
+mod mcp_broker;
 mod process;
 mod sandbox;
 mod server;
@@ -91,6 +92,52 @@ enum Command {
     Daemon,
     /// Ask the running daemon to exit
     Stop,
+    /// Serve the per-stage MCP broker on stdio (started by the agent session)
+    #[command(hide = true)]
+    McpBroker {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        stage: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        log: PathBuf,
+        #[arg(long)]
+        secrets: Option<PathBuf>,
+    },
+}
+
+fn run_broker(
+    catalog: PathBuf,
+    stage: String,
+    agent: String,
+    log: PathBuf,
+    secrets: Option<PathBuf>,
+) -> ProcessExitCode {
+    let catalog = std::fs::read_to_string(&catalog)
+        .map_err(anyhow::Error::from)
+        .and_then(|text| pizza_delivery_core::mcp::Catalog::parse(&text).map_err(Into::into));
+    let result = catalog.and_then(|catalog| {
+        mcp_broker::serve(
+            mcp_broker::Settings {
+                catalog,
+                stage,
+                agent,
+                log,
+                secrets,
+            },
+            std::io::BufReader::new(std::io::stdin()),
+            std::io::stdout(),
+        )
+    });
+    match result {
+        Ok(()) => exit(ExitCode::Success),
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            exit(ExitCode::General)
+        }
+    }
 }
 
 fn render_triaged(
@@ -171,6 +218,16 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
 }
 
 fn run(cli: Cli) -> ProcessExitCode {
+    if let Some(Command::McpBroker {
+        catalog,
+        stage,
+        agent,
+        log,
+        secrets,
+    }) = cli.command
+    {
+        return run_broker(catalog, stage, agent, log, secrets);
+    }
     let config = match Config::from_env() {
         Ok(c) => c,
         Err(e) => {
@@ -191,6 +248,7 @@ fn run(cli: Cli) -> ProcessExitCode {
                 exit(ExitCode::General)
             }
         },
+        Some(Command::McpBroker { .. }) => exit(ExitCode::General),
         Some(Command::Stop) => present(
             send(&config, &Request::Stop, Start::Never),
             OutputMode::resolve(false, tty),
