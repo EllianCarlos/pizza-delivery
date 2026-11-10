@@ -15,7 +15,12 @@ use pizza_delivery_core::{EventPayload, JobState, Request, Response, Store};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use pizza_delivery_core::event::SYSTEM_JOB;
+use pizza_delivery_core::{Actor, JobId, NewEvent};
+
 use crate::handler::{handle, Env};
+use crate::push::{endpoint_allowed, Push, Subscription};
+use crate::remote::{self, Gate, Origin, Submit};
 use crate::server::dispatch;
 
 const MAX_BODY: usize = 1 << 20;
@@ -30,6 +35,8 @@ pub struct Api {
     pub stop: Arc<AtomicBool>,
     pub kill_grace: Duration,
     pub data_dir: PathBuf,
+    pub gate: Arc<Gate>,
+    pub push: Arc<Push>,
 }
 
 struct Req {
@@ -38,6 +45,7 @@ struct Req {
     query: Vec<(String, String)>,
     last_event_id: Option<u64>,
     json: bool,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -70,6 +78,7 @@ pub fn listen(listener: TcpListener, api: Api) {
         return;
     }
     while !api.stop.load(Ordering::SeqCst) {
+        api.flush_rejections(false);
         match listener.accept() {
             Ok((stream, _)) => {
                 let api = api.clone();
@@ -90,13 +99,61 @@ fn connection(stream: TcpStream, api: &Api) -> std::io::Result<()> {
     let Some(req) = read_request(&stream)? else {
         return write_reply(&stream, bad(ErrorKind::Usage, "malformed request"));
     };
+    let origin = match api.gate.authenticate(&req.headers, api.env.now_ms() / 1000) {
+        Ok(origin) => origin,
+        Err(_) => {
+            return write_reply(
+                &stream,
+                denied(401, "unauthorized", "access assertion required"),
+            )
+        }
+    };
     if req.method == "GET" && req.path == "/api/stream" {
         return stream_events(&stream, api, &req);
     }
     if req.method == "GET" && !req.path.starts_with("/api/") {
         return write_asset(&stream, &req.path);
     }
-    write_reply(&stream, route(api, &req))
+    let remote = matches!(origin, Origin::Remote { .. });
+    if req.method != "GET" && !remote::write_allowed(&req.headers, remote) {
+        return write_reply(
+            &stream,
+            denied(403, "forbidden", "origin or client header rejected"),
+        );
+    }
+    if remote && req.method == "POST" && creates_job(&req.path) {
+        match api.gate.submit() {
+            Submit::Allowed => {}
+            Submit::Disabled => {
+                return write_reply(
+                    &stream,
+                    denied(403, "forbidden", "remote submits are disabled"),
+                )
+            }
+            Submit::Limited => {
+                return write_reply(
+                    &stream,
+                    denied(429, "rate-limited", "too many remote submits"),
+                )
+            }
+        }
+    }
+    let reply = route(api, &req);
+    if let Origin::Remote { email, ray } = &origin {
+        api.audit_remote(email, ray.as_deref(), &req, &reply);
+    }
+    write_reply(&stream, reply)
+}
+
+fn creates_job(path: &str) -> bool {
+    matches!(path.trim_end_matches('/'), "/api/jobs" | "/api/inbox/reply")
+}
+
+fn denied(status: u16, kind: &str, message: &str) -> Reply {
+    Reply {
+        status,
+        body: serde_json::json!({"kind": kind, "message": message, "matches": []}),
+    }
 }
 
 fn write_asset(mut stream: &TcpStream, path: &str) -> std::io::Result<()> {
@@ -135,6 +192,7 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Option<Req>> {
         })
         .collect();
     let (mut length, mut last_event_id, mut json) = (0usize, None, false);
+    let mut headers = Vec::new();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
@@ -152,6 +210,7 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Option<Req>> {
                 "content-type" => json = value.to_ascii_lowercase().starts_with("application/json"),
                 _ => {}
             }
+            headers.push((name.to_ascii_lowercase(), value.to_owned()));
         }
     }
     if length > MAX_BODY {
@@ -165,6 +224,7 @@ fn read_request(stream: &TcpStream) -> std::io::Result<Option<Req>> {
         query,
         last_event_id,
         json,
+        headers,
         body,
     }))
 }
@@ -175,7 +235,10 @@ fn status_text(status: u16) -> &'static str {
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         409 => "Conflict",
+        429 => "Too Many Requests",
         415 => "Unsupported Media Type",
         _ => "Internal Server Error",
     }
@@ -242,6 +305,60 @@ fn body<T: DeserializeOwned>(req: &Req) -> Result<T, Reply> {
 }
 
 impl Api {
+    fn append(&self, job: &str, actor: Actor, payload: EventPayload) {
+        let event = NewEvent {
+            id: self.env.new_ulid(),
+            job_id: JobId::new(job),
+            stage_id: None,
+            ts_ms: self.env.now_ms(),
+            actor,
+            payload,
+        };
+        if let Ok(mut guard) = self.store.lock() {
+            if let Err(e) = guard.append_event(event) {
+                eprintln!("ledger: {e}");
+            }
+        }
+    }
+
+    pub fn flush_rejections(&self, force: bool) {
+        if let Some(counts) = self.gate.take_due_rejections(force) {
+            let count = counts.values().sum();
+            self.append(
+                SYSTEM_JOB,
+                Actor::Daemon,
+                EventPayload::AuthRejected {
+                    count,
+                    reasons: counts,
+                },
+            );
+        }
+    }
+
+    fn audit_remote(&self, email: &str, ray: Option<&str>, req: &Req, reply: &Reply) {
+        let action = match (req.method.as_str(), req.path.trim_end_matches('/')) {
+            ("POST", "/api/jobs") => "submit",
+            ("POST", "/api/inbox/reply") => "reply",
+            ("POST", path) if path.ends_with("/cancel") => "cancel",
+            _ => return,
+        };
+        let Some(job) = reply.body.get("id").and_then(|id| id.as_str()) else {
+            return;
+        };
+        if reply.status != 200 {
+            return;
+        }
+        self.append(
+            job,
+            Actor::RemoteHuman,
+            EventPayload::RemoteAction {
+                email: email.to_owned(),
+                cf_ray: ray.map(str::to_owned),
+                action: action.to_owned(),
+            },
+        );
+    }
+
     fn run(&self, request: Request) -> Response {
         match self.store.lock() {
             Ok(mut guard) => handle(request, guard.as_mut(), self.env.as_ref()),
@@ -305,6 +422,12 @@ fn route(api: &Api, req: &Req) -> Reply {
                 _ => bad(ErrorKind::Internal, "unexpected response"),
             }
         }
+        ("GET", ["api", "push", "key"]) => Reply {
+            status: 200,
+            body: serde_json::json!({"key": api.push.vapid.public_key()}),
+        },
+        ("POST", ["api", "push", "subscribe"]) => subscribe(api, req),
+        ("POST", ["api", "push", "unsubscribe"]) => unsubscribe(api, req),
         ("POST", ["api", "inbox", "reply"]) => reply(api, req),
         ("POST", ["api", "inbox", "dismiss"]) => dismiss(api, req),
         (_, ["api", "jobs"] | ["api", "board" | "quota" | "inbox" | "events" | "stream"]) => {
@@ -312,7 +435,60 @@ fn route(api: &Api, req: &Req) -> Reply {
         }
         (_, ["api", "jobs", _]) | (_, ["api", "jobs", _, "cancel"]) => method_not_allowed(),
         (_, ["api", "inbox", "reply" | "dismiss"]) => method_not_allowed(),
+        (_, ["api", "push", "key" | "subscribe" | "unsubscribe"]) => method_not_allowed(),
         _ => bad(ErrorKind::NotFound, "no such route"),
+    }
+}
+
+#[derive(Deserialize)]
+struct PushKeys {
+    p256dh: String,
+    auth: String,
+}
+
+#[derive(Deserialize)]
+struct SubscribeBody {
+    endpoint: String,
+    keys: PushKeys,
+}
+
+#[derive(Deserialize)]
+struct UnsubscribeBody {
+    endpoint: String,
+}
+
+fn subscribe(api: &Api, req: &Req) -> Reply {
+    let body: SubscribeBody = match body(req) {
+        Ok(body) => body,
+        Err(reply) => return reply,
+    };
+    if !endpoint_allowed(&body.endpoint) {
+        return bad(ErrorKind::Usage, "push endpoint must be https");
+    }
+    match api.push.subscriptions.add(Subscription {
+        endpoint: body.endpoint,
+        p256dh: body.keys.p256dh,
+        auth: body.keys.auth,
+    }) {
+        Ok(()) => Reply {
+            status: 200,
+            body: serde_json::json!({"subscribed": true}),
+        },
+        Err(e) => bad(ErrorKind::Internal, e),
+    }
+}
+
+fn unsubscribe(api: &Api, req: &Req) -> Reply {
+    let body: UnsubscribeBody = match body(req) {
+        Ok(body) => body,
+        Err(reply) => return reply,
+    };
+    match api.push.subscriptions.remove(&body.endpoint) {
+        Ok(()) => Reply {
+            status: 200,
+            body: serde_json::json!({"subscribed": false}),
+        },
+        Err(e) => bad(ErrorKind::Internal, e),
     }
 }
 

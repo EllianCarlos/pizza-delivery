@@ -4,6 +4,17 @@ import type { JobState } from "./generated/JobState";
 import type { JobView } from "./generated/JobView";
 import type { StageState } from "./generated/StageState";
 
+export const PHONE_MAX_WIDTH = 600;
+
+export function landingTab(width: number): "inbox" | "jobs" {
+  return width <= PHONE_MAX_WIDTH ? "inbox" : "jobs";
+}
+
+export function jobFromPath(path: string): string | null {
+  const match = /^\/jobs\/([^/]+)\/?$/.exec(path);
+  return match?.[1] ?? null;
+}
+
 export const STATE_ORDER: JobState[] = [
   "queued",
   "running",
