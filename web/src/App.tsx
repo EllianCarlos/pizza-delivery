@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Alert from "@cloudscape-design/components/alert";
 import AppLayout from "@cloudscape-design/components/app-layout";
 import Button from "@cloudscape-design/components/button";
@@ -9,13 +9,14 @@ import Input from "@cloudscape-design/components/input";
 import Modal from "@cloudscape-design/components/modal";
 import SegmentedControl from "@cloudscape-design/components/segmented-control";
 import SpaceBetween from "@cloudscape-design/components/space-between";
-import Tabs from "@cloudscape-design/components/tabs";
+import Container from "@cloudscape-design/components/container";
+import SideNavigation from "@cloudscape-design/components/side-navigation";
 import Textarea from "@cloudscape-design/components/textarea";
 import { createApi } from "./api";
 import { usePolled } from "./hooks";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobView } from "./generated/JobView";
-import { jobFromPath, landingTab, pipelineLanes } from "./model";
+import { hashFor, jobFromPath, landingRoute, pipelineLanes, routeFromHash, STATE_ORDER, type Route } from "./model";
 import { enablePush, pushSupported } from "./push";
 import { ArtifactBrowser, DetailPanel, EventsPanel, InboxPanel } from "./panels";
 import { BoardView, PipelineView, TableView } from "./views";
@@ -112,20 +113,78 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
   );
 }
 
+const AGENT_WORKER_LINKS: { route: Exclude<Route, "home">; text: string }[] = [
+  { route: "jobs", text: "Jobs" },
+  { route: "inbox", text: "Inbox" },
+  { route: "events", text: "Events" },
+  { route: "artifacts", text: "Artifacts" },
+];
+
+function HomePage({ jobs }: { jobs: JobView[] }) {
+  const counts = STATE_ORDER.map((state) => ({ state, n: jobs.filter((j) => j.state === state).length })).filter((c) => c.n > 0);
+  return (
+    <SpaceBetween size="l">
+      <Header variant="h1" description="Everything running on this machine.">
+        Pizza delivery
+      </Header>
+      <Container
+        header={
+          <Header variant="h2" actions={<Button href={hashFor("jobs")}>Open agent workers</Button>}>
+            Agent workers
+          </Header>
+        }
+      >
+        <SpaceBetween size="s">
+          <div>
+            {jobs.length === 0 ? "No jobs yet." : counts.map((c) => `${c.n} ${c.state}`).join(" · ")}
+          </div>
+          <SpaceBetween size="xs" direction="horizontal">
+            {AGENT_WORKER_LINKS.map((l) => (
+              <Button key={l.route} href={hashFor(l.route)}>
+                {l.text}
+              </Button>
+            ))}
+          </SpaceBetween>
+        </SpaceBetween>
+      </Container>
+    </SpaceBetween>
+  );
+}
+
 export function App() {
   const jobs = usePolled(() => api.jobs(), 3000);
   const list = jobs.data?.jobs ?? [];
   const staleAt = api.staleSince();
   const [pushError, setPushError] = useState<string | null>(null);
   const [pushOn, setPushOn] = useState(false);
-  const initialTab = jobFromPath(window.location.pathname)
-    ? "jobs"
-    : landingTab(window.innerWidth);
-  const [tab, setTab] = useState<string>(initialTab);
+  const [route, setRoute] = useState<Route>(
+    () =>
+      routeFromHash(window.location.hash) ??
+      (jobFromPath(window.location.pathname) ? "jobs" : landingRoute(window.innerWidth)),
+  );
+  useEffect(() => {
+    const onHash = () => setRoute(routeFromHash(window.location.hash) ?? "home");
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   return (
     <AppLayout
-      navigationHide
       toolsHide
+      navigation={
+        <SideNavigation
+          activeHref={hashFor(route)}
+          header={{ text: "Pizza delivery", href: hashFor("home") }}
+          items={[
+            { type: "link", text: "Home", href: hashFor("home") },
+            {
+              type: "section",
+              text: "Agent workers",
+              defaultExpanded: true,
+              items: AGENT_WORKER_LINKS.map((l) => ({ type: "link" as const, text: l.text, href: hashFor(l.route) })),
+            },
+          ]}
+        />
+      }
       content={
         <SpaceBetween size="m">
           {jobs.error && <Alert type="error">{jobs.error}</Alert>}
@@ -150,16 +209,11 @@ export function App() {
               Enable notifications
             </Button>
           )}
-          <Tabs
-            activeTabId={tab}
-            onChange={({ detail }) => setTab(detail.activeTabId)}
-            tabs={[
-              { id: "jobs", label: "Jobs", content: <JobsPage jobs={list} onChanged={() => void jobs.refresh()} /> },
-              { id: "inbox", label: "Inbox", content: <InboxPanel api={api} /> },
-              { id: "events", label: "Events", content: <EventsPanel api={api} /> },
-              { id: "artifacts", label: "Artifacts", content: <ArtifactBrowser jobs={list} api={api} /> },
-            ]}
-          />
+          {route === "home" && <HomePage jobs={list} />}
+          {route === "jobs" && <JobsPage jobs={list} onChanged={() => void jobs.refresh()} />}
+          {route === "inbox" && <InboxPanel api={api} />}
+          {route === "events" && <EventsPanel api={api} />}
+          {route === "artifacts" && <ArtifactBrowser jobs={list} api={api} />}
         </SpaceBetween>
       }
     />

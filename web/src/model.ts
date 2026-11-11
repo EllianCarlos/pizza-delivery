@@ -6,8 +6,23 @@ import type { StageState } from "./generated/StageState";
 
 export const PHONE_MAX_WIDTH = 600;
 
-export function landingTab(width: number): "inbox" | "jobs" {
-  return width <= PHONE_MAX_WIDTH ? "inbox" : "jobs";
+export type Route = "home" | "jobs" | "inbox" | "events" | "artifacts";
+
+/** The views grouped under the "Agent workers" section of the navigation. */
+export const AGENT_WORKER_ROUTES = ["jobs", "inbox", "events", "artifacts"] as const;
+
+export function landingRoute(width: number): Route {
+  return width <= PHONE_MAX_WIDTH ? "inbox" : "home";
+}
+
+export function routeFromHash(hash: string): Route | null {
+  if (hash === "" || hash === "#" || hash === "#/") return "home";
+  const match = /^#\/agent-workers\/(jobs|inbox|events|artifacts)\/?$/.exec(hash);
+  return (match?.[1] as Route | undefined) ?? null;
+}
+
+export function hashFor(route: Route): string {
+  return route === "home" ? "#/" : `#/agent-workers/${route}`;
 }
 
 export function jobFromPath(path: string): string | null {
