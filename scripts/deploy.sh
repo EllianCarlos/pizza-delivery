@@ -50,7 +50,8 @@ if [ "$restart" -eq 1 ]; then
     command -v "$tool" >/dev/null 2>&1 || die "required tool not found on PATH: $tool"
   done
 fi
-[ -d "$deploy_dir/.git" ] || die "$deploy_dir is not a git checkout"
+# A worktree has a .git file, not a directory, so ask git instead.
+git -C "$deploy_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "$deploy_dir is not a git checkout"
 
 step "sync $deploy_dir to origin/main"
 git -C "$deploy_dir" fetch origin main || die "git fetch origin main failed"
