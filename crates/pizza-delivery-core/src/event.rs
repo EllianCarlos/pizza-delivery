@@ -78,6 +78,10 @@ pub enum EventPayload {
     AgentFinished {
         usage: Usage,
     },
+    ToolCalled {
+        name: String,
+        summary: String,
+    },
     QuotaSignal {
         agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -228,6 +232,7 @@ impl EventPayload {
             EventPayload::StageStarted { .. } => "stage-started",
             EventPayload::AgentInvoked { .. } => "agent-invoked",
             EventPayload::AgentFinished { .. } => "agent-finished",
+            EventPayload::ToolCalled { .. } => "tool-called",
             EventPayload::QuotaSignal { .. } => "quota-signal",
             EventPayload::AgentFellBack { .. } => "agent-fell-back",
             EventPayload::JobParked { .. } => "job-parked",

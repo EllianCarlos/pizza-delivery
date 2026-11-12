@@ -159,6 +159,81 @@ pub fn parse_stream(stdout: &str) -> AgentRun {
     }
 }
 
+pub const TOOL_SUMMARY_CHARS: usize = 120;
+pub const MAX_TOOL_CALLS: usize = 200;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCall {
+    pub name: String,
+    pub summary: String,
+}
+
+const SUMMARY_KEYS: [&str; 8] = [
+    "command",
+    "file_path",
+    "path",
+    "pattern",
+    "url",
+    "query",
+    "description",
+    "skill",
+];
+
+fn redact(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            let lower = word.to_ascii_lowercase();
+            let secret_key = ["key", "token", "secret", "password", "passwd"]
+                .iter()
+                .any(|k| lower.split('=').next().is_some_and(|n| n.contains(k)));
+            match word.split_once('=') {
+                Some((name, _)) if secret_key => format!("{name}=***"),
+                _ if word.starts_with("sk-")
+                    || word.starts_with("ghp_")
+                    || lower.starts_with("bearer") =>
+                {
+                    "***".to_owned()
+                }
+                _ => word.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn summarize(input: &Value) -> String {
+    let raw = SUMMARY_KEYS
+        .iter()
+        .find_map(|k| input.get(*k).and_then(Value::as_str))
+        .unwrap_or("");
+    let first_line = raw.lines().next().unwrap_or("");
+    let clean = redact(first_line);
+    if clean.chars().count() > TOOL_SUMMARY_CHARS {
+        let cut: String = clean.chars().take(TOOL_SUMMARY_CHARS).collect();
+        format!("{cut}…")
+    } else {
+        clean
+    }
+}
+
+/// Every `tool_use` block of the stream, in order: name plus a short, redacted summary.
+pub fn tool_calls(stdout: &str) -> Vec<ToolCall> {
+    parsed(stdout)
+        .iter()
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("assistant"))
+        .filter_map(|v| v.get("message")?.get("content")?.as_array())
+        .flatten()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+        .filter_map(|b| {
+            Some(ToolCall {
+                name: b.get("name")?.as_str()?.to_owned(),
+                summary: summarize(b.get("input").unwrap_or(&Value::Null)),
+            })
+        })
+        .take(MAX_TOOL_CALLS)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +314,50 @@ mod tests {
         let run = parse_stream("{\"type\":\"result\",\"is_error\":false}\n");
         assert_eq!(run.outcome, Outcome::Succeeded);
         assert_eq!(run.usage, Usage::default());
+    }
+
+    #[test]
+    fn tool_use_blocks_become_short_redacted_calls() {
+        let line = serde_json::json!({"type":"assistant","message":{"content":[
+            {"type":"text","text":"hi"},
+            {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"API_TOKEN=abc123 curl https://x.io/a"}},
+            {"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/src/lib.rs"}},
+            {"type":"tool_use","id":"t3","name":"Write","input":{"file_path":"/a.rs","content":"HUGE"}},
+            {"type":"tool_use","id":"t4","name":"Odd","input":{"x":1}}
+        ]}});
+        let calls = tool_calls(&format!("{line}\nnot json\n"));
+        let got: Vec<(&str, &str)> = calls
+            .iter()
+            .map(|c| (c.name.as_str(), c.summary.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Bash", "API_TOKEN=*** curl https://x.io/a"),
+                ("Read", "/src/lib.rs"),
+                ("Write", "/a.rs"),
+                ("Odd", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn long_summaries_are_truncated_on_a_char_boundary_and_calls_are_capped() {
+        let long = "é".repeat(500);
+        let block = serde_json::json!({"type":"tool_use","name":"Bash","input":{"command":long}});
+        let line = serde_json::json!({"type":"assistant","message":{"content":[block]}});
+        let calls = tool_calls(&line.to_string());
+        assert_eq!(calls[0].summary.chars().count(), TOOL_SUMMARY_CHARS + 1);
+        assert!(calls[0].summary.ends_with('…'));
+        let many = (0..MAX_TOOL_CALLS + 5)
+            .map(|_| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(tool_calls(&many).len(), MAX_TOOL_CALLS);
+    }
+
+    #[test]
+    fn recorded_runs_without_tools_have_no_calls() {
+        assert!(tool_calls(NORMAL).is_empty());
     }
 }

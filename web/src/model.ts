@@ -81,3 +81,109 @@ export function segmentsOf(detail: JobDetailView): Segment[] {
 export function pipelineLanes(details: JobDetailView[]): Lane[] {
   return details.map((d) => ({ job: d.job, segments: segmentsOf(d) }));
 }
+
+export const TOOL_KIND = "tool-called";
+
+export function visibleEvents(
+  events: EventView[],
+  families: ReadonlySet<string>,
+  showTools: boolean,
+): EventView[] {
+  const filtered = filterEvents(events, families);
+  return showTools || families.has(eventFamily(TOOL_KIND))
+    ? filtered
+    : filtered.filter((e) => e.kind !== TOOL_KIND);
+}
+
+export type ToolCall = {
+  cursor: number;
+  ts_ms: number;
+  stage_id: string | null;
+  name: string;
+  summary: string;
+};
+
+export function toolCallsOf(events: EventView[]): ToolCall[] {
+  return events
+    .filter((e) => e.kind === TOOL_KIND)
+    .map((e) => {
+      const p = (e.payload ?? {}) as { name?: unknown; summary?: unknown };
+      return {
+        cursor: e.cursor,
+        ts_ms: e.ts_ms,
+        stage_id: e.stage_id,
+        name: typeof p.name === "string" ? p.name : "?",
+        summary: typeof p.summary === "string" ? p.summary : "",
+      };
+    });
+}
+
+export function formatDuration(ms: number | null): string {
+  if (ms === null) return "-";
+  if (ms < 10_000) return `${(Math.max(ms, 0) / 1000).toFixed(1)}s`;
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return m > 0 ? `${m}m ${total % 60}s` : `${total}s`;
+}
+
+export function formatCost(microusd: number | null): string {
+  return microusd === null ? "-" : `$${(microusd / 1_000_000).toFixed(4)}`;
+}
+
+export function formatTokens(input: number | null, output: number | null): string {
+  if (input === null && output === null) return "-";
+  const n = (v: number | null) => (v === null ? "-" : v.toLocaleString("en-US"));
+  return `${n(input)} in / ${n(output)} out`;
+}
+
+export type StageRow = {
+  id: string;
+  name: string;
+  state: StageState;
+  model: string | null;
+  agent: string | null;
+  wallMs: number | null;
+  live: boolean;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costMicrousd: number | null;
+};
+
+export function stageRows(detail: JobDetailView, nowMs: number): StageRow[] {
+  return detail.stages.map((s) => {
+    const live = s.state === "running";
+    const started = [...detail.events]
+      .reverse()
+      .find((e) => e.kind === "stage-started" && e.stage_id === s.id);
+    const u = live ? null : s.usage;
+    return {
+      id: s.id,
+      name: s.name,
+      state: s.state,
+      model: u?.model ?? null,
+      agent: u?.agent ?? null,
+      wallMs: live ? (started ? Math.max(nowMs - started.ts_ms, 0) : null) : (u?.wall_ms ?? null),
+      live,
+      inputTokens: u?.input_tokens ?? null,
+      outputTokens: u?.output_tokens ?? null,
+      costMicrousd: u?.cost_microusd ?? null,
+    };
+  });
+}
+
+export type JobSummary = { wallMs: number | null; costMicrousd: number | null; models: string[] };
+
+export function jobSummary(detail: JobDetailView, nowMs: number): JobSummary {
+  const rows = stageRows(detail, nowMs);
+  const total = (values: (number | null)[]) => {
+    const known = values.filter((v): v is number => v !== null);
+    return known.length === 0 ? null : known.reduce((a, b) => a + b, 0);
+  };
+  return {
+    wallMs: total(rows.map((r) => r.wallMs)),
+    costMicrousd: total(rows.map((r) => r.costMicrousd)),
+    models: [...new Set(rows.flatMap((r) => (r.model ? [r.model] : [])))].sort(),
+  };
+}
