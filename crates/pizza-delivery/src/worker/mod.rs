@@ -63,6 +63,7 @@ pub struct WorkerConfig {
     pub mcp: Option<McpSetup>,
     pub memory: Option<MemorySetup>,
     pub auto_merge: bool,
+    pub shadow: Option<crate::config::ShadowConfig>,
 }
 
 pub struct MemorySetup {
@@ -472,6 +473,7 @@ impl Worker<'_> {
                 },
             )?;
         }
+        self.shadow_if_due(job);
         self.memorize_if_due(job);
         Ok(())
     }
@@ -496,6 +498,7 @@ mod accept;
 mod memorize;
 mod prompt;
 mod record;
+mod shadow;
 mod ship;
 mod stage;
 

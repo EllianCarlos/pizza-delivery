@@ -40,6 +40,16 @@ pub struct Config {
     pub reject_window_ms: u64,
     pub vapid_subject: String,
     pub auto_merge: bool,
+    pub shadow: Option<ShadowConfig>,
+}
+
+/// Shadow pilot of an LLM model decider (see `model_shadow`). On when
+/// PIZZA_DELIVERY_SHADOW_MODEL names an Ollama model; it never changes routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShadowConfig {
+    pub url: String,
+    pub model: String,
+    pub sop: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,8 +192,22 @@ impl Config {
             });
         }
         let remote = remote_config(&get)?;
+        let shadow = get("PIZZA_DELIVERY_SHADOW_MODEL")
+            .filter(|m| !matches!(m.to_lowercase().as_str(), "0" | "off" | "false" | "no"))
+            .map(|model| ShadowConfig {
+                url: get("PIZZA_DELIVERY_SHADOW_URL")
+                    .unwrap_or_else(|| "http://localhost:11434".to_owned()),
+                model,
+                sop: get("PIZZA_DELIVERY_TRIAGE_SOP").map(PathBuf::from).or_else(|| {
+                    routing_file
+                        .as_ref()
+                        .and_then(|f| f.path.parent())
+                        .map(|d| d.join("triage-sop.md"))
+                }),
+            });
         Ok(Self {
             remote,
+            shadow,
             auto_merge: !matches!(
                 get("PIZZA_DELIVERY_AUTO_MERGE")
                     .map(|v| v.to_lowercase())

@@ -16,6 +16,7 @@ pub mod inbox;
 pub mod job;
 pub mod mcp;
 pub mod memorize;
+pub mod model_shadow;
 pub mod notify;
 pub mod prompt;
 pub mod quota;
