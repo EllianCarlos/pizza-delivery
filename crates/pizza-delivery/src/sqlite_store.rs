@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     repo            TEXT,
     priority        INTEGER NOT NULL DEFAULT 1,
     submitted_at_ms INTEGER NOT NULL,
-    last_seq        INTEGER NOT NULL
+    last_seq        INTEGER NOT NULL,
+    options         TEXT
 );
 CREATE TABLE IF NOT EXISTS leases (
     stage_id   TEXT PRIMARY KEY,
@@ -66,6 +67,7 @@ impl SqliteStore {
         for migration in [
             "ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE leases ADD COLUMN agent TEXT",
+            "ALTER TABLE jobs ADD COLUMN options TEXT",
         ] {
             let _ = conn.execute(migration, []);
         }
@@ -98,9 +100,15 @@ fn event_row(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> {
 }
 
 fn project(tx: &Transaction<'_>, job: &Job) -> Result<(), StoreError> {
+    let options = job
+        .options
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(backend)?;
     tx.execute(
-        "INSERT INTO jobs (id, state, prompt, repo, priority, submitted_at_ms, last_seq)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO jobs (id, state, prompt, repo, priority, submitted_at_ms, last_seq, options)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET state = excluded.state, repo = excluded.repo,
              priority = excluded.priority, last_seq = excluded.last_seq",
         params![
@@ -110,7 +118,8 @@ fn project(tx: &Transaction<'_>, job: &Job) -> Result<(), StoreError> {
             job.repo,
             job.priority.rank(),
             job.submitted_at_ms,
-            job.last_seq as i64
+            job.last_seq as i64,
+            options
         ],
     )
     .map_err(backend)?;
@@ -135,13 +144,23 @@ fn parse_actor(raw: &str) -> Result<Actor, StoreError> {
         "daemon" => Ok(Actor::Daemon),
         "agent" => Ok(Actor::Agent),
         "human" => Ok(Actor::Human),
+        "remote-human" => Ok(Actor::RemoteHuman),
         other => Err(backend(format!("unknown actor '{other}'"))),
     }
 }
 
-type JobRow = (String, String, String, Option<String>, i64, i64, i64);
+type JobRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+);
 
-const JOB_COLUMNS: &str = "id, state, prompt, repo, submitted_at_ms, last_seq, priority";
+const JOB_COLUMNS: &str = "id, state, prompt, repo, submitted_at_ms, last_seq, priority, options";
 
 fn map_job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
     Ok((
@@ -152,17 +171,22 @@ fn map_job_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
     ))
 }
 
 fn job_from_row(row: JobRow) -> Result<Job, StoreError> {
-    let (id, state, prompt, repo, submitted_at_ms, last_seq, priority) = row;
+    let (id, state, prompt, repo, submitted_at_ms, last_seq, priority, options) = row;
     Ok(Job {
         id: JobId::new(id),
         state: parse_state(&state)?,
         prompt,
         repo,
         priority: Priority::from_rank(priority),
+        options: options
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(backend)?,
         submitted_at_ms,
         last_seq: last_seq as u64,
     })
@@ -185,9 +209,20 @@ fn events_where(
     filter: &str,
     args: &[&dyn rusqlite::ToSql],
 ) -> Result<Vec<Event>, StoreError> {
+    Ok(cursored_where(conn, filter, args)?
+        .into_iter()
+        .map(|(_, e)| e)
+        .collect())
+}
+
+fn cursored_where(
+    conn: &Connection,
+    filter: &str,
+    args: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<(u64, Event)>, StoreError> {
     let mut stmt = conn
         .prepare(&format!(
-            "SELECT id, job_id, stage_id, seq, ts_ms, actor, kind, payload
+            "SELECT id, job_id, stage_id, seq, ts_ms, actor, kind, payload, global_seq
              FROM events WHERE {filter} ORDER BY global_seq"
         ))
         .map_err(backend)?;
@@ -202,25 +237,30 @@ fn events_where(
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
                 r.get::<_, String>(7)?,
+                r.get::<_, i64>(8)?,
             ))
         })
         .map_err(backend)?;
     let mut events = Vec::new();
     for row in rows {
-        let (id, job_id, stage_id, seq, ts_ms, actor, kind, payload) = row.map_err(backend)?;
+        let (id, job_id, stage_id, seq, ts_ms, actor, kind, payload, cursor) =
+            row.map_err(backend)?;
         let body: serde_json::Value = serde_json::from_str(&payload).map_err(backend)?;
         let payload: EventPayload =
             serde_json::from_value(serde_json::json!({"kind": kind, "payload": body}))
                 .map_err(backend)?;
-        events.push(Event {
-            id,
-            job_id: JobId::new(job_id),
-            stage_id,
-            seq: seq as u64,
-            ts_ms,
-            actor: parse_actor(&actor)?,
-            payload,
-        });
+        events.push((
+            cursor as u64,
+            Event {
+                id,
+                job_id: JobId::new(job_id),
+                stage_id,
+                seq: seq as u64,
+                ts_ms,
+                actor: parse_actor(&actor)?,
+                payload,
+            },
+        ));
     }
     Ok(events)
 }
@@ -282,6 +322,27 @@ fn lease_effects(tx: &Transaction<'_>, event: &Event) -> Result<(), StoreError> 
     }
 }
 
+fn append_system(tx: &Transaction<'_>, new: NewEvent) -> Result<Event, StoreError> {
+    let seq: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE job_id = ?1",
+            params![new.job_id.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(backend)?;
+    let event = Event {
+        id: new.id,
+        job_id: new.job_id,
+        stage_id: new.stage_id,
+        seq: seq as u64,
+        ts_ms: new.ts_ms,
+        actor: new.actor,
+        payload: new.payload,
+    };
+    event_row(tx, &event)?;
+    Ok(event)
+}
+
 fn append_in(tx: &Transaction<'_>, new: NewEvent) -> Result<(Event, Job), StoreError> {
     let seq: i64 = tx
         .query_row(
@@ -319,6 +380,8 @@ impl Store for SqliteStore {
                 prompt: new.prompt,
                 repo: new.repo,
                 priority: new.priority,
+                follow_up: new.follow_up,
+                options: new.options,
             },
         };
         let tx = self.conn.transaction().map_err(backend)?;
@@ -341,6 +404,29 @@ impl Store for SqliteStore {
         timeline_in(&self.conn, job)
     }
 
+    fn read_timeline_cursored(&self, job: &JobId) -> Result<Vec<(u64, Event)>, StoreError> {
+        cursored_where(&self.conn, "job_id = ?1", &[&job.as_str()])
+    }
+
+    fn head(&self) -> Result<u64, StoreError> {
+        self.conn
+            .query_row("SELECT COALESCE(MAX(global_seq), 0) FROM events", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n as u64)
+            .map_err(backend)
+    }
+
+    fn events_since(&self, after: u64, limit: usize) -> Result<Vec<(u64, Event)>, StoreError> {
+        let after = after as i64;
+        let limit = limit as i64;
+        cursored_where(
+            &self.conn,
+            "global_seq > ?1 AND global_seq IN (SELECT global_seq FROM events WHERE global_seq > ?1 ORDER BY global_seq LIMIT ?2)",
+            &[&after, &limit],
+        )
+    }
+
     fn quota_events(&self) -> Result<Vec<Event>, StoreError> {
         events_where(
             &self.conn,
@@ -352,6 +438,11 @@ impl Store for SqliteStore {
 
     fn append_event(&mut self, event: NewEvent) -> Result<Event, StoreError> {
         let tx = self.conn.transaction().map_err(backend)?;
+        if event.payload.is_system() {
+            let event = append_system(&tx, event)?;
+            tx.commit().map_err(backend)?;
+            return Ok(event);
+        }
         let (event, _) = append_in(&tx, event)?;
         tx.commit().map_err(backend)?;
         Ok(event)
@@ -511,6 +602,8 @@ mod tests {
             prompt: "p".into(),
             repo: repo.map(str::to_owned),
             priority: Priority::Normal,
+            follow_up: None,
+            options: None,
             submitted_at_ms: 7,
         }
     }
@@ -539,6 +632,8 @@ mod tests {
         NewJob {
             repo: Some(repo.to_owned()),
             priority,
+            follow_up: None,
+            options: None,
             submitted_at_ms: at,
             ..new_job(id, None)
         }
@@ -743,6 +838,30 @@ mod tests {
             .claim_stage(claim_request("b", 300))?
             .ok_or("no reclaim")?;
         assert_eq!((again.stage_id, again.attempt), (claimed.stage_id, 2));
+        Ok(())
+    }
+
+    #[test]
+    fn options_survive_a_reopen_and_old_rows_have_none() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::TempDir::new()?;
+        let path = dir.path().join("l.db");
+        let options = pizza_delivery_core::TriageOptions {
+            template: Some(pizza_delivery_core::triage::Template::BugFix),
+            max_stages: Some(2),
+            risk_flags: vec!["customer-data".into()],
+            ..Default::default()
+        };
+        {
+            let mut s = SqliteStore::open(&path)?;
+            let mut with = new_job("J1", None);
+            with.options = Some(options.clone());
+            s.enqueue_job(with)?;
+            s.enqueue_job(new_job("J2", None))?;
+        }
+        let s = SqliteStore::open(&path)?;
+        let jobs = s.list_jobs()?;
+        assert_eq!(jobs[0].options, Some(options));
+        assert_eq!(jobs[1].options, None);
         Ok(())
     }
 }

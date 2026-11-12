@@ -2,8 +2,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::JobId;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize, ts_rs::TS,
+)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum Priority {
     Low,
     #[default]

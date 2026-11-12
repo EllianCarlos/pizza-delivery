@@ -137,3 +137,80 @@ fn dry_run_without_a_candidate_exits_3() -> TestResult {
     assert!(h.ledger().map(|l| l.is_empty()).unwrap_or(true));
     Ok(())
 }
+
+#[test]
+fn dry_run_reflects_options_and_enqueues_nothing() -> TestResult {
+    let h = Harness::new()?;
+    let repo = h.repo()?;
+    let cli = h.run(&[
+        "--dry-run",
+        "--repo",
+        &repo.to_string_lossy(),
+        "--template",
+        "investigate",
+        "--report-only",
+        "--context",
+        "start with the logs",
+        "--risk",
+        "customer-data",
+        "fix the flaky test",
+    ])?;
+    assert_eq!(cli.code, 0, "stderr: {}", cli.stderr);
+    let line = cli.json_lines()?.into_iter().next().ok_or("no output")?;
+    let triage = &line["outcome"]["triage"];
+    assert_eq!(triage["template"], "investigate");
+    let stages: Vec<&str> = triage["plan"]
+        .as_array()
+        .ok_or("no plan")?
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert_eq!(stages, vec!["investigate", "grill"]);
+    assert!(triage["task"]
+        .as_str()
+        .is_some_and(|t| t.contains("Hint: start with the logs")));
+    assert_eq!(triage["risk_flags"][0], "customer-data");
+    assert!(line["outcome"]["feedback"].as_array().is_some_and(|f| f
+        .iter()
+        .any(|x| x["kind"] == "assumption" && x["severity"] == "low")));
+    assert!(h.ledger()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn dry_run_rejects_invalid_options() -> TestResult {
+    let h = Harness::new()?;
+    let cli = h.run(&["--dry-run", "--max-stages", "0", "x"])?;
+    assert_eq!(cli.code, 2, "stderr: {}", cli.stderr);
+    Ok(())
+}
+
+#[test]
+fn a_submitted_jobs_plan_honours_report_only_and_max_stages() -> TestResult {
+    let h = Harness::new()?;
+    let repo = h.repo()?;
+    let cli = h.run(&[
+        "--repo",
+        &repo.to_string_lossy(),
+        "--report-only",
+        "--max-stages",
+        "1",
+        "fix the flaky test",
+    ])?;
+    let id = cli.json_lines()?[0]["id"]
+        .as_str()
+        .ok_or("no id")?
+        .to_owned();
+    h.wait_for_end(&id)?;
+    let ledger = h.ledger()?;
+    let triage = ledger
+        .iter()
+        .find(|r| r.kind == "triage-completed")
+        .ok_or("no triage-completed")?;
+    let plan = triage.payload["triage"]["plan"]
+        .as_array()
+        .ok_or("no plan")?;
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0]["name"], "grill");
+    Ok(())
+}

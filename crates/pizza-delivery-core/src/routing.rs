@@ -45,7 +45,7 @@ impl AdapterKind {
     }
 }
 
-const SKILL_DRIVEN_STAGES: [&str; 4] = ["self-grill", "to-spec", "implement-spec", "code-review"];
+const SKILL_DRIVEN_STAGES: [&str; 5] = ["grill", "spec", "implement", "fix", "review"];
 
 pub fn stage_capabilities(stage: &str) -> Vec<Capability> {
     if SKILL_DRIVEN_STAGES.contains(&stage) {
@@ -319,7 +319,7 @@ chain = [
 ]
 
 [[rules]]
-stage = "to-spec"
+stage = "spec"
 tier = "premium"
 repo = "big-repo"
 chain = [
@@ -400,11 +400,11 @@ chain = [
         let premium = RouteRequest {
             tier: "premium",
             repo: Some("/src/big-repo"),
-            ..req("to-spec", &[Capability::Skills])
+            ..req("spec", &[Capability::Skills])
         };
         let other_repo = RouteRequest {
             tier: "premium",
-            ..req("to-spec", &[Capability::Skills])
+            ..req("spec", &[Capability::Skills])
         };
         let quota = QuotaSnapshot::default();
         assert_eq!(
@@ -425,15 +425,23 @@ chain = [
 
     #[test]
     fn skill_driven_stages_route_only_to_skill_capable_adapters() {
-        let needs = stage_capabilities("implement-spec");
-        let routed = route(
-            &config(),
-            &req("implement-spec", &needs),
-            &QuotaSnapshot::default(),
-            0,
-        );
-        assert_eq!(needs, vec![Capability::Skills]);
-        assert_eq!(routed.as_ref().map(agents), Ok(vec!["claude"]));
+        for stage in ["grill", "spec", "implement", "fix", "review"] {
+            let needs = stage_capabilities(stage);
+            let routed = route(&config(), &req(stage, &needs), &QuotaSnapshot::default(), 0);
+            assert_eq!(needs, vec![Capability::Skills], "{stage}");
+            let candidates = routed.map(|r| r.candidates).unwrap_or_default();
+            assert!(!candidates.is_empty(), "{stage}");
+            assert!(
+                candidates.iter().all(|c| config()
+                    .agents
+                    .get(&c.agent)
+                    .is_some_and(|a| a.adapter.has(&needs))),
+                "{stage}"
+            );
+        }
+        for stage in ["triage", "investigate"] {
+            assert_eq!(stage_capabilities(stage), vec![], "{stage}");
+        }
     }
 
     #[test]
@@ -454,14 +462,14 @@ chain = [
 adapter = "agy"
 command = "agy"
 [[rules]]
-stage = "code-review"
+stage = "review"
 chain = [{ agent = "agy" }]
 "#,
         );
         let routed = only_cheap.map(|c| {
             route(
                 &c,
-                &req("code-review", &[Capability::Skills]),
+                &req("review", &[Capability::Skills]),
                 &QuotaSnapshot::default(),
                 0,
             )
@@ -469,7 +477,7 @@ chain = [{ agent = "agy" }]
         assert_eq!(
             routed,
             Ok(Err(RouteError::NoCapableAgent {
-                stage: "code-review".into()
+                stage: "review".into()
             }))
         );
     }

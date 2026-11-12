@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, EventPayload};
-use crate::gate::Impact;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -198,6 +197,7 @@ pub enum Template {
     FullFeature,
     BugFix,
     Investigate,
+    Report,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,7 +216,102 @@ pub struct Triage {
 }
 
 pub const DEFAULT_MAX_STAGES: usize = 10;
+pub const MAX_HINT_CHARS: usize = 2000;
+pub const MAX_RISK_FLAG_CHARS: usize = 40;
 
+/// Optional "Additional Parameters" a submitter can give to sharpen triage.
+/// Every field is optional; all unset means the heuristics decide alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriageOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<Template>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub report_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_stages: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risk_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionsError {
+    MaxStagesOutOfRange { max: usize },
+    BlankHint,
+    HintTooLong { chars: usize },
+    BadRiskFlag(String),
+}
+
+impl std::fmt::Display for OptionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxStagesOutOfRange { max } => write!(
+                f,
+                "max stages must be between 1 and {DEFAULT_MAX_STAGES}, got {max}"
+            ),
+            Self::BlankHint => write!(f, "context hint must not be blank"),
+            Self::HintTooLong { chars } => write!(
+                f,
+                "context hint is {chars} characters; the limit is {MAX_HINT_CHARS}"
+            ),
+            Self::BadRiskFlag(flag) => write!(
+                f,
+                "risk flag {flag:?} must be kebab-case (lowercase letters, digits, '-') and at most {MAX_RISK_FLAG_CHARS} characters"
+            ),
+        }
+    }
+}
+
+impl TriageOptions {
+    /// True when no option is set, so the request is equivalent to none.
+    pub fn is_empty(&self) -> bool {
+        self.template.is_none()
+            && !self.report_only
+            && self.max_stages.is_none()
+            && self.context_hint.is_none()
+            && self.risk_flags.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<(), OptionsError> {
+        if let Some(max) = self.max_stages {
+            if max == 0 || max > DEFAULT_MAX_STAGES {
+                return Err(OptionsError::MaxStagesOutOfRange { max });
+            }
+        }
+        if let Some(hint) = &self.context_hint {
+            let trimmed = hint.trim();
+            if trimmed.is_empty() {
+                return Err(OptionsError::BlankHint);
+            }
+            let chars = trimmed.chars().count();
+            if chars > MAX_HINT_CHARS {
+                return Err(OptionsError::HintTooLong { chars });
+            }
+        }
+        for flag in &self.risk_flags {
+            let ok = !flag.is_empty()
+                && flag.chars().count() <= MAX_RISK_FLAG_CHARS
+                && !flag.starts_with('-')
+                && !flag.ends_with('-')
+                && flag
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            if !ok {
+                return Err(OptionsError::BadRiskFlag(flag.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
+const REPORT_WORDS: [&str; 5] = [
+    "report only",
+    "report-only",
+    "just a report",
+    "no pull request",
+    "without a pr",
+];
 const INVESTIGATE_WORDS: [&str; 7] = [
     "investigate",
     "research",
@@ -259,7 +354,9 @@ fn has_any(haystack: &str, words: &[&str]) -> bool {
 
 pub fn classify(prompt: &str) -> Template {
     let lower = prompt.to_lowercase();
-    if has_any(&lower, &INVESTIGATE_WORDS) {
+    if has_any(&lower, &REPORT_WORDS) {
+        Template::Report
+    } else if has_any(&lower, &INVESTIGATE_WORDS) {
         Template::Investigate
     } else if has_any(&lower, &BUG_WORDS) {
         Template::BugFix
@@ -272,6 +369,15 @@ fn stage(name: &str, reason: &str) -> PlannedStage {
     PlannedStage {
         name: name.to_owned(),
         reason: reason.to_owned(),
+    }
+}
+
+pub fn template_name(template: Template) -> &'static str {
+    match template {
+        Template::FullFeature => "full-feature",
+        Template::BugFix => "bug-fix",
+        Template::Investigate => "investigate",
+        Template::Report => "report",
     }
 }
 
@@ -298,6 +404,7 @@ pub fn plan_for(template: Template) -> Vec<PlannedStage> {
             ship,
         ],
         Template::BugFix => vec![grill, implement, review, ship],
+        Template::Report => vec![stage("investigate", "gather findings into a report")],
         Template::Investigate => vec![
             stage("investigate", "gather findings before deciding anything"),
             stage("grill", "decide whether a pull request is needed"),
@@ -317,25 +424,71 @@ pub fn risk_flags(prompt: &str) -> Vec<String> {
         .collect()
 }
 
-fn restate(prompt: &str, repo: &Resolution, template: Template) -> String {
+fn restate(prompt: &str, repo: &Resolution, template: Template, hint: Option<&str>) -> String {
     let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let hint = hint
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(|h| {
+            format!(
+                "\nHint: {}",
+                h.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "Task: {flat}\nRepository: {}\nApproach: {}",
+        "Task: {flat}\nRepository: {}\nApproach: {}{hint}",
         repo.path,
         match template {
             Template::FullFeature => "build a new capability from spec to pull request",
             Template::BugFix => "diagnose and fix a defect, then ship the fix",
             Template::Investigate => "investigate first, then decide whether a change is needed",
+            Template::Report => "investigate and end with a report, no pull request",
         }
     )
 }
 
 pub fn triage(prompt: &str, repo: Resolution) -> Triage {
-    let template = classify(prompt);
+    triage_with(prompt, repo, None)
+}
+
+/// Stages `report_only` removes: everything that changes or ships code.
+const SHIPPING_STAGES: [&str; 3] = ["implement", "review", "ship"];
+
+/// Plan for a template with the submitter's options applied.
+pub fn plan_with(template: Template, options: Option<&TriageOptions>) -> Vec<PlannedStage> {
+    let mut plan = plan_for(template);
+    if let Some(options) = options {
+        if options.report_only {
+            plan.retain(|s| !SHIPPING_STAGES.contains(&s.name.as_str()));
+        }
+        if let Some(max) = options.max_stages {
+            plan.truncate(max.max(1));
+        }
+    }
+    plan
+}
+
+/// Triage with the submitter's options applied as hard overrides.
+pub fn triage_with(prompt: &str, repo: Resolution, options: Option<&TriageOptions>) -> Triage {
+    let template = options
+        .and_then(|o| o.template)
+        .unwrap_or_else(|| classify(prompt));
+    let mut flags = risk_flags(prompt);
+    for extra in options.iter().flat_map(|o| o.risk_flags.iter()) {
+        if !flags.contains(extra) {
+            flags.push(extra.clone());
+        }
+    }
     Triage {
-        task: restate(prompt, &repo, template),
-        plan: plan_for(template),
-        risk_flags: risk_flags(prompt),
+        task: restate(
+            prompt,
+            &repo,
+            template,
+            options.and_then(|o| o.context_hint.as_deref()),
+        ),
+        plan: plan_with(template, options),
+        risk_flags: flags,
         template,
         repo,
     }
@@ -375,7 +528,7 @@ pub struct Feedback {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub impact: Option<Impact>,
+    pub impact: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
 }
@@ -415,6 +568,14 @@ pub fn resolve_repo(
 }
 
 pub fn conclude(prompt: &str, resolution: Option<Resolution>) -> Outcome {
+    conclude_with(prompt, resolution, None)
+}
+
+pub fn conclude_with(
+    prompt: &str,
+    resolution: Option<Resolution>,
+    options: Option<&TriageOptions>,
+) -> Outcome {
     match resolution {
         None => Outcome {
             triage: None,
@@ -426,7 +587,7 @@ pub fn conclude(prompt: &str, resolution: Option<Resolution>) -> Outcome {
             )],
         },
         Some(resolution) => {
-            let feedback = if resolution.is_low() {
+            let mut feedback = if resolution.is_low() {
                 vec![Feedback::new(
                     "assumption",
                     "medium",
@@ -440,8 +601,26 @@ pub fn conclude(prompt: &str, resolution: Option<Resolution>) -> Outcome {
             } else {
                 vec![]
             };
+            if let Some(chosen) = options.and_then(|o| o.template) {
+                let heuristic = classify(prompt);
+                if chosen != heuristic {
+                    feedback.push(Feedback {
+                        kind: "assumption".to_owned(),
+                        severity: "low".to_owned(),
+                        text: format!(
+                            "template {} was requested and overrides the heuristic choice {}",
+                            template_name(chosen),
+                            template_name(heuristic)
+                        ),
+                        confidence: None,
+                        alternatives: Vec::new(),
+                        impact: None,
+                        evidence: None,
+                    });
+                }
+            }
             Outcome {
-                triage: Some(triage(prompt, resolution)),
+                triage: Some(triage_with(prompt, resolution, options)),
                 feedback,
             }
         }
@@ -700,6 +879,15 @@ mod tests {
     }
 
     #[test]
+    fn report_only_prompts_get_a_plan_without_a_ship_stage() {
+        assert_eq!(
+            classify("investigate the flaky test, report only"),
+            Template::Report
+        );
+        assert_eq!(names(&plan_for(Template::Report)), vec!["investigate"]);
+    }
+
+    #[test]
     fn the_current_plan_folds_the_triage_plan_and_accepted_amendments_only() {
         let result = triage("fix it", explicit("/r"));
         let events = [
@@ -771,5 +959,188 @@ mod tests {
         assert_eq!(parse_choice("none", 3), None);
         let top = tied(rank(None, "fix the pizza ordering", &index()));
         assert!(tiebreak_prompt("fix", &top).contains("2. pizza-web (/p/pizza-web)"));
+    }
+
+    fn opts() -> TriageOptions {
+        TriageOptions::default()
+    }
+
+    #[test]
+    fn no_options_is_identity() {
+        let a = triage("fix the crash", explicit("/r"));
+        assert_eq!(a, triage_with("fix the crash", explicit("/r"), None));
+        assert_eq!(
+            a,
+            triage_with("fix the crash", explicit("/r"), Some(&opts()))
+        );
+        assert!(opts().is_empty());
+    }
+
+    #[test]
+    fn template_override_replaces_template_and_plan() {
+        let o = TriageOptions {
+            template: Some(Template::Investigate),
+            ..opts()
+        };
+        let t = triage_with("fix the crash", explicit("/r"), Some(&o));
+        assert_eq!(t.template, Template::Investigate);
+        assert_eq!(names(&t.plan)[0], "investigate");
+    }
+
+    #[test]
+    fn disagreeing_override_adds_one_low_assumption() {
+        let o = TriageOptions {
+            template: Some(Template::BugFix),
+            ..opts()
+        };
+        let outcome = conclude_with("investigate the slow build", Some(explicit("/r")), Some(&o));
+        assert_eq!(outcome.feedback.len(), 1);
+        let f = &outcome.feedback[0];
+        assert_eq!(
+            (f.kind.as_str(), f.severity.as_str()),
+            ("assumption", "low")
+        );
+        assert!(f.text.contains("bug-fix") && f.text.contains("investigate"));
+    }
+
+    #[test]
+    fn agreeing_override_adds_no_feedback() {
+        let o = TriageOptions {
+            template: Some(Template::BugFix),
+            ..opts()
+        };
+        let outcome = conclude_with("fix the crash", Some(explicit("/r")), Some(&o));
+        assert!(outcome.feedback.is_empty());
+    }
+
+    #[test]
+    fn report_only_drops_shipping_stages_for_every_template() {
+        let o = TriageOptions {
+            report_only: true,
+            ..opts()
+        };
+        for template in [
+            Template::FullFeature,
+            Template::BugFix,
+            Template::Investigate,
+        ] {
+            let plan = plan_with(template, Some(&o));
+            assert!(!plan.is_empty());
+            assert!(plan
+                .iter()
+                .all(|s| !["implement", "review", "ship"].contains(&s.name.as_str())));
+        }
+    }
+
+    #[test]
+    fn max_stages_keeps_leading_stages_and_at_least_one() {
+        let o = TriageOptions {
+            max_stages: Some(2),
+            ..opts()
+        };
+        let t = triage_with("build a thing", explicit("/r"), Some(&o));
+        assert_eq!(names(&t.plan), vec!["grill", "spec"]);
+        let one = TriageOptions {
+            max_stages: Some(1),
+            ..opts()
+        };
+        assert_eq!(plan_with(Template::BugFix, Some(&one)).len(), 1);
+    }
+
+    #[test]
+    fn report_only_and_max_stages_combine() {
+        let o = TriageOptions {
+            report_only: true,
+            max_stages: Some(1),
+            ..opts()
+        };
+        let t = triage_with("investigate it", explicit("/r"), Some(&o));
+        assert_eq!(names(&t.plan), vec!["investigate"]);
+    }
+
+    #[test]
+    fn hint_is_appended_to_the_task_without_changing_template() {
+        let o = TriageOptions {
+            context_hint: Some("  see   docs/x.md \n".into()),
+            ..opts()
+        };
+        let t = triage_with("build a thing", explicit("/r"), Some(&o));
+        assert!(t.task.ends_with("\nHint: see docs/x.md"));
+        assert_eq!(t.template, Template::FullFeature);
+    }
+
+    #[test]
+    fn extra_risk_flags_merge_without_duplicates_heuristic_first() {
+        let o = TriageOptions {
+            risk_flags: vec![
+                "production".into(),
+                "customer-data".into(),
+                "customer-data".into(),
+            ],
+            ..opts()
+        };
+        let t = triage_with("fix the production crash", explicit("/r"), Some(&o));
+        assert_eq!(t.risk_flags, vec!["production", "customer-data"]);
+    }
+
+    #[test]
+    fn validation_rejects_bad_values() {
+        let bad = |o: TriageOptions| o.validate().err().unwrap_or(OptionsError::BlankHint);
+        assert_eq!(
+            bad(TriageOptions {
+                max_stages: Some(0),
+                ..opts()
+            }),
+            OptionsError::MaxStagesOutOfRange { max: 0 }
+        );
+        assert_eq!(
+            bad(TriageOptions {
+                max_stages: Some(DEFAULT_MAX_STAGES + 1),
+                ..opts()
+            }),
+            OptionsError::MaxStagesOutOfRange {
+                max: DEFAULT_MAX_STAGES + 1
+            }
+        );
+        assert_eq!(
+            bad(TriageOptions {
+                context_hint: Some("  \n".into()),
+                ..opts()
+            }),
+            OptionsError::BlankHint
+        );
+        assert!(matches!(
+            bad(TriageOptions {
+                context_hint: Some("x".repeat(MAX_HINT_CHARS + 1)),
+                ..opts()
+            }),
+            OptionsError::HintTooLong { .. }
+        ));
+        for flag in ["", "Bad", "-x", "x-", "a b"] {
+            assert!(matches!(
+                bad(TriageOptions {
+                    risk_flags: vec![flag.into()],
+                    ..opts()
+                }),
+                OptionsError::BadRiskFlag(_)
+            ));
+        }
+        let ok = TriageOptions {
+            max_stages: Some(DEFAULT_MAX_STAGES),
+            context_hint: Some("x".repeat(MAX_HINT_CHARS)),
+            risk_flags: vec!["customer-data".into()],
+            ..opts()
+        };
+        assert_eq!(ok.validate(), Ok(()));
+    }
+
+    #[test]
+    fn options_serde_omits_unset_fields() -> Result<(), serde_json::Error> {
+        assert_eq!(serde_json::to_string(&opts())?, "{}");
+        let o: TriageOptions =
+            serde_json::from_str(r#"{"template":"bug-fix","report_only":true}"#)?;
+        assert_eq!(o.template, Some(Template::BugFix));
+        assert!(o.report_only);
+        Ok(())
     }
 }

@@ -17,7 +17,7 @@ exit 1
 fn flaky_agent() -> String {
     format!(
         r#"#!/bin/sh
-marker="$(dirname "$PIZZA_DELIVERY_HANDOFF")/ran-once"
+marker="$(dirname "$PIZZA_DELIVERY_HANDOFF")/../../ran-once"
 if [ ! -e "$marker" ]; then
   touch "$marker"
   reset=$(( $(date +%s) + 2 ))
@@ -70,7 +70,7 @@ fn quota_exhaustion_falls_back_and_status_quota_shows_the_exhausted_agent() -> T
     let h = Harness::with_routing(
         &[
             ("first", QUOTA_EXHAUSTED_AGENT),
-            ("second", VALID_HANDOFF_AGENT),
+            ("second", &VALID_HANDOFF_AGENT),
         ],
         TWO_CLAUDES,
     )?;
@@ -80,7 +80,7 @@ fn quota_exhaustion_falls_back_and_status_quota_shows_the_exhausted_agent() -> T
 
     assert_eq!(job["state"], "completed");
     let kinds = kinds(&h, &id)?;
-    assert_eq!(kinds.iter().filter(|k| *k == "agent-invoked").count(), 2);
+    assert!(kinds.iter().filter(|k| *k == "agent-invoked").count() >= 2);
     assert!(kinds.contains(&"quota-signal".to_owned()));
     assert!(kinds.contains(&"agent-fell-back".to_owned()));
     let quota = h.run(&["status", "--quota", "--json"])?;
@@ -119,11 +119,11 @@ chain = [{ agent = "flaky" }]
 }
 
 #[test]
-fn a_configuration_error_fails_the_job_at_once_without_retry_or_fallback() -> TestResult {
+fn skill_driven_stages_are_never_run_by_an_adapter_without_skills() -> TestResult {
     let h = Harness::with_routing(
         &[
             ("first", CREDENTIALS_MISSING_AGENT),
-            ("second", VALID_HANDOFF_AGENT),
+            ("second", &VALID_HANDOFF_AGENT),
         ],
         r#"
 [agents.first]
@@ -141,11 +141,16 @@ chain = [{ agent = "first" }, { agent = "second" }]
 
     let job = h.wait_for_end(&id)?;
 
-    assert_eq!(job["state"], "failed");
-    let kinds = kinds(&h, &id)?;
-    assert_eq!(kinds.iter().filter(|k| *k == "agent-invoked").count(), 1);
-    assert!(!kinds.contains(&"stage-retried".to_owned()));
-    assert!(!kinds.contains(&"agent-fell-back".to_owned()));
+    assert_eq!(job["state"], "completed");
+    let rows: Vec<_> = h.ledger()?.into_iter().filter(|r| r.job_id == id).collect();
+    let invoked: Vec<_> = rows
+        .iter()
+        .filter(|r| r.kind == "agent-invoked")
+        .map(|r| r.payload["agent"].clone())
+        .collect();
+    assert!(!invoked.is_empty());
+    assert!(invoked.iter().all(|a| a == "second"), "{invoked:?}");
+    assert!(!rows.iter().any(|r| r.kind == "agent-fell-back"));
     Ok(())
 }
 

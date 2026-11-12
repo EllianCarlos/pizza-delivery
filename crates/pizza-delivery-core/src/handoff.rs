@@ -51,7 +51,7 @@ fn field(front: &str, key: &'static str) -> Result<String, HandoffError> {
         .ok_or(HandoffError::MissingField(key))
 }
 
-fn sections(body: &str) -> Vec<(String, String)> {
+pub(crate) fn sections(body: &str) -> Vec<(String, String)> {
     body.lines().fold(Vec::new(), |mut acc, line| {
         match line.strip_prefix("## ") {
             Some(title) => acc.push((title.trim().to_lowercase(), String::new())),
@@ -64,6 +64,10 @@ fn sections(body: &str) -> Vec<(String, String)> {
         }
         acc
     })
+}
+
+pub(crate) fn body(text: &str) -> Option<&str> {
+    split_frontmatter(text).map(|(_, body)| body)
 }
 
 pub fn validate(text: &str) -> Result<Handoff, HandoffError> {

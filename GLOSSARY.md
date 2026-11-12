@@ -23,3 +23,5 @@
 **Board**: the view that groups jobs into one column per job state.
 
 **Pipeline**: the view that shows one lane per job with one segment per stage.
+
+**Triage options**: the optional "Additional Parameters" a submitter can give with a job (template, report-only, max stages, context hint, extra risk flags) to override or sharpen what triage would decide from the prompt alone.
