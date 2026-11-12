@@ -2,11 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import Alert from "@cloudscape-design/components/alert";
 import AppLayout from "@cloudscape-design/components/app-layout";
 import Button from "@cloudscape-design/components/button";
+import Checkbox from "@cloudscape-design/components/checkbox";
+import ExpandableSection from "@cloudscape-design/components/expandable-section";
 import Form from "@cloudscape-design/components/form";
 import FormField from "@cloudscape-design/components/form-field";
 import Header from "@cloudscape-design/components/header";
 import Input from "@cloudscape-design/components/input";
 import Modal from "@cloudscape-design/components/modal";
+import Select from "@cloudscape-design/components/select";
 import SegmentedControl from "@cloudscape-design/components/segmented-control";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import Container from "@cloudscape-design/components/container";
@@ -17,6 +20,7 @@ import { usePolled } from "./hooks";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobView } from "./generated/JobView";
 import { hashFor, jobFromPath, landingRoute, pipelineLanes, routeFromHash, STATE_ORDER, type Route } from "./model";
+import { buildOptions, emptyOptionFields, type OptionFields } from "./options";
 import { enablePush, pushSupported } from "./push";
 import { ArtifactBrowser, DetailPanel, EventsPanel, InboxPanel } from "./panels";
 import { BoardView, PipelineView, TableView } from "./views";
@@ -27,7 +31,16 @@ type ViewName = "table" | "board" | "pipeline";
 function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onClose: () => void; onSubmitted: () => void }) {
   const [prompt, setPrompt] = useState("");
   const [repo, setRepo] = useState("");
+  const [fields, setFields] = useState<OptionFields>(emptyOptionFields);
   const [error, setError] = useState<string | null>(null);
+  const set = (patch: Partial<OptionFields>) => setFields((f) => ({ ...f, ...patch }));
+  const templates = [
+    { value: "", label: "Automatic" },
+    { value: "full-feature", label: "full-feature" },
+    { value: "bug-fix", label: "bug-fix" },
+    { value: "investigate", label: "investigate" },
+    { value: "report", label: "report" },
+  ];
   return (
     <Modal
       visible={visible}
@@ -39,9 +52,10 @@ function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onCl
           disabled={prompt.trim() === ""}
           onClick={async () => {
             try {
-              await api.submit(prompt, repo || undefined);
+              await api.submit(prompt, repo || undefined, undefined, buildOptions(fields));
               setPrompt("");
               setRepo("");
+              setFields(emptyOptionFields);
               setError(null);
               onSubmitted();
               onClose();
@@ -63,6 +77,33 @@ function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onCl
           <FormField label="Repository (optional)">
             <Input value={repo} onChange={({ detail }) => setRepo(detail.value)} />
           </FormField>
+          <ExpandableSection
+            headerText="Additional Parameters"
+            expanded={fields.open}
+            onChange={({ detail }) => set({ open: detail.expanded })}
+          >
+            <SpaceBetween size="m">
+              <FormField label="Template">
+                <Select
+                  selectedOption={templates.find((t) => t.value === fields.template) ?? templates[0]!}
+                  options={templates}
+                  onChange={({ detail }) => set({ template: detail.selectedOption.value as OptionFields["template"] })}
+                />
+              </FormField>
+              <Checkbox checked={fields.reportOnly} onChange={({ detail }) => set({ reportOnly: detail.checked })}>
+                Report only
+              </Checkbox>
+              <FormField label="Max stages" description="1 to 10">
+                <Input value={fields.maxStages} inputMode="numeric" onChange={({ detail }) => set({ maxStages: detail.value })} />
+              </FormField>
+              <FormField label="Context hint">
+                <Textarea value={fields.contextHint} onChange={({ detail }) => set({ contextHint: detail.value })} />
+              </FormField>
+              <FormField label="Risk flags" description="Comma-separated, kebab-case">
+                <Input value={fields.riskFlags} onChange={({ detail }) => set({ riskFlags: detail.value })} />
+              </FormField>
+            </SpaceBetween>
+          </ExpandableSection>
         </SpaceBetween>
       </Form>
     </Modal>

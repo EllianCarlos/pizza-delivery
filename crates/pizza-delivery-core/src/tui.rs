@@ -6,6 +6,7 @@ use crate::id::{short_id, JobId};
 use crate::inbox::{fold_inbox, EntryStatus, InboxEntry};
 use crate::job::{apply, Job, JobState};
 use crate::stage::{fold_stages, StageState};
+use crate::triage::{Template, TriageOptions};
 use crate::view::{
     board_view, event_from_view, job_detail, plan_view, BoardView, EventView, JobDetailView,
 };
@@ -83,7 +84,7 @@ impl ViewKind {
 pub enum Mode {
     Normal,
     Reply { targets: Vec<String>, text: String },
-    NewJob { text: String },
+    NewJob { form: NewJobForm },
     ConfirmCancel { job: String },
 }
 
@@ -111,12 +112,24 @@ pub enum Key {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Quit,
-    Submit { prompt: String },
-    Reply { targets: Vec<String>, text: String },
-    Dismiss { entries: Vec<String> },
-    Cancel { job: String },
+    Submit {
+        prompt: String,
+        options: Option<TriageOptions>,
+    },
+    Reply {
+        targets: Vec<String>,
+        text: String,
+    },
+    Dismiss {
+        entries: Vec<String>,
+    },
+    Cancel {
+        job: String,
+    },
     OpenWeb,
-    OpenPr { url: String },
+    OpenPr {
+        url: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -498,18 +511,26 @@ impl Model {
                     None
                 }
             },
-            Mode::NewJob { mut text } => match edit(&mut text, &key) {
-                Edit::Submit if !text.trim().is_empty() => {
-                    self.mode = Mode::Normal;
-                    Some(Command::Submit { prompt: text })
-                }
-                Edit::Submit => None,
-                Edit::Cancel => {
+            Mode::NewJob { mut form } => match form.key(&key) {
+                FormStep::Submit => match form.to_command() {
+                    Ok(command) => {
+                        self.mode = Mode::Normal;
+                        Some(command)
+                    }
+                    Err(reason) => {
+                        if !reason.is_empty() {
+                            self.set_notice(reason);
+                        }
+                        self.mode = Mode::NewJob { form };
+                        None
+                    }
+                },
+                FormStep::Cancel => {
                     self.mode = Mode::Normal;
                     None
                 }
-                Edit::Continue => {
-                    self.mode = Mode::NewJob { text };
+                FormStep::Continue => {
+                    self.mode = Mode::NewJob { form };
                     None
                 }
             },
@@ -540,7 +561,7 @@ impl Model {
             Key::Enter => self.detail_open = !self.detail_open,
             Key::Char('n') => {
                 self.mode = Mode::NewJob {
-                    text: String::new(),
+                    form: NewJobForm::default(),
                 }
             }
             Key::Char('o') => return Some(Command::OpenWeb),
@@ -622,6 +643,179 @@ impl Model {
                 None
             }
         }
+    }
+}
+
+/// Where the new-job form cursor is. The option rows exist only while the
+/// "Additional Parameters" group is expanded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormField {
+    Prompt,
+    Expander,
+    Template,
+    ReportOnly,
+    MaxStages,
+    ContextHint,
+    RiskFlags,
+}
+
+const OPTION_FIELDS: [FormField; 5] = [
+    FormField::Template,
+    FormField::ReportOnly,
+    FormField::MaxStages,
+    FormField::ContextHint,
+    FormField::RiskFlags,
+];
+
+/// The new-job form: a prompt plus a collapsed "Additional Parameters" group.
+/// Option fields are free text; the daemon stays the validation authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewJobForm {
+    pub prompt: String,
+    pub open: bool,
+    pub focus: FormField,
+    pub template: String,
+    pub report_only: bool,
+    pub max_stages: String,
+    pub context_hint: String,
+    pub risk_flags: String,
+}
+
+impl Default for NewJobForm {
+    fn default() -> Self {
+        NewJobForm {
+            prompt: String::new(),
+            open: false,
+            focus: FormField::Prompt,
+            template: String::new(),
+            report_only: false,
+            max_stages: String::new(),
+            context_hint: String::new(),
+            risk_flags: String::new(),
+        }
+    }
+}
+
+pub enum FormStep {
+    Continue,
+    Submit,
+    Cancel,
+}
+
+impl NewJobForm {
+    /// Focus order: prompt, expander, then the five options when expanded.
+    pub fn order(&self) -> Vec<FormField> {
+        let mut order = vec![FormField::Prompt, FormField::Expander];
+        if self.open {
+            order.extend(OPTION_FIELDS);
+        }
+        order
+    }
+
+    fn shift(&mut self, delta: isize) {
+        let order = self.order();
+        let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
+        let next = at.saturating_add_signed(delta).min(order.len() - 1);
+        self.focus = order[next];
+    }
+
+    fn toggle(&mut self) {
+        self.open = !self.open;
+        if !self.open && self.focus != FormField::Prompt {
+            self.focus = FormField::Expander;
+        }
+    }
+
+    fn text_mut(&mut self) -> Option<&mut String> {
+        match self.focus {
+            FormField::Prompt => Some(&mut self.prompt),
+            FormField::Template => Some(&mut self.template),
+            FormField::MaxStages => Some(&mut self.max_stages),
+            FormField::ContextHint => Some(&mut self.context_hint),
+            FormField::RiskFlags => Some(&mut self.risk_flags),
+            FormField::Expander | FormField::ReportOnly => None,
+        }
+    }
+
+    pub fn key(&mut self, key: &Key) -> FormStep {
+        match key {
+            Key::Esc => return FormStep::Cancel,
+            Key::Tab | Key::Down => self.shift(1),
+            Key::Up => self.shift(-1),
+            Key::Enter if self.focus == FormField::Expander => self.toggle(),
+            Key::Enter => return FormStep::Submit,
+            Key::Left | Key::Right if self.focus == FormField::Expander => self.toggle(),
+            Key::Char(' ') if self.focus == FormField::Expander => self.toggle(),
+            Key::Char(' ') if self.focus == FormField::ReportOnly => {
+                self.report_only = !self.report_only;
+            }
+            Key::Backspace => {
+                if let Some(text) = self.text_mut() {
+                    text.pop();
+                }
+            }
+            Key::Char(c) => {
+                if let Some(text) = self.text_mut() {
+                    text.push(*c);
+                }
+            }
+            _ => {}
+        }
+        FormStep::Continue
+    }
+
+    /// Options as the CLI would send them: absent when the group is closed or
+    /// every field is empty. Only the template name is checked here.
+    pub fn options(&self) -> Result<Option<TriageOptions>, String> {
+        if !self.open {
+            return Ok(None);
+        }
+        let template = match self.template.trim() {
+            "" => None,
+            "full-feature" => Some(Template::FullFeature),
+            "bug-fix" => Some(Template::BugFix),
+            "investigate" => Some(Template::Investigate),
+            "report" => Some(Template::Report),
+            other => {
+                return Err(format!(
+                    "template {other:?} must be full-feature, bug-fix, investigate or report"
+                ))
+            }
+        };
+        let max_stages = match self.max_stages.trim() {
+            "" => None,
+            n => Some(
+                n.parse::<usize>()
+                    .map_err(|_| format!("max stages {n:?} is not a number"))?,
+            ),
+        };
+        let hint = self.context_hint.trim();
+        let options = TriageOptions {
+            template,
+            report_only: self.report_only,
+            max_stages,
+            context_hint: (!hint.is_empty()).then(|| hint.to_owned()),
+            risk_flags: self
+                .risk_flags
+                .split(',')
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        };
+        Ok((!options.is_empty()).then_some(options))
+    }
+
+    /// The submit command, or the reason it cannot be sent yet (empty reason
+    /// means a blank prompt, which is simply ignored).
+    pub fn to_command(&self) -> Result<Command, String> {
+        if self.prompt.trim().is_empty() {
+            return Err(String::new());
+        }
+        Ok(Command::Submit {
+            prompt: self.prompt.clone(),
+            options: self.options()?,
+        })
     }
 }
 
@@ -1000,7 +1194,8 @@ mod tests {
         assert_eq!(
             press(&mut model, &keys),
             [Command::Submit {
-                prompt: "fix the build".into()
+                prompt: "fix the build".into(),
+                options: None
             }]
         );
     }
@@ -1010,6 +1205,100 @@ mod tests {
         let mut model = Model::new();
         assert!(press(&mut model, &[Key::Char('n'), Key::Enter]).is_empty());
         assert!(matches!(model.mode(), Mode::NewJob { .. }));
+    }
+
+    fn form_of(model: &Model) -> NewJobForm {
+        assert!(matches!(model.mode(), Mode::NewJob { .. }));
+        match model.mode() {
+            Mode::NewJob { form } => form.clone(),
+            _ => NewJobForm::default(),
+        }
+    }
+
+    #[test]
+    fn additional_parameters_start_collapsed_and_tab_skips_them() {
+        let mut model = Model::new();
+        press(&mut model, &[Key::Char('n')]);
+        let form = form_of(&model);
+        assert!(!form.open);
+        assert_eq!(form.order(), [FormField::Prompt, FormField::Expander]);
+        press(&mut model, &[Key::Tab, Key::Tab, Key::Tab]);
+        assert_eq!(form_of(&model).focus, FormField::Expander);
+    }
+
+    #[test]
+    fn opening_the_group_visits_the_five_options_in_order() {
+        let mut model = Model::new();
+        press(&mut model, &[Key::Char('n'), Key::Tab, Key::Enter]);
+        assert!(form_of(&model).open);
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            press(&mut model, &[Key::Tab]);
+            seen.push(form_of(&model).focus);
+        }
+        assert_eq!(seen, OPTION_FIELDS);
+        press(&mut model, &[Key::Up, Key::Up, Key::Up, Key::Up, Key::Up]);
+        assert_eq!(form_of(&model).focus, FormField::Expander);
+    }
+
+    #[test]
+    fn filled_options_are_sent_only_when_the_group_is_open() {
+        let mut keys = vec![Key::Char('n')];
+        keys.extend(typed("fix it"));
+        keys.extend([Key::Tab, Key::Enter, Key::Tab]);
+        keys.extend(typed("bug-fix"));
+        keys.extend([Key::Tab, Key::Char(' '), Key::Tab]);
+        keys.extend(typed("3"));
+        keys.extend([Key::Tab]);
+        keys.extend(typed(" the auth path "));
+        keys.extend([Key::Tab]);
+        keys.extend(typed("production, secrets"));
+        keys.push(Key::Enter);
+        let mut model = Model::new();
+        assert_eq!(
+            press(&mut model, &keys),
+            [Command::Submit {
+                prompt: "fix it".into(),
+                options: Some(TriageOptions {
+                    template: Some(Template::BugFix),
+                    report_only: true,
+                    max_stages: Some(3),
+                    context_hint: Some("the auth path".into()),
+                    risk_flags: vec!["production".into(), "secrets".into()],
+                }),
+            }]
+        );
+        // Same values with the group collapsed again send no options.
+        let mut form = NewJobForm {
+            prompt: "x".into(),
+            template: "report".into(),
+            ..NewJobForm::default()
+        };
+        assert_eq!(form.options(), Ok(None));
+        form.open = true;
+        assert!(form.options().is_ok_and(|o| o.is_some()));
+        form.template = String::new();
+        assert_eq!(form.options(), Ok(None));
+    }
+
+    #[test]
+    fn a_bad_template_or_count_keeps_the_form_open_with_a_notice() {
+        let mut model = Model::new();
+        let mut keys = vec![Key::Char('n')];
+        keys.extend(typed("x"));
+        keys.extend([Key::Tab, Key::Enter, Key::Tab]);
+        keys.extend(typed("nope"));
+        keys.push(Key::Enter);
+        assert!(press(&mut model, &keys).is_empty());
+        assert!(matches!(model.mode(), Mode::NewJob { .. }));
+        assert!(model.notice().is_some_and(|n| n.contains("template")));
+    }
+
+    #[test]
+    fn esc_leaves_the_form_without_a_command() {
+        let mut model = Model::new();
+        assert!(press(&mut model, &[Key::Char('n'), Key::Char('a'), Key::Esc]).is_empty());
+        assert_eq!(model.mode(), &Mode::Normal);
     }
 
     #[test]

@@ -8,6 +8,7 @@ import type { Priority } from "./generated/Priority";
 import type { QuotaPanelView } from "./generated/QuotaPanelView";
 import type { RepliedView } from "./generated/RepliedView";
 import type { SubmittedView } from "./generated/SubmittedView";
+import type { TriageOptions } from "./options";
 
 export type ArtifactContent = { path: string; content: string };
 
@@ -94,11 +95,12 @@ export function createApi(
     reply: (targets: string[], text: string, priority?: Priority) =>
       call<RepliedView>("/api/inbox/reply", { targets, text, ...(priority ? { priority } : {}) }),
     dismiss: (entries: string[]) => call<DismissedView>("/api/inbox/dismiss", { entries }),
-    submit: (prompt: string, repo?: string, priority?: Priority) =>
+    submit: (prompt: string, repo?: string, priority?: Priority, options?: TriageOptions) =>
       call<SubmittedView>("/api/jobs", {
         prompt,
         ...(repo ? { repo } : {}),
         ...(priority ? { priority } : {}),
+        ...(options ? { options } : {}),
       }),
     cancel: (ref: string) => post(`/api/jobs/${ref}/cancel`),
     pushKey: () => call<{ key: string }>("/api/push/key"),

@@ -1,6 +1,7 @@
 use pizza_delivery_core::stage::StageState;
 use pizza_delivery_core::tui::{
-    fits, segment_widths, Caps, Connection, Mode, Model, SegmentState, ViewKind, MIN_COLS, MIN_ROWS,
+    fits, segment_widths, Caps, Connection, FormField, Mode, Model, NewJobForm, SegmentState,
+    ViewKind, MIN_COLS, MIN_ROWS,
 };
 use pizza_delivery_core::view::BOARD_COLUMNS;
 use pizza_delivery_core::{JobState, JobView};
@@ -145,12 +146,85 @@ pub fn draw(frame: &mut Frame, model: &Model, caps: Caps) {
     } else {
         body
     };
+    if let Mode::NewJob { form } = model.mode() {
+        draw_new_job(frame, form, caps, list_area);
+        return;
+    }
     match model.view() {
         ViewKind::Table => draw_table(frame, model, caps, list_area),
         ViewKind::Board => draw_board(frame, model, caps, list_area),
         ViewKind::Pipeline => draw_pipeline(frame, model, caps, list_area),
         ViewKind::Inbox => draw_inbox(frame, model, caps, list_area),
     }
+}
+
+fn form_row(label: &str, value: &str, focused: bool, g: &Glyphs) -> Line<'static> {
+    let text = format!("{} {label}: {value}", if focused { g.cursor } else { " " });
+    if focused {
+        Line::styled(text, selected())
+    } else {
+        Line::raw(text)
+    }
+}
+
+fn draw_new_job(frame: &mut Frame, form: &NewJobForm, caps: Caps, area: Rect) {
+    let g = glyphs(caps);
+    let at = |f: FormField| form.focus == f;
+    let mut lines = vec![
+        form_row("Prompt", &form.prompt, at(FormField::Prompt), &g),
+        form_row(
+            if form.open {
+                "v Additional Parameters"
+            } else {
+                "> Additional Parameters"
+            },
+            "",
+            at(FormField::Expander),
+            &g,
+        ),
+    ];
+    if form.open {
+        let report = if form.report_only { "[x]" } else { "[ ]" };
+        lines.extend([
+            form_row("  Template", &form.template, at(FormField::Template), &g),
+            form_row(
+                "  Report only (space)",
+                report,
+                at(FormField::ReportOnly),
+                &g,
+            ),
+            form_row(
+                "  Max stages",
+                &form.max_stages,
+                at(FormField::MaxStages),
+                &g,
+            ),
+            form_row(
+                "  Context hint",
+                &form.context_hint,
+                at(FormField::ContextHint),
+                &g,
+            ),
+            form_row(
+                "  Risk flags",
+                &form.risk_flags,
+                at(FormField::RiskFlags),
+                &g,
+            ),
+        ]);
+    }
+    let inner = usize::from(area.width.saturating_sub(2));
+    let lines: Vec<Line> = lines
+        .into_iter()
+        .map(|l| {
+            let flat: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+            Line::styled(fit(&flat, inner, &g), l.style)
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).block(block("New job".to_owned(), caps)),
+        area,
+    );
 }
 
 fn header(model: &Model, caps: Caps) -> Line<'static> {
@@ -182,7 +256,10 @@ fn footer(model: &Model, caps: Caps) -> Line<'static> {
     let width = usize::from(MIN_COLS);
     let text = match model.mode() {
         Mode::Reply { targets, text } => format!("reply to {}: {text}_", targets.join(",")),
-        Mode::NewJob { text } => format!("new job: {text}_"),
+        Mode::NewJob { form } => match form.focus {
+            FormField::Prompt => format!("new job: {}_", form.prompt),
+            _ => "new job: tab next, up back, ret expand/send, esc cancel".to_owned(),
+        },
         Mode::ConfirmCancel { job } => format!("cancel job {job}? y/N"),
         Mode::Normal => match model.notice() {
             Some(notice) => notice.to_owned(),
@@ -851,6 +928,27 @@ mod tests {
         let lines = frame(&m, ASCII, 80, 24);
         assert!(lines[23].starts_with("reply to "));
         assert!(lines[23].ends_with(": hi_"));
+    }
+
+    #[test]
+    fn new_job_form_shows_the_additional_parameters_collapsed_then_open() {
+        let mut m = Model::new();
+        m.handle_key(Key::Char('n'));
+        let closed = frame(&m, ASCII, 80, 24).join("\n");
+        assert!(closed.contains("> Additional Parameters"), "{closed}");
+        assert!(!closed.contains("Max stages"), "{closed}");
+        m.handle_key(Key::Tab);
+        m.handle_key(Key::Enter);
+        let open = frame(&m, ASCII, 80, 24).join("\n");
+        for label in [
+            "Template",
+            "Report only",
+            "Max stages",
+            "Context hint",
+            "Risk flags",
+        ] {
+            assert!(open.contains(label), "{open}");
+        }
     }
 
     #[test]

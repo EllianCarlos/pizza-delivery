@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use pizza_delivery_core::api::{ApiError, ErrorKind};
 use pizza_delivery_core::schedule::Priority;
+use pizza_delivery_core::triage::TriageOptions;
 use pizza_delivery_core::view::{
     board_view, events_view, job_detail, jobs_view, quota_panel, DismissedView, InboxView,
     RepliedView, SubmittedView,
@@ -60,6 +61,8 @@ struct SubmitBody {
     prompt: String,
     repo: Option<String>,
     priority: Option<Priority>,
+    #[serde(default)]
+    options: Option<TriageOptions>,
 }
 
 #[derive(Deserialize)]
@@ -656,7 +659,7 @@ fn submit(api: &Api, req: &Req) -> Reply {
         prompt: b.prompt,
         repo: b.repo,
         priority: b.priority,
-        options: None,
+        options: b.options,
     }) {
         Response::Submitted { id, short_id } => ok(&SubmittedView {
             id: id.as_str().to_owned(),

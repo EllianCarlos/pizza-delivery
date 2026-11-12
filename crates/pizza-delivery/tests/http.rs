@@ -119,6 +119,36 @@ fn submit_reply_dismiss_and_cancel_work_over_http() -> TestResult {
 }
 
 #[test]
+fn submit_accepts_and_validates_additional_parameters() -> TestResult {
+    let h = harness()?;
+    let repo = h.repo()?.to_string_lossy().into_owned();
+    let (status, ok) = h.http(
+        "POST",
+        "/api/jobs",
+        Some(&json!({
+            "prompt": "fix the build",
+            "repo": repo,
+            "options": {"template": "bug-fix", "max_stages": 4, "context_hint": "auth", "risk_flags": ["production"]},
+        })),
+    )?;
+    assert_eq!(status, 200, "{ok}");
+    for bad in [
+        json!({"max_stages": 0}),
+        json!({"context_hint": "  "}),
+        json!({"risk_flags": ["Not Kebab"]}),
+    ] {
+        let (status, body) = h.http(
+            "POST",
+            "/api/jobs",
+            Some(&json!({"prompt": "x", "options": bad})),
+        )?;
+        assert_eq!(status, 400, "{bad}: {body}");
+        assert_eq!(body["kind"], "usage");
+    }
+    Ok(())
+}
+
+#[test]
 fn bad_writes_are_rejected_and_nothing_else_is_writable() -> TestResult {
     let h = harness()?;
     let (status, body) = h.http("POST", "/api/jobs", Some(&json!({"prompt": "  "})))?;

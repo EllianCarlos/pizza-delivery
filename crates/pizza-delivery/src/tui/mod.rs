@@ -140,13 +140,13 @@ fn act(config: &Config, command: Command, tx: &Sender<Msg>) {
             Command::Quit => return,
             Command::OpenWeb => open(&config, &config.web_url),
             Command::OpenPr { url } => open(&config, &url),
-            Command::Submit { prompt } => call(
+            Command::Submit { prompt, options } => call(
                 &config,
                 Request::Submit {
                     prompt,
                     repo: None,
                     priority: None,
-                    options: None,
+                    options,
                 },
             ),
             Command::Reply { targets, text } => call(

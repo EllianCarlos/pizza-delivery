@@ -25,6 +25,16 @@ test("replying posts targets and text as json and returns the follow-up job", as
   expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ targets: ["E1"], text: "use v2" });
 });
 
+test("submit carries options only when given", async () => {
+  const calls: Call[] = [];
+  const reply = { status: 200, body: { id: "J3", short_id: "j3" } };
+  const api = createApi(fakeFetch([reply, reply], calls));
+  await api.submit("a");
+  await api.submit("b", undefined, undefined, { max_stages: 2 });
+  expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ prompt: "a" });
+  expect(JSON.parse(String(calls[1]?.init?.body))).toEqual({ prompt: "b", options: { max_stages: 2 } });
+});
+
 test("dismiss, submit and cancel hit their endpoints", async () => {
   const calls: Call[] = [];
   const api = createApi(
