@@ -5,6 +5,7 @@ import Button from "@cloudscape-design/components/button";
 import Container from "@cloudscape-design/components/container";
 import Header from "@cloudscape-design/components/header";
 import Multiselect from "@cloudscape-design/components/multiselect";
+import Input from "@cloudscape-design/components/input";
 import Select from "@cloudscape-design/components/select";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import Table from "@cloudscape-design/components/table";
@@ -12,6 +13,7 @@ import Textarea from "@cloudscape-design/components/textarea";
 import Toggle from "@cloudscape-design/components/toggle";
 import type { Api } from "./api";
 import { useEventStream, usePolled } from "./hooks";
+import type { InboxStatus } from "./inbox";
 import type { InboxEntry } from "./generated/InboxEntry";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobView } from "./generated/JobView";
@@ -132,7 +134,7 @@ export function DetailPanel({
           { id: "status", header: "Status", cell: (e) => e.status },
           { id: "sev", header: "Severity", cell: (e) => e.severity },
           { id: "text", header: "Text", cell: (e) => e.text },
-          { id: "status", header: "Status", cell: (e) => e.status },
+          { id: "evidence", header: "Evidence", cell: (e) => e.evidence ?? "-" },
         ]}
       />
       <ArtifactList detail={detail} api={api} />
@@ -179,8 +181,38 @@ export function ArtifactList({ detail, api }: { detail: JobDetailView; api: Api 
   );
 }
 
+const STATUS_OPTIONS: Array<{ value: InboxStatus; label: string }> = [
+  { value: "active", label: "Open and answered" },
+  { value: "open", label: "Open" },
+  { value: "answered", label: "Answered" },
+  { value: "dismissed", label: "Dismissed" },
+  { value: "all", label: "All" },
+];
+
+export function EntryDetail({ entry }: { entry: InboxEntry }) {
+  return (
+    <Container header={<Header variant="h3">{entry.short_id}</Header>}>
+      <SpaceBetween size="xs">
+        <Box>{entry.text}</Box>
+        <Box>
+          <b>Evidence</b> {entry.evidence ?? "-"}
+        </Box>
+        <Box>
+          <b>Confidence</b> {entry.confidence ?? "-"}
+          {" | "}
+          <b>Impact</b> {entry.impact ?? "-"}
+          {" | "}
+          <b>Alternatives</b> {entry.alternatives.length > 0 ? entry.alternatives.join(", ") : "-"}
+        </Box>
+      </SpaceBetween>
+    </Container>
+  );
+}
+
 export function InboxPanel({ api }: { api: Api }) {
-  const { data, error, refresh } = usePolled(() => api.inbox(false));
+  const [status, setStatus] = useState<InboxStatus>("active");
+  const [query, setQuery] = useState("");
+  const { data, error, refresh } = usePolled(() => api.inbox({ status, q: query }), 5000, [status, query]);
   const [selected, setSelected] = useState<InboxEntry[]>([]);
   const [text, setText] = useState("");
   const [note, setNote] = useState<string | null>(null);
@@ -193,6 +225,21 @@ export function InboxPanel({ api }: { api: Api }) {
       {error && <Alert type="error">{error}</Alert>}
       {actionError && <Alert type="error" dismissible onDismiss={() => setActionError(null)}>{actionError}</Alert>}
       {note && <Alert type="success" dismissible onDismiss={() => setNote(null)}>{note}</Alert>}
+      <SpaceBetween size="xs" direction="horizontal">
+        <Select
+          selectedOption={STATUS_OPTIONS.find((o) => o.value === status) ?? STATUS_OPTIONS[0]!}
+          options={STATUS_OPTIONS}
+          onChange={({ detail }) => setStatus((detail.selectedOption.value ?? "active") as InboxStatus)}
+          ariaLabel="Filter by status"
+        />
+        <Input
+          type="search"
+          value={query}
+          onChange={({ detail }) => setQuery(detail.value)}
+          placeholder="Search kind, severity or text"
+          ariaLabel="Search the inbox"
+        />
+      </SpaceBetween>
       <Table
         header={<Header counter={`(${entries.length})`}>Feedback inbox</Header>}
         items={entries}
@@ -207,8 +254,10 @@ export function InboxPanel({ api }: { api: Api }) {
           { id: "sev", header: "Severity", cell: (e) => e.severity },
           { id: "text", header: "Text", cell: (e) => e.text },
           { id: "conf", header: "Confidence", cell: (e) => e.confidence ?? "-" },
+          { id: "status", header: "Status", cell: (e) => e.status },
         ]}
       />
+      {selected.length === 1 && selected[0] && <EntryDetail entry={selected[0]} />}
       <Textarea value={text} onChange={({ detail }) => setText(detail.value)} placeholder="Reply to the selected entries" />
       <SpaceBetween size="xs" direction="horizontal">
         <Button

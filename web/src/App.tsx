@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import Alert from "@cloudscape-design/components/alert";
+import Box from "@cloudscape-design/components/box";
 import AppLayout from "@cloudscape-design/components/app-layout";
 import Button from "@cloudscape-design/components/button";
 import Checkbox from "@cloudscape-design/components/checkbox";
@@ -21,6 +22,7 @@ import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobView } from "./generated/JobView";
 import { hashFor, jobFromPath, landingRoute, pipelineLanes, routeFromHash, STATE_ORDER, type Route } from "./model";
 import { buildOptions, emptyOptionFields, type OptionFields } from "./options";
+import { previewSummary, type TriagePreview } from "./triage";
 import { enablePush, pushSupported } from "./push";
 import { ArtifactBrowser, DetailPanel, EventsPanel, InboxPanel } from "./panels";
 import { BoardView, PipelineView, TableView } from "./views";
@@ -28,12 +30,48 @@ import { BoardView, PipelineView, TableView } from "./views";
 const api = createApi();
 type ViewName = "table" | "board" | "pipeline";
 
+function PreviewResult({ preview }: { preview: TriagePreview }) {
+  const s = previewSummary(preview);
+  return (
+    <Alert type={s.resolved ? "info" : "warning"} header="Triage preview (nothing was enqueued)">
+      <SpaceBetween size="xs">
+        {s.resolved ? (
+          <>
+            <Box><b>Repository</b> {s.repo}</Box>
+            {s.alternatives.length > 0 && <Box><b>Alternatives</b> {s.alternatives.join(", ")}</Box>}
+            <Box><b>Template</b> {s.template}</Box>
+            <Box>
+              <b>Plan</b>
+              <ol style={{ margin: 0 }}>
+                {s.stages.map((st) => (
+                  <li key={st.n}>{st.name}: {st.reason}</li>
+                ))}
+              </ol>
+            </Box>
+            {s.risks.length > 0 && <Box><b>Risks</b> {s.risks.join(", ")}</Box>}
+            <Box>{s.task}</Box>
+          </>
+        ) : (
+          <Box>No repository resolved</Box>
+        )}
+        {s.notes.map((n) => <Box key={n}>{n}</Box>)}
+        {s.sources.length > 0 && <Box><b>Context</b> {s.sources.join(", ")}</Box>}
+      </SpaceBetween>
+    </Alert>
+  );
+}
+
 function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onClose: () => void; onSubmitted: () => void }) {
   const [prompt, setPrompt] = useState("");
   const [repo, setRepo] = useState("");
   const [fields, setFields] = useState<OptionFields>(emptyOptionFields);
   const [error, setError] = useState<string | null>(null);
-  const set = (patch: Partial<OptionFields>) => setFields((f) => ({ ...f, ...patch }));
+  const [preview, setPreview] = useState<TriagePreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const set = (patch: Partial<OptionFields>) => {
+    setPreview(null);
+    setFields((f) => ({ ...f, ...patch }));
+  };
   const templates = [
     { value: "", label: "Automatic" },
     { value: "full-feature", label: "full-feature" },
@@ -47,35 +85,57 @@ function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onCl
       onDismiss={onClose}
       header="Submit a job"
       footer={
-        <Button
-          variant="primary"
-          disabled={prompt.trim() === ""}
-          onClick={async () => {
-            try {
-              await api.submit(prompt, repo || undefined, undefined, buildOptions(fields));
-              setPrompt("");
-              setRepo("");
-              setFields(emptyOptionFields);
-              setError(null);
-              onSubmitted();
-              onClose();
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-          }}
-        >
-          Submit
-        </Button>
+        <SpaceBetween size="xs" direction="horizontal">
+          <Button
+            disabled={prompt.trim() === ""}
+            loading={previewing}
+            onClick={async () => {
+              setPreviewing(true);
+              try {
+                setPreview(await api.preview(prompt, repo || undefined, buildOptions(fields)));
+                setError(null);
+              } catch (e) {
+                setPreview(null);
+                setError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setPreviewing(false);
+              }
+            }}
+          >
+            Preview triage
+          </Button>
+          <Button
+            variant="primary"
+            disabled={prompt.trim() === ""}
+            onClick={async () => {
+              try {
+                await api.submit(prompt, repo || undefined, undefined, buildOptions(fields));
+                setPrompt("");
+                setRepo("");
+                setFields(emptyOptionFields);
+                setPreview(null);
+                setError(null);
+                onSubmitted();
+                onClose();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+              }
+            }}
+          >
+            Submit
+          </Button>
+        </SpaceBetween>
       }
     >
       <Form>
         <SpaceBetween size="m">
           {error && <Alert type="error">{error}</Alert>}
+          {preview && <PreviewResult preview={preview} />}
           <FormField label="Prompt">
-            <Textarea value={prompt} onChange={({ detail }) => setPrompt(detail.value)} />
+            <Textarea value={prompt} onChange={({ detail }) => { setPreview(null); setPrompt(detail.value); }} />
           </FormField>
           <FormField label="Repository (optional)">
-            <Input value={repo} onChange={({ detail }) => setRepo(detail.value)} />
+            <Input value={repo} onChange={({ detail }) => { setPreview(null); setRepo(detail.value); }} />
           </FormField>
           <ExpandableSection
             headerText="Additional Parameters"

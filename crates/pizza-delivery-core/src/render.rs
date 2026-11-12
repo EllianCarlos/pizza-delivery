@@ -106,7 +106,7 @@ pub fn render_inbox_entry(entry: &InboxEntry, mode: OutputMode) -> String {
                 entry.alternatives.join(", ")
             };
             format!(
-                "entry        {}\njob          {}\nkind         {}\nseverity     {}\nconfidence   {}\nalternatives {}\nimpact       {}\nstatus       {}\n\n{}\n",
+                "entry        {}\njob          {}\nkind         {}\nseverity     {}\nconfidence   {}\nalternatives {}\nimpact       {}\nevidence     {}\nstatus       {}\n\n{}\n",
                 entry.id,
                 entry.job,
                 entry.kind,
@@ -114,6 +114,7 @@ pub fn render_inbox_entry(entry: &InboxEntry, mode: OutputMode) -> String {
                 confidence,
                 alternatives,
                 entry.impact.as_deref().unwrap_or("-"),
+                entry.evidence.as_deref().unwrap_or("-"),
                 status_text(entry),
                 entry.text
             )
@@ -335,6 +336,28 @@ mod tests {
             resets_at_ms: Some(65_000),
             reset_known: true,
         }
+    }
+
+    #[test]
+    fn an_inbox_entry_shows_its_evidence() {
+        let entry = InboxEntry {
+            id: "E1".into(),
+            short_id: "e1".into(),
+            job: JobId::new("J1"),
+            kind: "assumption".into(),
+            severity: "low".into(),
+            text: "uses sqlite".into(),
+            confidence: Some(90),
+            alternatives: vec![],
+            impact: None,
+            evidence: Some("Cargo.toml".into()),
+            status: crate::inbox::EntryStatus::Open,
+            answered_by: None,
+        };
+        let human = render_inbox_entry(&entry, OutputMode::Human);
+        assert!(human.contains("evidence     Cargo.toml\n"), "{human}");
+        let json = render_inbox_entry(&entry, OutputMode::Json);
+        assert!(json.contains("\"evidence\":\"Cargo.toml\""), "{json}");
     }
 
     #[test]

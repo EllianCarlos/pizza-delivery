@@ -36,6 +36,7 @@ pub struct InboxEntry {
     pub confidence: Option<u8>,
     pub alternatives: Vec<String>,
     pub impact: Option<String>,
+    pub evidence: Option<String>,
     pub status: EntryStatus,
     pub answered_by: Option<JobId>,
 }
@@ -53,7 +54,7 @@ pub fn fold_inbox<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<InboxE
                 confidence,
                 alternatives,
                 impact,
-                ..
+                evidence,
             } => entries.push(InboxEntry {
                 id: event.id.clone(),
                 short_id: String::new(),
@@ -64,6 +65,7 @@ pub fn fold_inbox<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<InboxE
                 confidence: *confidence,
                 alternatives: alternatives.clone(),
                 impact: impact.clone(),
+                evidence: evidence.clone(),
                 status: EntryStatus::Open,
                 answered_by: None,
             }),
@@ -131,6 +133,25 @@ mod tests {
             impact: None,
             evidence: None,
         }
+    }
+
+    #[test]
+    fn an_entry_carries_the_evidence_the_agent_cited() {
+        let history = [event(
+            "E1",
+            "J1",
+            EventPayload::FeedbackRecorded {
+                kind: "assumption".into(),
+                severity: "low".into(),
+                text: "a".into(),
+                confidence: Some(80),
+                alternatives: vec![],
+                impact: None,
+                evidence: Some("Cargo.toml".into()),
+            },
+        )];
+        let entries = fold_inbox(&history);
+        assert_eq!(entries[0].evidence.as_deref(), Some("Cargo.toml"));
     }
 
     #[test]

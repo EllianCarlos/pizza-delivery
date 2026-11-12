@@ -104,6 +104,30 @@ fn with_deps<T>(
     })
 }
 
+/// The dry-run path shared by the CLI socket and the HTTP API: validate, then
+/// triage without enqueuing anything.
+pub fn triage_response(
+    store: &Mutex<Box<dyn Store>>,
+    config: &Config,
+    prompt: &str,
+    repo: Option<&str>,
+    options: Option<TriageOptions>,
+) -> Response {
+    if prompt.trim().is_empty() {
+        return failure(ErrorKind::Usage, "prompt must not be empty");
+    }
+    if let Some(Err(reason)) = options.as_ref().map(TriageOptions::validate) {
+        return failure(ErrorKind::Usage, reason.to_string());
+    }
+    dry_run(
+        store,
+        config,
+        prompt,
+        repo,
+        options.filter(|o| !o.is_empty()).as_ref(),
+    )
+}
+
 fn dry_run(
     store: &Mutex<Box<dyn Store>>,
     config: &Config,
@@ -359,6 +383,7 @@ pub fn serve(
                 kill_grace,
                 data_dir: config.data_dir.clone(),
                 push: Arc::clone(&push),
+                config: Arc::new(config.clone()),
                 gate: Arc::new(match &config.remote {
                     Some(remote) => Gate::new(remote, config.reject_window_ms),
                     None => Gate::local_only(config.reject_window_ms),
@@ -416,27 +441,11 @@ fn connection(
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line)?;
     let response = match serde_json::from_str::<Request>(&line) {
-        Ok(Request::Triage { prompt, .. }) if prompt.trim().is_empty() => {
-            failure(ErrorKind::Usage, "prompt must not be empty")
-        }
-        Ok(Request::Triage {
-            options: Some(options),
-            ..
-        }) if options.validate().is_err() => {
-            let reason = options.validate().err().map(|e| e.to_string());
-            failure(ErrorKind::Usage, reason.unwrap_or_default())
-        }
         Ok(Request::Triage {
             prompt,
             repo,
             options,
-        }) => dry_run(
-            store,
-            config,
-            &prompt,
-            repo.as_deref(),
-            options.filter(|o| !o.is_empty()).as_ref(),
-        ),
+        }) => triage_response(store, config, &prompt, repo.as_deref(), options),
         Ok(request) => dispatch(request, store, env, stop, kill_grace),
         Err(e) => failure(ErrorKind::Usage, format!("bad request: {e}")),
     };
