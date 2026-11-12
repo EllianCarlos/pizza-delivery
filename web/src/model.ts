@@ -25,6 +25,30 @@ export function hashFor(route: Route): string {
   return route === "home" ? "#/" : `#/agent-workers/${route}`;
 }
 
+/** The routes linked from the top header; Artifacts stays side-nav only to keep the bar small. */
+export const TOP_NAV_ROUTES = ["jobs", "inbox", "events"] as const;
+
+export type TopNavItem =
+  | { kind: "link"; text: string; href: string }
+  | { kind: "enable-push"; text: "Enable notifications" };
+
+const TOP_NAV_TEXT: Record<(typeof TOP_NAV_ROUTES)[number], string> = {
+  jobs: "Jobs",
+  inbox: "Inbox",
+  events: "Events",
+};
+
+/** The top header's utilities: one link per TOP_NAV_ROUTES entry, then the push opt-in when offered. */
+export function topNavItems(opts: { canEnablePush: boolean }): TopNavItem[] {
+  const items: TopNavItem[] = TOP_NAV_ROUTES.map((route) => ({
+    kind: "link",
+    text: TOP_NAV_TEXT[route],
+    href: hashFor(route),
+  }));
+  if (opts.canEnablePush) items.push({ kind: "enable-push", text: "Enable notifications" });
+  return items;
+}
+
 export function jobFromPath(path: string): string | null {
   const match = /^\/jobs\/([^/]+)\/?$/.exec(path);
   return match?.[1] ?? null;
