@@ -356,11 +356,23 @@ impl Harness {
     }
 
     pub fn raw_get(&self, path: &str) -> TestResult<(u16, String, String)> {
+        self.raw_get_with(path, &[])
+    }
+
+    pub fn raw_get_with(
+        &self,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> TestResult<(u16, String, String)> {
         self.run(&["status"])?;
         let mut stream = TcpStream::connect(("127.0.0.1", self.http_port))?;
+        let extra: String = headers
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}\r\n"))
+            .collect();
         write!(
             stream,
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\n{extra}Connection: close\r\n\r\n"
         )?;
         let mut bytes = Vec::new();
         stream.read_to_end(&mut bytes)?;

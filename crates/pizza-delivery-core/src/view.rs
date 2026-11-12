@@ -89,6 +89,25 @@ pub struct JobDetailView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct ArtifactView {
+    pub index: u32,
+    pub kind: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+/// Everything the job page needs in one response: the job detail plus its artifact list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct JobFullView {
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub detail: JobDetailView,
+    pub artifacts: Vec<ArtifactView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct QuotaPanelView {
     pub agents: Vec<QuotaView>,
     pub now_ms: i64,
@@ -222,6 +241,31 @@ pub fn job_detail(job: JobView, events: &[(u64, Event)], inbox: &[InboxEntry]) -
         stages: fold_stages(&plain),
         events: events.iter().map(|(c, e)| event_view(*c, e)).collect(),
         job,
+    }
+}
+
+pub fn artifact_views(events: &[Event]) -> Vec<ArtifactView> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::ArtifactRecorded { kind, path, sha256 } => Some((kind, path, sha256)),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(index, (kind, path, sha256))| ArtifactView {
+            index: index as u32,
+            kind: kind.clone(),
+            path: path.clone(),
+            sha256: sha256.clone(),
+        })
+        .collect()
+}
+
+pub fn job_full(job: JobView, events: &[(u64, Event)], inbox: &[InboxEntry]) -> JobFullView {
+    let plain: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+    JobFullView {
+        artifacts: artifact_views(&plain),
+        detail: job_detail(job, events, inbox),
     }
 }
 
@@ -400,5 +444,38 @@ mod tests {
         assert_eq!(detail.feedback.len(), 1);
         assert_eq!(detail.plan.stages.len(), 1);
         assert_eq!(detail.events[0].cursor, 1);
+    }
+
+    #[test]
+    fn job_full_adds_artifacts_in_ledger_order_to_the_detail() {
+        let artifact = |seq: u64, path: &str| {
+            (
+                seq,
+                event(
+                    seq,
+                    EventPayload::ArtifactRecorded {
+                        kind: "spec".into(),
+                        path: path.into(),
+                        sha256: "ab".into(),
+                    },
+                ),
+            )
+        };
+        let events = [
+            (1, event(1, triaged(&[("grill", "x")]))),
+            artifact(2, "a.md"),
+            artifact(3, "b.md"),
+        ];
+        let full = job_full(job("j1", JobState::Queued), &events, &[]);
+        assert_eq!(full.detail.events.len(), 3);
+        let paths: Vec<_> = full
+            .artifacts
+            .iter()
+            .map(|a| (a.index, a.path.as_str()))
+            .collect();
+        assert_eq!(paths, [(0, "a.md"), (1, "b.md")]);
+        let json = serde_json::to_value(&full).unwrap_or_default();
+        assert!(json["job"].is_object() && json["stages"].is_array());
+        assert_eq!(json["artifacts"][1]["kind"], "spec");
     }
 }

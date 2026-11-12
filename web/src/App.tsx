@@ -16,8 +16,7 @@ import Container from "@cloudscape-design/components/container";
 import SideNavigation from "@cloudscape-design/components/side-navigation";
 import Textarea from "@cloudscape-design/components/textarea";
 import { createApi } from "./api";
-import { usePolled } from "./hooks";
-import type { JobDetailView } from "./generated/JobDetailView";
+import { useJobDetails, usePolled } from "./hooks";
 import type { JobView } from "./generated/JobView";
 import { hashFor, jobFromPath, landingRoute, pipelineLanes, routeFromHash, STATE_ORDER, type Route } from "./model";
 import { buildOptions, emptyOptionFields, type OptionFields } from "./options";
@@ -114,10 +113,7 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
   const [view, setView] = useState<ViewName>("table");
   const [selected, setSelected] = useState<string | null>(jobFromPath(window.location.pathname));
   const [submitting, setSubmitting] = useState(false);
-  const details = usePolled<JobDetailView[]>(
-    () => Promise.all(jobs.map((j) => api.job(j.short_id))),
-    3000,
-  );
+  const details = useJobDetails(api.jobFull, jobs, selected, view === "pipeline");
   const lanes = useMemo(() => pipelineLanes(details.data ?? []), [details.data]);
   const detail = details.data?.find((d) => d.job.id === selected) ?? null;
   const pick = (job: JobView) => setSelected(job.id);
