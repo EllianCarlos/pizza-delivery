@@ -5,7 +5,8 @@ import type { EventView } from "./generated/EventView";
 import type { JobFullView } from "./generated/JobFullView";
 import type { JobView } from "./generated/JobView";
 
-export function usePolled<T>(load: () => Promise<T>, ms = 3000) {
+/** `deps` re-runs the load immediately when they change (e.g. a filter). */
+export function usePolled<T>(load: () => Promise<T>, ms = 3000, deps: readonly unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadRef = useRef(load);
@@ -22,7 +23,7 @@ export function usePolled<T>(load: () => Promise<T>, ms = 3000) {
     void refresh();
     const timer = setInterval(() => void refresh(), ms);
     return () => clearInterval(timer);
-  }, [refresh, ms]);
+  }, [refresh, ms, ...deps]);
   return { data, error, refresh };
 }
 

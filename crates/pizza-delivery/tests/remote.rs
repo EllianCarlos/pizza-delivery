@@ -192,6 +192,43 @@ fn remote_submits_can_be_disabled_or_rate_limited_without_touching_local_use() -
     Ok(())
 }
 
+fn dry_run(h: &Harness, headers: &[(&str, &str)]) -> TestResult<u16> {
+    let repo = h.repo()?.to_string_lossy().into_owned();
+    Ok(h.http_with(
+        "POST",
+        "/api/dry-run",
+        headers,
+        Some(&json!({"prompt": "remote preview", "repo": repo})),
+    )?
+    .0)
+}
+
+#[test]
+fn a_remote_dry_run_follows_the_write_gate_and_the_submit_limit() -> TestResult {
+    let signer = Signer::one();
+    let certs = CertsServer::start(&[("k1", &signer)])?;
+    let token = signer.sign("k1", &claims(OWNER));
+    let auth = (ASSERTION, token.as_str());
+    let headers = [RAY, auth, HOST, CLIENT, ORIGIN];
+
+    let h = remote(&certs)?;
+    assert_eq!(dry_run(&h, &[RAY, auth, HOST, ORIGIN])?, 403);
+    assert_eq!(dry_run(&h, &[RAY, auth, HOST, CLIENT])?, 403);
+    assert_eq!(dry_run(&h, &headers)?, 200);
+    assert_eq!(h.get("/api/jobs")?["jobs"], json!([]));
+
+    let disabled = remote(&certs)?.with_env("PIZZA_DELIVERY_REMOTE_SUBMITS", "off");
+    assert_eq!(dry_run(&disabled, &headers)?, 403);
+    assert_eq!(dry_run(&disabled, &[])?, 200);
+
+    let limited = remote(&certs)?.with_env("PIZZA_DELIVERY_REMOTE_SUBMIT_LIMIT", "2");
+    assert_eq!(dry_run(&limited, &headers)?, 200);
+    assert_eq!(submit(&limited, &headers)?.0, 200);
+    assert_eq!(dry_run(&limited, &headers)?, 429);
+    assert_eq!(dry_run(&limited, &[])?, 200);
+    Ok(())
+}
+
 #[test]
 fn remote_actions_and_rejections_are_recorded_in_the_ledger() -> TestResult {
     let signer = Signer::one();

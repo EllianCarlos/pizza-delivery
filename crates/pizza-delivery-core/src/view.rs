@@ -433,6 +433,7 @@ mod tests {
             confidence: None,
             alternatives: vec![],
             impact: None,
+            evidence: None,
             status: crate::inbox::EntryStatus::Open,
             answered_by: None,
         };
