@@ -22,10 +22,11 @@ fn a_stage_runs_to_success_with_a_valid_handoff() -> TestResult {
 
     assert_eq!(job["state"], "completed");
     let stages = job["stages"].as_array().ok_or("no stages")?;
-    assert_eq!(stages.len(), 1);
-    assert_eq!(stages[0]["state"], "succeeded");
-    assert_eq!(stages[0]["attempt"], 1);
-    assert_eq!(stages[0]["name"], "implement");
+    let names: Vec<_> = stages.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert_eq!(names, vec!["grill", "spec", "implement", "review"]);
+    assert!(stages
+        .iter()
+        .all(|s| s["state"] == "succeeded" && s["attempt"] == 1));
     Ok(())
 }
 
@@ -42,9 +43,32 @@ fn the_job_worktree_is_a_pizza_branch_cut_from_the_default_branch() -> TestResul
         format!("pizza/{id}")
     );
     assert_eq!(
-        h.vcs(&worktree, &["rev-parse", "HEAD"])?,
+        h.vcs(&worktree, &["merge-base", "HEAD", "main"])?,
         h.vcs(&h.repo()?, &["rev-parse", "main"])?
     );
+    Ok(())
+}
+
+#[test]
+fn a_finished_job_is_pushed_and_its_draft_pr_url_is_ledgered() -> TestResult {
+    let h = Harness::new()?;
+    let id = h.submit_in_repo("do the thing")?;
+    let job = h.wait_for_end(&id)?;
+    assert_eq!(job["state"], "completed");
+
+    let remote = h.root().join("remotes").join("my-repo.git");
+    let branches = h.vcs(&remote, &["branch", "--list", &format!("pizza/{id}")])?;
+    assert!(branches.contains(&format!("pizza/{id}")));
+
+    let shipped = h
+        .ledger()?
+        .into_iter()
+        .filter(|r| r.job_id == id && r.kind == "sandbox-audit")
+        .find(|r| r.payload["pushed_ref"].is_string())
+        .ok_or("no ship audit")?;
+    assert_eq!(shipped.payload["pushed_ref"], format!("origin/pizza/{id}"));
+    assert_eq!(shipped.payload["pr_url"], "https://github.com/o/r/pull/1");
+    assert_eq!(shipped.payload["diff_policy_result"], "clean");
     Ok(())
 }
 
@@ -63,7 +87,7 @@ fn the_agent_runs_in_the_worktree_as_the_leader_of_its_own_process_group() -> Te
         .join("jobs")
         .join(&id)
         .join("stages")
-        .join("1-implement");
+        .join("3-implement");
     let cwd = std::fs::read_to_string(stage_dir.join("cwd.txt"))?;
     let pgrp = std::fs::read_to_string(stage_dir.join("pgrp.txt"))?;
     let mut parts = pgrp.split_whitespace();
@@ -89,7 +113,25 @@ fn artifacts_are_indexed_in_the_ledger_with_hashes_of_the_files_on_disk() -> Tes
         .iter()
         .map(|r| r.payload["kind"].as_str().unwrap_or_default().to_owned())
         .collect();
-    assert_eq!(kinds, vec!["context", "raw-output", "handoff"]);
+    assert_eq!(
+        kinds,
+        vec![
+            "context",
+            "raw-output",
+            "handoff",
+            "grill-transcript",
+            "raw-output",
+            "handoff",
+            "spec",
+            "ticket",
+            "raw-output",
+            "handoff",
+            "raw-output",
+            "handoff",
+            "review-report",
+            "pr-body"
+        ]
+    );
     for row in artifacts {
         let path = row.payload["path"].as_str().ok_or("no path")?;
         let bytes = std::fs::read(h.data_dir().join(path))?;

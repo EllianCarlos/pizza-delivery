@@ -3,6 +3,7 @@ use serde_json::json;
 use crate::api::{JobView, Response};
 use crate::event::Event;
 use crate::id::JobId;
+use crate::inbox::InboxEntry;
 use crate::quota::QuotaView;
 use crate::stage::StageView;
 
@@ -44,6 +45,93 @@ pub fn render_submitted(id: &JobId, short_id: &str, mode: OutputMode) -> String 
     match mode {
         OutputMode::Human => format!("{short_id}\n"),
         OutputMode::Json => line(&json!({"id": id, "short_id": short_id})),
+    }
+}
+
+fn status_text(entry: &InboxEntry) -> String {
+    match &entry.answered_by {
+        Some(by) => format!(
+            "answered by {}",
+            by.as_str().chars().take(8).collect::<String>()
+        ),
+        None => entry.status.as_str().to_owned(),
+    }
+}
+
+pub fn render_inbox(entries: &[InboxEntry], mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Json => entries
+            .iter()
+            .map(|e| line(&serde_json::to_value(e).unwrap_or_default()))
+            .collect(),
+        OutputMode::Human if entries.is_empty() => "inbox is empty\n".to_owned(),
+        OutputMode::Human => {
+            let width = entries
+                .iter()
+                .map(|e| e.short_id.len())
+                .max()
+                .unwrap_or(2)
+                .max(2);
+            let rows: String = entries
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{:<width$}  {:<8}  {:<8}  {}  ({})\n",
+                        e.short_id,
+                        e.severity,
+                        e.kind,
+                        clip(&e.text, 60),
+                        status_text(e)
+                    )
+                })
+                .collect();
+            format!(
+                "{:<width$}  {:<8}  {:<8}  TEXT\n{rows}",
+                "ID", "SEVERITY", "KIND"
+            )
+        }
+    }
+}
+
+pub fn render_inbox_entry(entry: &InboxEntry, mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Json => line(&serde_json::to_value(entry).unwrap_or_default()),
+        OutputMode::Human => {
+            let confidence = entry
+                .confidence
+                .map_or_else(|| "-".to_owned(), |c| format!("{c}%"));
+            let alternatives = if entry.alternatives.is_empty() {
+                "-".to_owned()
+            } else {
+                entry.alternatives.join(", ")
+            };
+            format!(
+                "entry        {}\njob          {}\nkind         {}\nseverity     {}\nconfidence   {}\nalternatives {}\nimpact       {}\nstatus       {}\n\n{}\n",
+                entry.id,
+                entry.job,
+                entry.kind,
+                entry.severity,
+                confidence,
+                alternatives,
+                entry.impact.as_deref().unwrap_or("-"),
+                status_text(entry),
+                entry.text
+            )
+        }
+    }
+}
+
+pub fn render_dismissed(entries: &[String], mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Json => line(&json!({"dismissed": entries})),
+        OutputMode::Human => format!("dismissed {}\n", entries.len()),
+    }
+}
+
+pub fn render_replied(id: &JobId, short_id: &str, answered: &[String], mode: OutputMode) -> String {
+    match mode {
+        OutputMode::Json => line(&json!({"id": id, "short_id": short_id, "answered": answered})),
+        OutputMode::Human => format!("{short_id}\n"),
     }
 }
 
@@ -194,30 +282,6 @@ fn stamp(ts_ms: i64) -> String {
         rem % 3600 / 60,
         rem % 60
     )
-}
-
-pub fn render_inbox(response: &Response, mode: OutputMode) -> String {
-    let Response::InboxItems { items } = response else {
-        return String::new();
-    };
-    if mode == OutputMode::Json {
-        return line(&json!(response));
-    }
-    items
-        .iter()
-        .map(|i| {
-            let conf = i.confidence.map(|c| format!(" ({c}%)")).unwrap_or_default();
-            format!(
-                "{} {} {} {}{} {}\n",
-                stamp(i.ts_ms),
-                i.short_id,
-                i.kind,
-                i.severity,
-                conf,
-                one_line(&i.text)
-            )
-        })
-        .collect()
 }
 
 pub fn render_artifacts(response: &Response, mode: OutputMode) -> String {

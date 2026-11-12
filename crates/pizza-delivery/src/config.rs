@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
+use pizza_delivery_core::budget::{Defaults, DEFAULT_CAP_TOKENS};
 use pizza_delivery_core::routing::{ConfigError as RoutingError, RoutingConfig};
 use pizza_delivery_core::{Caps, DEFAULT_RETENTION_MS};
 use thiserror::Error;
+
+pub const DEFAULT_HTTP_PORT: u16 = 7878;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -24,6 +26,28 @@ pub struct Config {
     pub engram_command: PathBuf,
     pub mnemon_command: PathBuf,
     pub budget_cap_tokens: u64,
+    pub budget_defaults: Defaults,
+    pub mcp_catalog: PathBuf,
+    pub mcp_secrets: PathBuf,
+    pub http_port: u16,
+    pub notify_command: Option<PathBuf>,
+    pub notify_opener: PathBuf,
+    pub notify_muted: String,
+    pub web_url: String,
+    pub remote: Option<RemoteConfig>,
+    pub reject_window_ms: u64,
+    pub vapid_subject: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteConfig {
+    pub audience: String,
+    pub issuer: String,
+    pub certs_url: String,
+    pub emails: Vec<String>,
+    pub submits_enabled: bool,
+    pub submit_limit_per_minute: u32,
+    pub refresh_min_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,10 +60,52 @@ pub struct RoutingFile {
 pub enum ConfigError {
     #[error("cannot determine a data directory: set PIZZA_DELIVERY_DATA_DIR or HOME")]
     NoDataDir,
+    #[error("unsafe remote access configuration: {0}")]
+    UnsafeRemote(String),
     #[error("cannot read routing config {path}: {reason}")]
     RoutingUnreadable { path: PathBuf, reason: String },
     #[error("routing config {path}: {source}")]
     Routing { path: PathBuf, source: RoutingError },
+}
+
+fn remote_config(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<RemoteConfig>, ConfigError> {
+    let on = |v: String| matches!(v.to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes");
+    if !get("PIZZA_DELIVERY_REMOTE").is_some_and(on) {
+        return Ok(None);
+    }
+    let unsafe_config = |what: &str| ConfigError::UnsafeRemote(what.to_owned());
+    let audience = get("PIZZA_DELIVERY_ACCESS_AUD")
+        .ok_or_else(|| unsafe_config("PIZZA_DELIVERY_ACCESS_AUD is missing"))?;
+    let issuer = get("PIZZA_DELIVERY_ACCESS_ISSUER")
+        .map(|i| i.trim_end_matches('/').to_owned())
+        .ok_or_else(|| unsafe_config("PIZZA_DELIVERY_ACCESS_ISSUER is missing"))?;
+    let emails: Vec<String> = get("PIZZA_DELIVERY_ACCESS_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+    if emails.is_empty() {
+        return Err(unsafe_config("the email allowlist is empty"));
+    }
+    Ok(Some(RemoteConfig {
+        certs_url: get("PIZZA_DELIVERY_ACCESS_CERTS_URL")
+            .unwrap_or_else(|| format!("{issuer}/cdn-cgi/access/certs")),
+        audience,
+        issuer,
+        emails,
+        submits_enabled: get("PIZZA_DELIVERY_REMOTE_SUBMITS").map_or(true, |v| {
+            !matches!(v.to_ascii_lowercase().as_str(), "off" | "0" | "false")
+        }),
+        submit_limit_per_minute: get("PIZZA_DELIVERY_REMOTE_SUBMIT_LIMIT")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+        refresh_min_ms: get("PIZZA_DELIVERY_ACCESS_REFRESH_MIN_MS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000),
+    }))
 }
 
 impl Config {
@@ -67,6 +133,12 @@ impl Config {
         let trust_path = get("PIZZA_DELIVERY_TRUST")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("trust.json"));
+        let mcp_catalog = get("PIZZA_DELIVERY_MCP_CATALOG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("mcp-catalog.toml"));
+        let mcp_secrets = get("PIZZA_DELIVERY_SECRETS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("secrets"));
         let number =
             |key: &str, default: u64| get(key).and_then(|v| v.parse().ok()).unwrap_or(default);
         let routing_file = get("PIZZA_DELIVERY_ROUTING")
@@ -83,7 +155,12 @@ impl Config {
                         required: false,
                     })
             });
+        let remote = remote_config(&get)?;
         Ok(Self {
+            remote,
+            reject_window_ms: number("PIZZA_DELIVERY_AUTH_REJECT_WINDOW_MS", 60_000),
+            vapid_subject: get("PIZZA_DELIVERY_VAPID_SUBJECT")
+                .unwrap_or_else(|| "mailto:owner@pizza-delivery.invalid".to_owned()),
             routing: RoutingConfig::builtin(&agent_command.to_string_lossy()),
             routing_file,
             data_dir,
@@ -105,7 +182,35 @@ impl Config {
             engram_db: path_or("PIZZA_DELIVERY_ENGRAM_DB", home.join(".engram/engram.db")),
             engram_command: path_or("PIZZA_DELIVERY_ENGRAM", PathBuf::from("engram")),
             mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
+            mcp_catalog,
+            mcp_secrets,
+            http_port: get("PIZZA_DELIVERY_HTTP_PORT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_HTTP_PORT),
+            notify_command: match get("PIZZA_DELIVERY_NOTIFY").as_deref() {
+                Some("off") => None,
+                Some(command) => Some(PathBuf::from(command)),
+                None => Some(PathBuf::from("notify-send")),
+            },
+            notify_opener: path_or("PIZZA_DELIVERY_OPENER", PathBuf::from("xdg-open")),
+            notify_muted: get("PIZZA_DELIVERY_NOTIFY_MUTE").unwrap_or_default(),
+            web_url: get("PIZZA_DELIVERY_WEB_URL")
+                .unwrap_or_else(|| "http://127.0.0.1:7878".to_owned()),
             budget_cap_tokens: number("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", DEFAULT_CAP_TOKENS),
+            budget_defaults: {
+                let std = Defaults::standard();
+                let tier = |name: &str, base: (u64, u64)| {
+                    (
+                        number(&format!("PIZZA_DELIVERY_ESTIMATE_{name}_TOKENS"), base.0),
+                        number(&format!("PIZZA_DELIVERY_ESTIMATE_{name}_WALL_MS"), base.1),
+                    )
+                };
+                Defaults {
+                    small: tier("SMALL", std.small),
+                    medium: tier("MEDIUM", std.medium),
+                    large: tier("LARGE", std.large),
+                }
+            },
         })
     }
 
@@ -284,5 +389,70 @@ mod tests {
     #[test]
     fn nothing_to_go_on_is_an_error() {
         assert!(Config::from_lookup(lookup(&[])).is_err());
+    }
+
+    #[test]
+    fn notifications_default_to_notify_send_and_can_be_switched_off() {
+        let defaults = Config::from_lookup(lookup(&[("HOME", "/h")]));
+        let off = Config::from_lookup(lookup(&[("HOME", "/h"), ("PIZZA_DELIVERY_NOTIFY", "off")]));
+        assert_eq!(
+            defaults.ok().and_then(|c| c.notify_command),
+            Some(PathBuf::from("notify-send"))
+        );
+        assert_eq!(off.ok().and_then(|c| c.notify_command), None);
+    }
+
+    fn remote(extra: &[(&str, &str)]) -> Result<Config, ConfigError> {
+        let mut pairs = vec![("HOME", "/h"), ("PIZZA_DELIVERY_REMOTE", "on")];
+        pairs.extend_from_slice(extra);
+        Config::from_lookup(lookup(&pairs))
+    }
+
+    #[test]
+    fn remote_access_is_off_by_default() {
+        let cfg = Config::from_lookup(lookup(&[("HOME", "/h")]));
+        assert_eq!(cfg.ok().map(|c| c.remote.is_none()), Some(true));
+    }
+
+    #[test]
+    fn remote_access_needs_an_audience_issuer_and_a_non_empty_allowlist() {
+        let full = [
+            ("PIZZA_DELIVERY_ACCESS_AUD", "aud1"),
+            (
+                "PIZZA_DELIVERY_ACCESS_ISSUER",
+                "https://team.cloudflareaccess.com",
+            ),
+            (
+                "PIZZA_DELIVERY_ACCESS_EMAILS",
+                "Me@Example.com, you@example.com",
+            ),
+        ];
+        let cfg = remote(&full).ok().and_then(|c| c.remote);
+        assert_eq!(
+            cfg.as_ref().map(|r| r.emails.clone()),
+            Some(vec![
+                "me@example.com".to_owned(),
+                "you@example.com".to_owned()
+            ])
+        );
+        assert_eq!(
+            cfg.map(|r| r.certs_url),
+            Some("https://team.cloudflareaccess.com/cdn-cgi/access/certs".to_owned())
+        );
+        for skip in 0..full.len() {
+            let partial: Vec<_> = full
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != skip)
+                .map(|(_, p)| *p)
+                .collect();
+            assert!(
+                matches!(remote(&partial), Err(ConfigError::UnsafeRemote(_))),
+                "missing {}",
+                full[skip].0
+            );
+        }
+        let blank = [full[0], full[1], ("PIZZA_DELIVERY_ACCESS_EMAILS", " , ")];
+        assert!(matches!(remote(&blank), Err(ConfigError::UnsafeRemote(_))));
     }
 }

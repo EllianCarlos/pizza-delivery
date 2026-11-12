@@ -88,7 +88,7 @@ pub enum Tier {
 pub fn base_timeout(stage: &str) -> Duration {
     let minutes = match stage {
         "triage" => 5,
-        "implement" => 60,
+        "implement" | "fix" => 60,
         _ => 20,
     };
     Duration::from_secs(minutes * 60)

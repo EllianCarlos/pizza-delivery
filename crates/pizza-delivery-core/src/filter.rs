@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, EventPayload};
 use crate::id::{short_id, JobId};
+use crate::inbox::{fold_inbox, InboxEntry};
 
 /// Constraints shared by every list. Different properties are ANDed, repeated
 /// values of one property are ORed. `jobs` holds full job ids once resolved.
@@ -50,25 +51,15 @@ pub struct InboxFilter {
     pub kinds: Vec<String>,
     #[serde(default)]
     pub severities: Vec<String>,
+    /// Entry status: open, answered or dismissed (ORed).
+    #[serde(default)]
+    pub statuses: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_confidence: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InboxItem {
-    pub event_id: String,
-    pub job_id: JobId,
-    pub short_id: String,
-    pub stage_id: Option<String>,
-    pub ts_ms: i64,
-    pub kind: String,
-    pub severity: String,
-    pub text: String,
-    pub confidence: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,51 +201,35 @@ pub fn filter_inbox(
     filter: &InboxFilter,
     query: Option<&str>,
     limit: Option<usize>,
-    all_jobs: &[JobId],
-) -> Vec<InboxItem> {
+) -> Vec<InboxEntry> {
     let q = normalize(query);
-    let mut hits: Vec<(&Event, &str, &str, &str, Option<u8>)> = Vec::new();
-    for e in events {
-        let EventPayload::FeedbackRecorded {
-            kind,
-            severity,
-            text,
-            confidence,
-        } = &e.payload
-        else {
-            continue;
-        };
-        let ok = any_match(&filter.jobs, e.job_id.as_str())
-            && stage_match(&filter.stages, e.stage_id.as_deref())
-            && any_match(&filter.kinds, kind)
-            && any_match(&filter.severities, severity)
-            && filter
-                .min_confidence
-                .map_or(true, |min| confidence.is_some_and(|c| c >= min))
-            && in_range(e.ts_ms, filter.since_ms, filter.until_ms)
-            && q.as_deref().map_or(true, |q| {
-                contains_ci(kind, q) || contains_ci(severity, q) || contains_ci(text, q)
-            });
-        if ok {
-            hits.push((e, kind, severity, text, *confidence));
-        }
-    }
-    hits.sort_by(|a, b| (b.0.ts_ms, b.0.seq, &b.0.id).cmp(&(a.0.ts_ms, a.0.seq, &a.0.id)));
-    let items = hits
+    let recorded: std::collections::HashMap<&str, &Event> = events
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::FeedbackRecorded { .. }))
+        .map(|e| (e.id.as_str(), e))
+        .collect();
+    let mut hits: Vec<(&Event, InboxEntry)> = fold_inbox(events)
         .into_iter()
-        .map(|(e, kind, severity, text, confidence)| InboxItem {
-            event_id: e.id.clone(),
-            job_id: e.job_id.clone(),
-            short_id: short_id(&e.job_id, all_jobs),
-            stage_id: e.stage_id.clone(),
-            ts_ms: e.ts_ms,
-            kind: kind.to_string(),
-            severity: severity.to_string(),
-            text: text.to_string(),
-            confidence,
+        .filter_map(|entry| recorded.get(entry.id.as_str()).map(|e| (*e, entry)))
+        .filter(|(e, entry)| {
+            any_match(&filter.jobs, e.job_id.as_str())
+                && stage_match(&filter.stages, e.stage_id.as_deref())
+                && any_match(&filter.kinds, &entry.kind)
+                && any_match(&filter.severities, &entry.severity)
+                && any_match(&filter.statuses, entry.status.as_str())
+                && filter
+                    .min_confidence
+                    .map_or(true, |min| entry.confidence.is_some_and(|c| c >= min))
+                && in_range(e.ts_ms, filter.since_ms, filter.until_ms)
+                && q.as_deref().map_or(true, |q| {
+                    contains_ci(&entry.kind, q)
+                        || contains_ci(&entry.severity, q)
+                        || contains_ci(&entry.text, q)
+                })
         })
         .collect();
-    truncate(items, limit)
+    hits.sort_by(|a, b| (b.0.ts_ms, b.0.seq, &b.0.id).cmp(&(a.0.ts_ms, a.0.seq, &a.0.id)));
+    truncate(hits.into_iter().map(|(_, entry)| entry).collect(), limit)
 }
 
 /// Parse a `--since`/`--until` value: RFC 3339 or a relative age (`90s`, `15m`,
@@ -368,6 +343,8 @@ mod tests {
             severity: sev.into(),
             text: text.into(),
             confidence: conf,
+            alternatives: vec![],
+            impact: None,
         }
     }
 
@@ -390,6 +367,8 @@ mod tests {
                     prompt: "Fix the Login bug".into(),
                     repo: None,
                     priority: Default::default(),
+                    follow_up: None,
+                    options: None,
                 },
             ),
             ev(
@@ -622,11 +601,10 @@ mod tests {
     #[test]
     fn inbox_filter_search_and_missing_confidence() {
         let ev = sample();
-        let all = [JobId::new("JOBA"), JobId::new("JOBB")];
         let run = |f: InboxFilter, q: Option<&str>| -> Vec<String> {
-            filter_inbox(&ev, &f, q, None, &all)
+            filter_inbox(&ev, &f, q, None)
                 .into_iter()
-                .map(|a| a.event_id)
+                .map(|a| a.id)
                 .collect()
         };
         assert_eq!(run(InboxFilter::default(), None), ["e7", "e4", "e3"]);
@@ -702,9 +680,9 @@ mod tests {
             ),
             Vec::<String>::new()
         );
-        let item = &filter_inbox(&ev, &InboxFilter::default(), None, Some(1), &all)[0];
+        let item = &filter_inbox(&ev, &InboxFilter::default(), None, Some(1))[0];
         assert_eq!(item.text, "Which DB?");
-        assert_eq!(item.job_id.as_str(), "JOBB");
+        assert_eq!(item.job.as_str(), "JOBB");
         assert!(!item.short_id.is_empty());
     }
 

@@ -21,6 +21,7 @@ pub struct Invocation {
     pub grace: Duration,
     pub sandbox: SandboxProfile,
     pub egress_log: PathBuf,
+    pub mcp_config: Option<PathBuf>,
 }
 
 pub struct AgentOutput {
@@ -103,7 +104,19 @@ impl Agent for CliAgent {
             &inv.sandbox,
             &CommandSpec {
                 program: self.command.to_string_lossy().into_owned(),
-                args: argv(self.kind, &inv.prompt, inv.model.as_deref()),
+                args: [
+                    argv(self.kind, &inv.prompt, inv.model.as_deref()),
+                    match (self.kind, &inv.mcp_config) {
+                        (AdapterKind::Claude, Some(path)) => {
+                            vec![
+                                "--mcp-config".to_owned(),
+                                path.to_string_lossy().into_owned(),
+                            ]
+                        }
+                        _ => Vec::new(),
+                    },
+                ]
+                .concat(),
                 env: vec![
                     (
                         "PIZZA_DELIVERY_HANDOFF".to_owned(),
@@ -157,6 +170,7 @@ impl Agent for CliAgent {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        kill_group(pid);
         Ok(AgentOutput {
             stdout: stdout_reader.join().unwrap_or_default(),
             stderr: stderr_reader.join().unwrap_or_default(),

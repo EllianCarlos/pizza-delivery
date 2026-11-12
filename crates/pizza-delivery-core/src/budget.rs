@@ -5,8 +5,9 @@ use crate::triage::{Feedback, PlannedStage};
 
 pub const DEFAULT_CAP_TOKENS: u64 = 5_000_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum SizeTier {
     Small,
     Medium,
@@ -118,6 +119,8 @@ pub fn estimate_overrun(estimates: &[StageEstimate], cap: u64) -> Option<Feedbac
             "estimated {total} tokens exceeds the job budget cap of {cap}; running anyway"
         ),
         confidence: None,
+        alternatives: Vec::new(),
+        impact: None,
     })
 }
 
@@ -141,6 +144,8 @@ pub fn actual_overrun(events: &[Event], cap: u64) -> Option<Feedback> {
         severity: "high".to_owned(),
         text: format!("actual usage of {total} tokens exceeds the job budget cap of {cap}"),
         confidence: None,
+        alternatives: Vec::new(),
+        impact: None,
     })
 }
 

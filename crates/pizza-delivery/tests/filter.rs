@@ -47,6 +47,11 @@ fn items(cli: &harness::Cli) -> TestResult<Vec<serde_json::Value>> {
     Ok(lines[0]["items"].as_array().ok_or("no items")?.clone())
 }
 
+/// The inbox prints one JSON line per entry.
+fn entries(cli: &harness::Cli) -> TestResult<Vec<serde_json::Value>> {
+    cli.json_lines()
+}
+
 #[test]
 fn inbox_filters_searches_and_orders_newest_first() -> TestResult {
     let h = Harness::new()?;
@@ -58,13 +63,13 @@ fn inbox_filters_searches_and_orders_newest_first() -> TestResult {
 
     let all = h.run(&["inbox", "--kind", "seedrisk", "--json"])?;
     assert_eq!(all.code, 0, "stderr: {}", all.stderr);
-    let texts: Vec<_> = items(&all)?
+    let texts: Vec<_> = entries(&all)?
         .iter()
         .map(|i| i["text"].as_str().unwrap_or("").to_string())
         .collect();
     assert_eq!(texts, ["Bad cache key", "minor nit", "Leaky cache"]);
 
-    let high = items(&h.run(&[
+    let high = entries(&h.run(&[
         "inbox",
         "--kind",
         "seedrisk",
@@ -73,7 +78,7 @@ fn inbox_filters_searches_and_orders_newest_first() -> TestResult {
         "--json",
     ])?)?;
     assert_eq!(high.len(), 2);
-    let conf = items(&h.run(&[
+    let conf = entries(&h.run(&[
         "inbox",
         "--kind",
         "seedrisk",
@@ -82,15 +87,32 @@ fn inbox_filters_searches_and_orders_newest_first() -> TestResult {
         "--json",
     ])?)?;
     assert_eq!(conf.len(), 1);
-    let searched = items(&h.run(&[
+    let searched = entries(&h.run(&[
         "inbox", "--kind", "seedrisk", "-q", "CACHE", "--job", &b, "--json",
     ])?)?;
     assert_eq!(searched.len(), 1);
     assert_eq!(searched[0]["text"], "Bad cache key");
-    let limited = items(&h.run(&["inbox", "--kind", "seedrisk", "--limit", "1", "--json"])?)?;
+    let limited = entries(&h.run(&["inbox", "--kind", "seedrisk", "--limit", "1", "--json"])?)?;
     assert_eq!(limited.len(), 1);
-    let none = items(&h.run(&["inbox", "--kind", "seedrisk", "-q", "zzz", "--json"])?)?;
+    let none = entries(&h.run(&["inbox", "--kind", "seedrisk", "-q", "zzz", "--json"])?)?;
     assert!(none.is_empty());
+    // Status: dismissed entries are hidden unless asked for.
+    let dismissed = h.run(&["inbox", "--json", "dismiss", "SEED2"])?;
+    assert_eq!(dismissed.code, 0, "stderr: {}", dismissed.stderr);
+    let default = entries(&h.run(&["inbox", "--kind", "seedrisk", "--json"])?)?;
+    assert_eq!(default.len(), 2);
+    let all = entries(&h.run(&["inbox", "--kind", "seedrisk", "--all", "--json"])?)?;
+    assert_eq!(all.len(), 3);
+    let only = entries(&h.run(&[
+        "inbox",
+        "--kind",
+        "seedrisk",
+        "--status",
+        "dismissed",
+        "--json",
+    ])?)?;
+    assert_eq!(only.len(), 1);
+    assert_eq!(only[0]["text"], "minor nit");
     Ok(())
 }
 

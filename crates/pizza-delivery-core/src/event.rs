@@ -5,19 +5,28 @@ use crate::id::JobId;
 use crate::quota::QuotaStatus;
 use crate::resilience::RetryCause;
 use crate::schedule::Priority;
-use crate::triage::{PlannedStage, Triage};
+use crate::triage::{PlannedStage, Triage, TriageOptions};
 use crate::usage::Usage;
 
 fn is_normal(priority: &Priority) -> bool {
     *priority == Priority::Normal
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowUp {
+    pub parent: JobId,
+    pub entries: Vec<String>,
+    pub reply: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum Actor {
     Daemon,
     Agent,
     Human,
+    RemoteHuman,
 }
 
 impl Actor {
@@ -26,6 +35,7 @@ impl Actor {
             Actor::Daemon => "daemon",
             Actor::Agent => "agent",
             Actor::Human => "human",
+            Actor::RemoteHuman => "remote-human",
         }
     }
 }
@@ -39,6 +49,10 @@ pub enum EventPayload {
         repo: Option<String>,
         #[serde(default, skip_serializing_if = "is_normal")]
         priority: Priority,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow_up: Option<FollowUp>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<TriageOptions>,
     },
     JobCompleted {},
     JobCancelled {},
@@ -65,6 +79,10 @@ pub enum EventPayload {
     },
     AgentFinished {
         usage: Usage,
+    },
+    ToolCalled {
+        name: String,
+        summary: String,
     },
     QuotaSignal {
         agent: String,
@@ -134,6 +152,13 @@ pub enum EventPayload {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         confidence: Option<u8>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        alternatives: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        impact: Option<String>,
+    },
+    FeedbackDismissed {
+        entry: String,
     },
     PlanAmended {
         after: String,
@@ -145,6 +170,26 @@ pub enum EventPayload {
     BudgetEstimated {
         stages: Vec<StageEstimate>,
     },
+    McpRequested {
+        server: String,
+    },
+    McpActivated {
+        server: String,
+        egress: Vec<String>,
+        write: bool,
+    },
+    McpDenied {
+        server: String,
+        reason: String,
+    },
+    McpDeactivated {
+        server: String,
+        reason: String,
+    },
+    McpCalls {
+        server: String,
+        count: u64,
+    },
     StageBudgetRecorded {
         stage: String,
         tier: SizeTier,
@@ -154,9 +199,30 @@ pub enum EventPayload {
         actual_tokens: Option<u64>,
         actual_wall_ms: Option<u64>,
     },
+    WriteBack {
+        store: String,
+        id: String,
+        topic: String,
+        action: String,
+    },
+    RemoteAction {
+        email: String,
+        cf_ray: Option<String>,
+        action: String,
+    },
+    AuthRejected {
+        count: u32,
+        reasons: std::collections::BTreeMap<String, u32>,
+    },
 }
 
+pub const SYSTEM_JOB: &str = "system";
+
 impl EventPayload {
+    pub fn is_system(&self) -> bool {
+        matches!(self, EventPayload::AuthRejected { .. })
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
             EventPayload::JobSubmitted { .. } => "job-submitted",
@@ -168,6 +234,7 @@ impl EventPayload {
             EventPayload::StageStarted { .. } => "stage-started",
             EventPayload::AgentInvoked { .. } => "agent-invoked",
             EventPayload::AgentFinished { .. } => "agent-finished",
+            EventPayload::ToolCalled { .. } => "tool-called",
             EventPayload::QuotaSignal { .. } => "quota-signal",
             EventPayload::AgentFellBack { .. } => "agent-fell-back",
             EventPayload::JobParked { .. } => "job-parked",
@@ -183,10 +250,19 @@ impl EventPayload {
             EventPayload::ContextRead { .. } => "context-read",
             EventPayload::TriageCompleted { .. } => "triage-completed",
             EventPayload::FeedbackRecorded { .. } => "feedback-recorded",
+            EventPayload::FeedbackDismissed { .. } => "feedback-dismissed",
             EventPayload::PlanAmended { .. } => "plan-amended",
             EventPayload::JobNeedsHuman { .. } => "job-needs-human",
             EventPayload::BudgetEstimated { .. } => "budget-estimated",
+            EventPayload::McpRequested { .. } => "mcp-requested",
+            EventPayload::McpActivated { .. } => "mcp-activated",
+            EventPayload::McpDenied { .. } => "mcp-denied",
+            EventPayload::McpDeactivated { .. } => "mcp-deactivated",
+            EventPayload::McpCalls { .. } => "mcp-calls",
             EventPayload::StageBudgetRecorded { .. } => "stage-budget-recorded",
+            EventPayload::WriteBack { .. } => "write-back",
+            EventPayload::RemoteAction { .. } => "remote-action",
+            EventPayload::AuthRejected { .. } => "auth-rejected",
         }
     }
 }
@@ -213,6 +289,8 @@ mod tests {
             prompt: "x".into(),
             repo: None,
             priority: Priority::Normal,
+            follow_up: None,
+            options: None,
         };
         assert_eq!(p.kind(), "job-submitted");
         assert_eq!(
@@ -253,5 +331,29 @@ mod tests {
         let stored = serde_json::json!({"kind":"stage-succeeded","payload":{}});
         let parsed: Result<EventPayload, _> = serde_json::from_value(stored);
         assert_eq!(parsed.ok(), Some(EventPayload::StageSucceeded {}));
+    }
+
+    #[test]
+    fn job_submitted_without_options_replays_as_none_and_options_round_trip(
+    ) -> Result<(), serde_json::Error> {
+        let old: EventPayload =
+            serde_json::from_str(r#"{"kind":"job-submitted","payload":{"prompt":"x"}}"#)?;
+        assert!(matches!(
+            old,
+            EventPayload::JobSubmitted { options: None, .. }
+        ));
+        let with = EventPayload::JobSubmitted {
+            prompt: "x".into(),
+            repo: None,
+            priority: Priority::Normal,
+            follow_up: None,
+            options: Some(crate::triage::TriageOptions {
+                context_hint: Some("hint".into()),
+                ..Default::default()
+            }),
+        };
+        let back: EventPayload = serde_json::from_str(&serde_json::to_string(&with)?)?;
+        assert_eq!(back, with);
+        Ok(())
     }
 }
