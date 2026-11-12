@@ -40,7 +40,7 @@ use pizza_delivery_core::{
 use sha2::{Digest, Sha256};
 
 use crate::agent::{Fleet, Invocation};
-use crate::git::Git;
+use crate::git::{Git, MergeReadiness};
 use crate::handler::Env;
 use crate::lock::acquire;
 use crate::process::{kill_group, start_ticks, terminate_group};
@@ -62,6 +62,7 @@ pub struct WorkerConfig {
     pub require_triage: bool,
     pub mcp: Option<McpSetup>,
     pub memory: Option<MemorySetup>,
+    pub auto_merge: bool,
 }
 
 pub struct MemorySetup {

@@ -169,6 +169,7 @@ fn a_configuration_error_fails_fast_without_retry_or_fallback() -> Result<()> {
                     stderr: "No usable credentials found for provider 'gemini'.",
                     exit_code: 1,
                     timed_out: false,
+                    review: None,
                 }],
             ),
             ("claude", AdapterKind::Claude, vec![good()]),
@@ -217,6 +218,7 @@ fn a_healthy_rate_limit_event_is_ledgered_as_an_allowed_quota_signal() -> Result
         stderr: "",
         exit_code: 0,
         timed_out: false,
+        review: None,
     }])?;
 
     rig.worker().tick()?;
