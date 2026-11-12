@@ -49,6 +49,25 @@ fn quota_exhaustion_falls_back_to_the_next_candidate_with_an_interruption_note()
 }
 
 #[test]
+fn a_retry_after_bad_work_escalates_to_the_next_candidate() -> Result<()> {
+    let rig = Rig::with_chain(
+        vec![
+            ("claude", AdapterKind::Claude, vec![bad_handoff()]),
+            ("claude-alt", AdapterKind::Claude, vec![good()]),
+        ],
+        CLAUDE_ALT_OWNER,
+    )?;
+
+    rig.worker().tick()?;
+    rig.worker().tick()?;
+
+    assert_eq!(rig.job_state()?, JobState::Completed);
+    assert_eq!(invoked(&rig)?, ["claude", "claude-alt"]);
+    assert!(rig.kinds()?.contains(&"stage-retried"));
+    Ok(())
+}
+
+#[test]
 fn a_fully_exhausted_chain_parks_the_job_until_the_earliest_known_reset_and_resumes_on_its_own(
 ) -> Result<()> {
     let rig = Rig::with_chain(

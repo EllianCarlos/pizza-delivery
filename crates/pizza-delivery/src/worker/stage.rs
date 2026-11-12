@@ -70,6 +70,8 @@ impl Worker<'_> {
                     _ => None,
                 });
                 let options = job.options.as_ref();
+                let decision = self.decision(&job.id, &timeline);
+                let decided = decision.as_ref().and_then(|d| d.live_model(&claimed.name));
                 pizza_delivery_core::routing::resolve_models(
                     self.routing,
                     routed,
@@ -84,6 +86,7 @@ impl Worker<'_> {
                             .unwrap_or(&[]),
                         repo: job.repo.as_deref(),
                         job_model: options.and_then(|o| o.model.as_deref()),
+                        decider: decided,
                     },
                 )
             }
@@ -101,7 +104,13 @@ impl Worker<'_> {
             .collect();
         let mut note = stored_note(&dir, claimed.attempt);
         let mut last_error: Option<String> = None;
-        for (position, candidate) in routed.candidates.iter().enumerate() {
+        let history = pizza_delivery_core::resilience::retry_history(
+            &self.with_store(|s| s.read_timeline(&job.id))?,
+            &claimed.stage_id,
+        );
+        let start = pizza_delivery_core::resilience::escalation(&history)
+            .min(routed.candidates.len().saturating_sub(1));
+        for (position, candidate) in routed.candidates.iter().enumerate().skip(start) {
             match self.try_candidate(claimed, &run, position, candidate, note.as_deref())? {
                 Attempt::Settled(verdict) => return Ok(verdict),
                 Attempt::Quota { until_ms, reason } => {

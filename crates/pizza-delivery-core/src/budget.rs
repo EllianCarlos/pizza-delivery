@@ -4,6 +4,29 @@ use crate::event::{Event, EventPayload};
 use crate::triage::{Feedback, PlannedStage};
 
 pub const DEFAULT_CAP_TOKENS: u64 = 5_000_000;
+/// Default per-job spend cap: $10.
+pub const DEFAULT_CAP_MICROUSD: u64 = 10_000_000;
+
+/// The per-job limits checked against actual usage. Stages whose agent
+/// reports a cost are held to the money cap; tokens are counted only for
+/// stages with no reported cost. Token counts include cache reads, which are
+/// most of a Claude stage's tokens but cost a tenth of fresh input, so a
+/// token cap alone parks jobs that are cheap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cap {
+    pub tokens: u64,
+    /// None turns the money cap off and counts every stage's tokens.
+    pub microusd: Option<u64>,
+}
+
+impl Cap {
+    pub fn tokens_only(tokens: u64) -> Self {
+        Self {
+            tokens,
+            microusd: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
@@ -135,15 +158,69 @@ pub fn actual_total(events: &[Event]) -> u64 {
         .sum()
 }
 
-pub fn actual_overrun(events: &[Event], cap: u64) -> Option<Feedback> {
-    let total = actual_total(events);
-    (total > cap).then(|| {
-        Feedback::new(
-            "budget",
-            "high",
-            format!("actual usage of {total} tokens exceeds the job budget cap of {cap}"),
-            None,
-        )
+/// Stage ids whose agent reported a cost for at least one attempt.
+fn costed_stages(events: &[Event]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::AgentFinished { usage } if usage.cost_microusd.is_some() => {
+                e.stage_id.as_deref()
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn actual_cost_microusd(events: &[Event]) -> u64 {
+    events
+        .iter()
+        .map(|e| match &e.payload {
+            EventPayload::AgentFinished { usage } => usage.cost_microusd.unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+fn dollars(microusd: u64) -> String {
+    format!("${:.2}", microusd as f64 / 1_000_000.0)
+}
+
+pub fn actual_overrun(events: &[Event], cap: &Cap) -> Option<Feedback> {
+    let over = |text: String| Some(Feedback::new("budget", "high", text, None));
+    let Some(cap_usd) = cap.microusd else {
+        let total = actual_total(events);
+        return (total > cap.tokens).then_some(()).and_then(|()| {
+            over(format!(
+                "actual usage of {total} tokens exceeds the job budget cap of {}",
+                cap.tokens
+            ))
+        });
+    };
+    let cost = actual_cost_microusd(events);
+    if cost > cap_usd {
+        return over(format!(
+            "actual cost of {} exceeds the job cost cap of {}",
+            dollars(cost),
+            dollars(cap_usd)
+        ));
+    }
+    let costed = costed_stages(events);
+    let uncosted: u64 = events
+        .iter()
+        .filter(|e| !e.stage_id.as_deref().is_some_and(|id| costed.contains(&id)))
+        .map(|e| match &e.payload {
+            EventPayload::StageBudgetRecorded {
+                actual_tokens: Some(t),
+                ..
+            } => *t,
+            _ => 0,
+        })
+        .sum();
+    (uncosted > cap.tokens).then_some(()).and_then(|()| {
+        over(format!(
+            "actual usage of {uncosted} tokens on agents that report no cost exceeds the job budget cap of {}",
+            cap.tokens
+        ))
     })
 }
 
@@ -312,11 +389,51 @@ mod tests {
             ev(3, recorded("review", Some(70), Some(2))),
         ];
         assert_eq!(actual_total(&events), 110);
-        assert!(actual_overrun(&events, 110).is_none());
+        assert!(actual_overrun(&events, &Cap::tokens_only(110)).is_none());
         assert_eq!(
-            actual_overrun(&events, 109).map(|f| f.severity),
+            actual_overrun(&events, &Cap::tokens_only(109)).map(|f| f.severity),
             Some("high".to_owned())
         );
+    }
+
+    #[test]
+    fn costed_stages_are_held_to_the_money_cap_and_not_their_token_count() {
+        let finished = |stage: &str, cost: Option<u64>| Event {
+            stage_id: Some(stage.to_owned()),
+            ..ev(
+                0,
+                EventPayload::AgentFinished {
+                    usage: crate::usage::Usage {
+                        cost_microusd: cost,
+                        ..Default::default()
+                    },
+                },
+            )
+        };
+        let tokens = |stage: &str, n: u64| Event {
+            stage_id: Some(stage.to_owned()),
+            ..ev(0, recorded(stage, Some(n), Some(1)))
+        };
+        // A cache-heavy Claude stage: millions of tokens, about $2.
+        let claude = vec![finished("S1", Some(2_100_000)), tokens("S1", 3_600_000)];
+        let cap = Cap {
+            tokens: 1_000_000,
+            microusd: Some(10_000_000),
+        };
+        assert!(actual_overrun(&claude, &cap).is_none());
+        let pricey = Cap {
+            microusd: Some(2_000_000),
+            ..cap
+        };
+        assert!(actual_overrun(&claude, &pricey)
+            .is_some_and(|f| f.text.contains("$2.10") && f.text.contains("$2.00")));
+        // An agent without cost still counts its tokens.
+        let mut mixed = claude.clone();
+        mixed.extend([finished("S2", None), tokens("S2", 1_500_000)]);
+        assert!(actual_overrun(&mixed, &cap).is_some_and(|f| f.text.contains("1500000 tokens")));
+        // The money cap off: every token counts, as before.
+        assert!(actual_overrun(&claude, &Cap::tokens_only(5_000_000)).is_none());
+        assert!(actual_overrun(&claude, &Cap::tokens_only(3_000_000)).is_some());
     }
 
     #[test]

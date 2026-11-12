@@ -34,7 +34,7 @@ impl Worker<'_> {
             },
         )?;
         let events = self.with_store(|s| s.read_timeline(job))?;
-        let Some(f) = actual_overrun(&events, self.config.budget_cap_tokens) else {
+        let Some(f) = actual_overrun(&events, &self.budget_cap()) else {
             return Ok(None);
         };
         self.append(

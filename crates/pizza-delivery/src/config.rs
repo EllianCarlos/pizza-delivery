@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use pizza_delivery_core::budget::{Defaults, DEFAULT_CAP_TOKENS};
+use pizza_delivery_core::budget::{Defaults, DEFAULT_CAP_MICROUSD, DEFAULT_CAP_TOKENS};
 use pizza_delivery_core::gate::{GateThresholds, DEFAULT_AUTO_AT, DEFAULT_INBOX_BELOW};
 use pizza_delivery_core::routing::{ConfigError as RoutingError, RoutingConfig};
 use pizza_delivery_core::{Caps, DEFAULT_RETENTION_MS};
@@ -27,6 +27,8 @@ pub struct Config {
     pub engram_command: PathBuf,
     pub mnemon_command: PathBuf,
     pub budget_cap_tokens: u64,
+    /// Per-job spend cap; None (PIZZA_DELIVERY_BUDGET_CAP_USD=off) counts tokens only.
+    pub budget_cap_microusd: Option<u64>,
     pub gate: GateThresholds,
     pub budget_defaults: Defaults,
     pub mcp_catalog: PathBuf,
@@ -50,6 +52,8 @@ pub struct ShadowConfig {
     pub url: String,
     pub model: String,
     pub sop: Option<PathBuf>,
+    /// Share (0 to 100) of jobs without risk flags whose picks actually run.
+    pub live_percent: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +85,8 @@ pub enum ConfigError {
     GateValue { key: &'static str, value: String },
     #[error("PIZZA_DELIVERY_GATE_INBOX_BELOW ({inbox_below}) must not exceed PIZZA_DELIVERY_GATE_AUTO_AT ({auto_at})")]
     GateOrder { inbox_below: u8, auto_at: u8 },
+    #[error("{0}")]
+    Invalid(String),
     #[error("routing config {path}: {source}")]
     Routing { path: PathBuf, source: RoutingError },
 }
@@ -198,12 +204,17 @@ impl Config {
                 url: get("PIZZA_DELIVERY_SHADOW_URL")
                     .unwrap_or_else(|| "http://localhost:11434".to_owned()),
                 model,
-                sop: get("PIZZA_DELIVERY_TRIAGE_SOP").map(PathBuf::from).or_else(|| {
-                    routing_file
-                        .as_ref()
-                        .and_then(|f| f.path.parent())
-                        .map(|d| d.join("triage-sop.md"))
-                }),
+                live_percent: get("PIZZA_DELIVERY_DECIDER_LIVE_PERCENT")
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .map_or(50, |p| p.min(100)),
+                sop: get("PIZZA_DELIVERY_TRIAGE_SOP")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        routing_file
+                            .as_ref()
+                            .and_then(|f| f.path.parent())
+                            .map(|d| d.join("triage-sop.md"))
+                    }),
             });
         Ok(Self {
             remote,
@@ -253,6 +264,22 @@ impl Config {
             web_url: get("PIZZA_DELIVERY_WEB_URL")
                 .unwrap_or_else(|| "http://127.0.0.1:7878".to_owned()),
             budget_cap_tokens: number("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", DEFAULT_CAP_TOKENS),
+            budget_cap_microusd: match get("PIZZA_DELIVERY_BUDGET_CAP_USD")
+                .map(|v| v.to_lowercase())
+            {
+                Some(v) if matches!(v.as_str(), "off" | "0" | "none" | "false") => None,
+                Some(v) => Some(
+                    v.trim_start_matches('$')
+                        .parse::<f64>()
+                        .map_err(|_| {
+                            ConfigError::Invalid(format!(
+                                "PIZZA_DELIVERY_BUDGET_CAP_USD {v:?} is not a dollar amount"
+                            ))
+                        })
+                        .map(|d| (d * 1_000_000.0).round() as u64)?,
+                ),
+                None => Some(DEFAULT_CAP_MICROUSD),
+            },
             gate,
             budget_defaults: {
                 let std = Defaults::standard();

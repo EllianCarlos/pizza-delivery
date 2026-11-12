@@ -50,7 +50,21 @@ model = "opus"
 
 The skill-driven stages (grill, spec, implement, fix, review) run on `claude`, `opencode` and `agy`: the daemon renders each stage template into one self-contained prompt, so any CLI that takes a prompt argument can follow it without installed skills. Subagents stay claude-only (other agents work tickets sequentially), and `hermes` is still limited to the cheap stages because its prompt handling is unverified.
 
+A chain moves to its next candidate when an agent is out of quota or hits a provider error. When a stage is retried after bad work (an invalid handoff, a timeout or a crash), the retry starts one candidate further down the chain, so a cheap or local model first in the chain gets one try before the next agent takes over.
+
 `pizza-delivery routing check` loads the file the way the daemon does and prints the resolved chain per stage and the quota threshold. It exits non-zero for a bad file (naming the file and field, for example `rules[1].chain[0].agent`) or a skill stage with no skills-capable candidate. It also warns, without failing, about models that `opencode models` or `agy models` do not list. The daemon refuses to start on the same errors.
+
+### Model decider trial
+
+Set `PIZZA_DELIVERY_SHADOW_MODEL` (an Ollama model such as `qwen3.5:4b`) to ask a local model, once per job before the first agent stage, which Claude model each stage should use. It follows the SOP in `PIZZA_DELIVERY_TRIAGE_SOP` (default `triage-sop.md` next to the routing file). Ollama is reached at `PIZZA_DELIVERY_SHADOW_URL` (default `http://localhost:11434`). Jobs are split by a hash of their id: `PIZZA_DELIVERY_DECIDER_LIVE_PERCENT` (default 50) of jobs without risk flags run the decider's picks (haiku or sonnet only), the rest are the control group, and jobs with risk flags are always control. The decision is stored as the `model-decider` artifact; at job end a `model-shadow` artifact compares the picks with the models that ran, their cost and the outcome. The decider's pick comes after the job, chain and `[[models]]` choices.
+
+### Budget cap
+
+A job is capped by money, not tokens: `PIZZA_DELIVERY_BUDGET_CAP_USD` (default 10; `off` disables it) is checked against the cost agents report. The token cap still applies to stages whose agent reports no cost. A stage that overruns but finished its work is kept; the job parks only if stages remain.
+
+## Submitting
+
+The `repo` of a submitted job is checked at submit time: an absolute path must be a git checkout, and a name is matched against known projects by name or path. An unknown name is rejected with the closest matches (`repository "ellians-master" was not found; did you mean ellians-masters?`).
 
 Status: design phase. Start with [docs/designs/pizza-delivery.md](docs/designs/pizza-delivery.md) and [GLOSSARY.md](GLOSSARY.md).
 

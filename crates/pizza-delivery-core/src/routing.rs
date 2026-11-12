@@ -124,6 +124,10 @@ pub struct ModelInputs<'a> {
     pub repo: Option<&'a str>,
     /// The submitter's `model` option, which beats every rule.
     pub job_model: Option<&'a str>,
+    /// The LLM decider's pick for this stage, set only for jobs in the live
+    /// arm of the decider trial. Used after the owner's rules, before the
+    /// built-in default, and only for Claude.
+    pub decider: Option<&'a str>,
 }
 
 impl ModelRule {
@@ -401,7 +405,8 @@ pub fn default_claude_model(stage: &str) -> &'static str {
 ///    names are per-provider);
 /// 2. a model the [[rules]] chain names for that candidate;
 /// 3. the first matching row of the owner's [[models]] table;
-/// 4. for Claude, the stage default (never Opus). Other agents stay unset,
+/// 4. for Claude, the LLM decider's pick in the live arm of its trial;
+/// 5. for Claude, the stage default (never Opus). Other agents stay unset,
 ///    so their CLI picks its own default.
 pub fn resolve_models(config: &RoutingConfig, routed: Routed, inputs: &ModelInputs<'_>) -> Routed {
     let is_claude = |c: &Candidate| {
@@ -424,6 +429,7 @@ pub fn resolve_models(config: &RoutingConfig, routed: Routed, inputs: &ModelInpu
                     .find(|m| m.matches(&c.agent, inputs))
                     .map(|m| m.model.clone())
             })
+            .or_else(|| inputs.decider.filter(|_| claude).map(str::to_owned))
             .or_else(|| claude.then(|| default_claude_model(inputs.stage).to_owned()));
         Candidate {
             agent: c.agent,
@@ -1030,7 +1036,12 @@ chain = [{ agent = "hermes" }]
             )
         });
         let models: Vec<_> = routed
-            .map(|r| r.candidates.into_iter().map(|c| (c.agent, c.model)).collect())
+            .map(|r| {
+                r.candidates
+                    .into_iter()
+                    .map(|c| (c.agent, c.model))
+                    .collect()
+            })
             .unwrap_or_default();
         assert_eq!(
             models,
@@ -1092,9 +1103,18 @@ model = "claude-opus-5-5"
         };
         let prod = vec!["production".to_owned()];
         assert_eq!(pick("review", None, &[]).as_deref(), Some("haiku"));
-        assert_eq!(pick("review", None, &prod).as_deref(), Some("claude-opus-5-5"));
-        assert_eq!(pick("implement", Some(Template::Investigate), &[]).as_deref(), Some("haiku"));
-        assert_eq!(pick("implement", Some(Template::BugFix), &[]).as_deref(), Some("sonnet"));
+        assert_eq!(
+            pick("review", None, &prod).as_deref(),
+            Some("claude-opus-5-5")
+        );
+        assert_eq!(
+            pick("implement", Some(Template::Investigate), &[]).as_deref(),
+            Some("haiku")
+        );
+        assert_eq!(
+            pick("implement", Some(Template::BugFix), &[]).as_deref(),
+            Some("sonnet")
+        );
     }
 
     #[test]

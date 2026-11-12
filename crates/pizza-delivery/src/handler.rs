@@ -9,6 +9,11 @@ use pizza_delivery_core::{
 pub trait Env: Send + Sync {
     fn now_ms(&self) -> i64;
     fn new_ulid(&self) -> String;
+    /// Checks a submitted repository and returns the path to store. The
+    /// default accepts anything; the daemon checks it against the projects.
+    fn check_repo(&self, repo: &str) -> Result<String, String> {
+        Ok(repo.to_owned())
+    }
 }
 
 pub struct SystemEnv;
@@ -305,6 +310,10 @@ pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Respons
             priority,
             options,
         } => {
+            let repo = match repo.as_deref().map(|r| env.check_repo(r)).transpose() {
+                Ok(repo) => repo,
+                Err(reason) => return error(ErrorKind::Usage, reason, vec![]),
+            };
             let new = NewJob {
                 id: JobId::new(env.new_ulid()),
                 event_id: env.new_ulid(),
