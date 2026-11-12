@@ -12,12 +12,16 @@ import {
   formatDuration,
   formatTokens,
   groupByState,
+  hashFor,
   jobSummary,
   pipelineLanes,
+  routeFromHash,
   segmentsOf,
   stageRows,
+  TOP_NAV_ROUTES,
   toolCallsOf,
   labelArtifact,
+  topNavItems,
   visibleEvents,
 } from "./model";
 
@@ -226,4 +230,29 @@ test("artifact paths read as stage and file", () => {
   expect(labelArtifact("jobs/01M78/stages/12-review/out/raw.jsonl")).toEqual({ stage: "review", file: "out/raw.jsonl", order: 12 });
   expect(labelArtifact("worktrees/pizza-delivery/01M78/docs/specs/01M78/spec.md").file).toBe("docs/specs/01M78/spec.md");
   expect(labelArtifact("odd.txt")).toEqual({ stage: "", file: "odd.txt", order: 0 });
+});
+
+test("topNavItems without push returns Jobs, Inbox, Events links in order", () => {
+  expect(topNavItems({ canEnablePush: false })).toEqual([
+    { kind: "link", text: "Jobs", href: "#/agent-workers/jobs" },
+    { kind: "link", text: "Inbox", href: "#/agent-workers/inbox" },
+    { kind: "link", text: "Events", href: "#/agent-workers/events" },
+  ]);
+});
+
+test("topNavItems with push appends a trailing enable-push item", () => {
+  const items = topNavItems({ canEnablePush: true });
+  expect(items.slice(0, 3)).toEqual(topNavItems({ canEnablePush: false }));
+  expect(items).toHaveLength(4);
+  expect(items[3]).toEqual({ kind: "enable-push", text: "Enable notifications" });
+});
+
+test("topNavItems link hrefs round-trip through routeFromHash", () => {
+  const links = topNavItems({ canEnablePush: true }).flatMap((i) => (i.kind === "link" ? [i] : []));
+  expect(links).toHaveLength(TOP_NAV_ROUTES.length);
+  links.forEach((item, i) => {
+    const route = TOP_NAV_ROUTES[i]!;
+    expect(item.href).toBe(hashFor(route));
+    expect(routeFromHash(item.href)).toBe(route);
+  });
 });

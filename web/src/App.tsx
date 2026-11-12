@@ -16,10 +16,20 @@ import SpaceBetween from "@cloudscape-design/components/space-between";
 import Container from "@cloudscape-design/components/container";
 import SideNavigation from "@cloudscape-design/components/side-navigation";
 import Textarea from "@cloudscape-design/components/textarea";
+import TopNavigation, { type TopNavigationProps } from "@cloudscape-design/components/top-navigation";
 import { createApi } from "./api";
 import { useJobDetails, usePolled } from "./hooks";
 import type { JobView } from "./generated/JobView";
-import { hashFor, jobFromPath, landingRoute, pipelineLanes, routeFromHash, STATE_ORDER, type Route } from "./model";
+import {
+  hashFor,
+  jobFromPath,
+  landingRoute,
+  pipelineLanes,
+  routeFromHash,
+  STATE_ORDER,
+  topNavItems,
+  type Route,
+} from "./model";
 import { buildOptions, emptyOptionFields, type OptionFields } from "./options";
 import { previewSummary, type TriagePreview } from "./triage";
 import { enablePush, pushSupported } from "./push";
@@ -267,55 +277,65 @@ export function App() {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+  const onEnablePush = async () => {
+    try {
+      await enablePush(api);
+      setPushOn(true);
+      setPushError(null);
+    } catch (e) {
+      setPushError(e instanceof Error ? e.message : String(e));
+    }
+  };
+  const utilities: TopNavigationProps.Utility[] = topNavItems({ canEnablePush: pushSupported() && !pushOn }).map(
+    (item) =>
+      item.kind === "link"
+        ? { type: "button", text: item.text, href: item.href }
+        : { type: "button", text: item.text, iconName: "notification", onClick: () => void onEnablePush() },
+  );
   return (
-    <AppLayout
-      toolsHide
-      navigation={
-        <SideNavigation
-          activeHref={hashFor(route)}
-          header={{ text: "Pizza delivery", href: hashFor("home") }}
-          items={[
-            { type: "link", text: "Home", href: hashFor("home") },
-            {
-              type: "section",
-              text: "Agent workers",
-              defaultExpanded: true,
-              items: AGENT_WORKER_LINKS.map((l) => ({ type: "link" as const, text: l.text, href: hashFor(l.route) })),
-            },
-          ]}
+    <>
+      <div id="top-nav" style={{ position: "sticky", top: 0, zIndex: 1002 }}>
+        <TopNavigation
+          identity={{ href: hashFor("home"), title: "Pizza delivery", logo: { src: "/icon.svg", alt: "Pizza delivery" } }}
+          utilities={utilities}
+          i18nStrings={{ overflowMenuTriggerText: "More", overflowMenuTitleText: "All" }}
         />
-      }
-      content={
-        <SpaceBetween size="m">
-          {jobs.error && <Alert type="error">{jobs.error}</Alert>}
-          {staleAt !== null && (
-            <Alert type="warning" header="Offline">
-              Showing a read-only snapshot from {new Date(staleAt).toLocaleString()}.
-            </Alert>
-          )}
-          {pushError && <Alert type="error">{pushError}</Alert>}
-          {pushSupported() && !pushOn && (
-            <Button
-              onClick={async () => {
-                try {
-                  await enablePush(api);
-                  setPushOn(true);
-                  setPushError(null);
-                } catch (e) {
-                  setPushError(e instanceof Error ? e.message : String(e));
-                }
-              }}
-            >
-              Enable notifications
-            </Button>
-          )}
-          {route === "home" && <HomePage jobs={list} />}
-          {route === "jobs" && <JobsPage jobs={list} onChanged={() => void jobs.refresh()} />}
-          {route === "inbox" && <InboxPanel api={api} />}
-          {route === "events" && <EventsPanel api={api} />}
-          {route === "artifacts" && <ArtifactBrowser jobs={list} api={api} />}
-        </SpaceBetween>
-      }
-    />
+      </div>
+      <AppLayout
+        headerSelector="#top-nav"
+        toolsHide
+        navigation={
+          <SideNavigation
+            activeHref={hashFor(route)}
+            header={{ text: "Pizza delivery", href: hashFor("home") }}
+            items={[
+              { type: "link", text: "Home", href: hashFor("home") },
+              {
+                type: "section",
+                text: "Agent workers",
+                defaultExpanded: true,
+                items: AGENT_WORKER_LINKS.map((l) => ({ type: "link" as const, text: l.text, href: hashFor(l.route) })),
+              },
+            ]}
+          />
+        }
+        content={
+          <SpaceBetween size="m">
+            {jobs.error && <Alert type="error">{jobs.error}</Alert>}
+            {staleAt !== null && (
+              <Alert type="warning" header="Offline">
+                Showing a read-only snapshot from {new Date(staleAt).toLocaleString()}.
+              </Alert>
+            )}
+            {pushError && <Alert type="error">{pushError}</Alert>}
+            {route === "home" && <HomePage jobs={list} />}
+            {route === "jobs" && <JobsPage jobs={list} onChanged={() => void jobs.refresh()} />}
+            {route === "inbox" && <InboxPanel api={api} />}
+            {route === "events" && <EventsPanel api={api} />}
+            {route === "artifacts" && <ArtifactBrowser jobs={list} api={api} />}
+          </SpaceBetween>
+        }
+      />
+    </>
   );
 }
