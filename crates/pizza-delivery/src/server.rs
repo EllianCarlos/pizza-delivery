@@ -71,7 +71,56 @@ pub fn run(config: &Config) -> Result<()> {
         &SystemProbe,
     )?;
     let store: Box<dyn Store> = Box::new(SqliteStore::open(&config.db_path())?);
-    serve(listener, store, Arc::new(SystemEnv), config)
+    let env = DaemonEnv {
+        index: SystemIndex {
+            projects_dir: config.projects_dir.clone(),
+            engram_db: config.engram_db.clone(),
+        },
+    };
+    serve(listener, store, Arc::new(env), config)
+}
+
+/// The daemon's environment: the system clock and ids, plus a repository
+/// check at submit time so a mistyped repo is rejected before it queues.
+struct DaemonEnv {
+    index: SystemIndex,
+}
+
+impl Env for DaemonEnv {
+    fn now_ms(&self) -> i64 {
+        SystemEnv.now_ms()
+    }
+
+    fn new_ulid(&self) -> String {
+        SystemEnv.new_ulid()
+    }
+
+    fn check_repo(&self, repo: &str) -> Result<String, String> {
+        use crate::triage::ProjectIndex;
+        use pizza_delivery_core::triage::{match_repo, RepoMatch};
+        let path = std::path::Path::new(repo.trim());
+        if path.is_absolute() {
+            return if path.join(".git").exists() {
+                Ok(path.canonicalize().map_or_else(
+                    |_| repo.trim().to_owned(),
+                    |p| p.to_string_lossy().into_owned(),
+                ))
+            } else {
+                Err(format!("repository {repo:?} is not a git checkout"))
+            };
+        }
+        match match_repo(repo, &self.index.projects()) {
+            RepoMatch::Found(path) => Ok(path),
+            RepoMatch::Unknown { suggestions } if suggestions.is_empty() => Err(format!(
+                "repository {repo:?} was not found under {}",
+                self.index.projects_dir.display()
+            )),
+            RepoMatch::Unknown { suggestions } => Err(format!(
+                "repository {repo:?} was not found; did you mean {}?",
+                suggestions.join(" or ")
+            )),
+        }
+    }
 }
 
 fn with_deps<T>(
@@ -167,6 +216,7 @@ fn worker_config(config: &Config) -> Result<WorkerConfig> {
         caps: config.caps,
         retention_ms: config.retention_ms,
         budget_cap_tokens: config.budget_cap_tokens,
+        budget_cap_microusd: config.budget_cap_microusd,
         gate: config.gate,
         budget_defaults: config.budget_defaults,
         require_triage: true,

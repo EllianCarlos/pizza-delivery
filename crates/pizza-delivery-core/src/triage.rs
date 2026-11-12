@@ -123,6 +123,44 @@ fn score(prompt_tokens: &[String], name: &str) -> u8 {
     u8::try_from(best).unwrap_or(100)
 }
 
+/// What a submitted repository name or path refers to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoMatch {
+    Found(String),
+    Unknown { suggestions: Vec<String> },
+}
+
+/// Matches a submitted repository against the project index by exact name
+/// or path. Anything else is unknown, with up to three close names offered.
+pub fn match_repo(given: &str, index: &[Project]) -> RepoMatch {
+    let given = given.trim().trim_end_matches('/');
+    let lower = given.to_lowercase();
+    if let Some(p) = index
+        .iter()
+        .find(|p| p.path.trim_end_matches('/') == given || p.name.to_lowercase() == lower)
+    {
+        return RepoMatch::Found(p.path.clone());
+    }
+    let wanted = lower.rsplit('/').next().unwrap_or(&lower).to_owned();
+    let mut close: Vec<(usize, &Project)> = index
+        .iter()
+        .map(|p| (edit_distance(&wanted, &p.name.to_lowercase()), p))
+        .filter(|(d, p)| {
+            *d <= 3
+                || p.name.to_lowercase().contains(&wanted)
+                || wanted.contains(&p.name.to_lowercase())
+        })
+        .collect();
+    close.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    RepoMatch::Unknown {
+        suggestions: close
+            .into_iter()
+            .take(3)
+            .map(|(_, p)| p.name.clone())
+            .collect(),
+    }
+}
+
 fn explicit(path: &str) -> Resolution {
     Resolution {
         path: path.to_owned(),
@@ -156,7 +194,12 @@ fn resolution_of(chosen: &Candidate, rest: impl Iterator<Item = Candidate>) -> R
 
 pub fn rank(flag: Option<&str>, prompt: &str, index: &[Project]) -> Cascade {
     if let Some(path) = flag {
-        return Cascade::Decided(explicit(path));
+        // A bare name is looked up in the index; a path is taken as given.
+        let resolved = match match_repo(path, index) {
+            RepoMatch::Found(found) => found,
+            RepoMatch::Unknown { .. } => path.to_owned(),
+        };
+        return Cascade::Decided(explicit(&resolved));
     }
     let found = candidates(prompt, index);
     match found.as_slice() {
@@ -1171,5 +1214,43 @@ mod tests {
         assert_eq!(o.template, Some(Template::BugFix));
         assert!(o.report_only);
         Ok(())
+    }
+
+    #[test]
+    fn a_submitted_repo_matches_by_name_or_path_and_typos_get_suggestions() {
+        let index = vec![
+            Project {
+                name: "ellians-masters".into(),
+                path: "/p/ellians-masters".into(),
+            },
+            Project {
+                name: "website".into(),
+                path: "/p/website".into(),
+            },
+        ];
+        assert_eq!(
+            match_repo("website", &index),
+            RepoMatch::Found("/p/website".into())
+        );
+        assert_eq!(
+            match_repo("/p/website/", &index),
+            RepoMatch::Found("/p/website".into())
+        );
+        assert_eq!(
+            match_repo("ellians-master", &index),
+            RepoMatch::Unknown {
+                suggestions: vec!["ellians-masters".into()]
+            }
+        );
+        assert_eq!(
+            match_repo("zzz", &index),
+            RepoMatch::Unknown {
+                suggestions: vec![]
+            }
+        );
+        assert!(matches!(
+            rank(Some("website"), "x", &index),
+            Cascade::Decided(r) if r.path == "/p/website"
+        ));
     }
 }

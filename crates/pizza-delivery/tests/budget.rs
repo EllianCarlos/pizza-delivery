@@ -100,6 +100,44 @@ fn actual_usage_above_the_cap_parks_the_job_as_needs_human_with_feedback() -> Te
     Ok(())
 }
 
+fn agent_reporting_cost(tokens: u64, cost_usd: f64) -> String {
+    let plain = r#"echo '{"type":"result","is_error":false}'"#;
+    let reporting = format!(
+        r#"case "$PIZZA_DELIVERY_HANDOFF" in *-implement/*) echo '{{"type":"result","is_error":false,"total_cost_usd":{cost_usd},"usage":{{"input_tokens":{tokens},"output_tokens":0}}}}';; *) {plain};; esac"#
+    );
+    VALID_HANDOFF_AGENT.replace(plain, &reporting)
+}
+
+#[test]
+fn a_token_heavy_but_cheap_job_is_held_to_the_money_cap_not_the_token_cap() -> TestResult {
+    let h = Harness::with_agent(&agent_reporting_cost(3_000_000, 1.5))?
+        .with_env("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", "2000000")
+        .with_env("PIZZA_DELIVERY_BUDGET_CAP_USD", "10");
+    let id = h.submit_in_repo("do the thing")?;
+
+    let job = h.wait_for_end(&id)?;
+
+    assert_eq!(job["state"], "completed");
+    assert!(!has_high_budget_feedback(&h, &id)?);
+    Ok(())
+}
+
+#[test]
+fn spending_above_the_money_cap_parks_the_job() -> TestResult {
+    let h = Harness::with_agent(&agent_reporting_cost(10, 3.0))?
+        .with_env("PIZZA_DELIVERY_BUDGET_CAP_USD", "2");
+    let id = h.submit_in_repo("do the thing")?;
+
+    let job = h.wait_for_state(&id, &["needs-human", "completed", "failed"])?;
+
+    assert_eq!(job["state"], "needs-human");
+    let feedback = of_kind(&h, &id, "feedback-recorded")?;
+    assert!(feedback.iter().any(|f| f["text"]
+        .as_str()
+        .is_some_and(|t| t.contains("$3.00") && t.contains("$2.00"))));
+    Ok(())
+}
+
 #[test]
 fn an_overrun_on_the_last_stage_still_ships_the_finished_work() -> TestResult {
     let h = Harness::with_agent(&agent_reporting_at("review", 3_000_000))?

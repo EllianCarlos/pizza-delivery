@@ -216,6 +216,7 @@ impl Rig {
                 caps: Caps::default(),
                 retention_ms: 1000,
                 budget_cap_tokens: DEFAULT_CAP_TOKENS,
+                budget_cap_microusd: None,
                 budget_defaults: Defaults::standard(),
                 gate: GateThresholds::default(),
                 require_triage: false,
@@ -398,6 +399,7 @@ fn plan_of(rig: &Rig, names: &[&str]) -> Result<()> {
     )
 }
 
+mod decider;
 mod memorize;
 mod merge;
 mod pipeline;

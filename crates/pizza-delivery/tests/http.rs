@@ -217,6 +217,21 @@ fn submit_reply_dismiss_and_cancel_work_over_http() -> TestResult {
 }
 
 #[test]
+fn submit_rejects_a_repository_that_does_not_exist() -> TestResult {
+    let h = harness()?;
+    for repo in ["no-such-repo-anywhere", "/definitely/not/a/repo"] {
+        let (status, body) = h.http(
+            "POST",
+            "/api/jobs",
+            Some(&json!({"prompt": "fix the build", "repo": repo})),
+        )?;
+        assert_eq!(status, 400, "{repo}: {body}");
+        assert_eq!(body["kind"], "usage");
+    }
+    Ok(())
+}
+
+#[test]
 fn submit_accepts_and_validates_additional_parameters() -> TestResult {
     let h = harness()?;
     let repo = h.repo()?.to_string_lossy().into_owned();

@@ -57,6 +57,7 @@ pub struct WorkerConfig {
     pub retention_ms: i64,
     pub trust: TrustConfig,
     pub budget_cap_tokens: u64,
+    pub budget_cap_microusd: Option<u64>,
     pub budget_defaults: Defaults,
     pub gate: GateThresholds,
     pub require_triage: bool,
@@ -421,7 +422,7 @@ impl Worker<'_> {
                             self.append(job, None, EventPayload::JobFailed { reason })?;
                         }
                     }
-                } else if let Some(f) = actual_overrun(&events, self.config.budget_cap_tokens) {
+                } else if let Some(f) = actual_overrun(&events, &self.budget_cap()) {
                     // Work done so far is kept; only new stages are held back.
                     self.append(job, None, EventPayload::JobNeedsHuman { reason: f.text })?;
                 }
@@ -476,6 +477,13 @@ impl Worker<'_> {
         self.shadow_if_due(job);
         self.memorize_if_due(job);
         Ok(())
+    }
+
+    fn budget_cap(&self) -> pizza_delivery_core::budget::Cap {
+        pizza_delivery_core::budget::Cap {
+            tokens: self.config.budget_cap_tokens,
+            microusd: self.config.budget_cap_microusd,
+        }
     }
 
     fn run_claimed(&self, claimed: &Claimed) -> Result<()> {

@@ -44,6 +44,22 @@ impl RetryCause {
 
 pub const TOTAL_RETRY_CAP: usize = 4;
 
+/// How many chain candidates a retried stage skips: one per earlier attempt
+/// that ran but produced bad work (invalid handoff, timeout or crash), so a
+/// cheap first agent gets one try and the next agent takes over. Quota and
+/// transient retries do not escalate; the chain already skips those agents.
+pub fn escalation(history: &[RetryCause]) -> usize {
+    history
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                RetryCause::InvalidHandoff | RetryCause::Timeout | RetryCause::Crash
+            )
+        })
+        .count()
+}
+
 pub fn may_retry(cause: RetryCause, history: &[RetryCause]) -> bool {
     history.len() < TOTAL_RETRY_CAP
         && history.iter().filter(|c| **c == cause).count() < cause.limit()
@@ -151,6 +167,20 @@ pub fn render_interruption_note(i: &Interruption<'_>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_bad_work_escalates_a_retry_down_the_chain() {
+        assert_eq!(escalation(&[]), 0);
+        assert_eq!(escalation(&[RetryCause::Quota, RetryCause::Transient]), 0);
+        assert_eq!(
+            escalation(&[
+                RetryCause::InvalidHandoff,
+                RetryCause::Quota,
+                RetryCause::Timeout
+            ]),
+            2
+        );
+    }
 
     #[test]
     fn a_timeout_is_retried_once() {
