@@ -12,6 +12,7 @@ mod notify;
 mod process;
 mod push;
 mod remote;
+mod routing_check;
 mod sandbox;
 mod server;
 mod sqlite_store;
@@ -150,7 +151,18 @@ impl From<PriorityArg> for Priority {
 }
 
 #[derive(Subcommand)]
+enum RoutingAction {
+    /// Validate the routing file and print the resolved agent/model chain per stage
+    Check,
+}
+
+#[derive(Subcommand)]
 enum Command {
+    /// Inspect agent routing without the daemon
+    Routing {
+        #[command(subcommand)]
+        action: RoutingAction,
+    },
     /// List jobs, or show one job's timeline (id prefix or @last)
     Status {
         job: Option<String>,
@@ -586,6 +598,23 @@ fn run(cli: Cli) -> ProcessExitCode {
         Some(Command::McpBroker { .. } | Command::InstallService | Command::Completions { .. }) => {
             exit(ExitCode::General)
         }
+        Some(Command::Routing {
+            action: RoutingAction::Check,
+        }) => match config.load_routing() {
+            Ok(c) => {
+                let (text, ok) = routing_check::run(&c);
+                print!("{text}");
+                exit(if ok {
+                    ExitCode::Success
+                } else {
+                    ExitCode::General
+                })
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                exit(ExitCode::General)
+            }
+        },
         #[cfg(feature = "tui")]
         Some(Command::Tui) => run_tui(&config),
         Some(Command::Stop) => present(

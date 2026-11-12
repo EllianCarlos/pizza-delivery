@@ -35,8 +35,11 @@ impl AdapterKind {
                 Capability::Subagents,
                 Capability::StructuredQuota,
             ],
-            AdapterKind::Opencode | AdapterKind::Hermes => &[Capability::Resume],
-            AdapterKind::Agy => &[],
+            // The daemon renders each stage template into one self-contained
+            // prompt, so a CLI that takes a prompt argument can follow it.
+            AdapterKind::Opencode => &[Capability::Skills, Capability::Resume],
+            AdapterKind::Agy => &[Capability::Skills],
+            AdapterKind::Hermes => &[Capability::Resume],
         }
     }
 
@@ -107,14 +110,18 @@ pub struct RoutingConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigError {
-    #[error("routing config is not valid TOML for this schema: {0}")]
+    #[error("routing config is not valid for this schema: {0}")]
     Parse(String),
     #[error("quota_threshold must be above 0 and at most 1, got {0}")]
     Threshold(String),
-    #[error("rule {rule} has an empty chain")]
+    #[error("rules[{rule}].chain is empty")]
     EmptyChain { rule: usize },
-    #[error("rule {rule} names agent '{agent}' which is not defined under [agents]")]
-    UnknownAgent { rule: usize, agent: String },
+    #[error("rules[{rule}].chain[{index}].agent names agent '{agent}' which is not defined under [agents]")]
+    UnknownAgent {
+        rule: usize,
+        index: usize,
+        agent: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -151,8 +158,13 @@ impl RoutingConfig {
     }
 
     pub fn with_owner(self, text: &str) -> Result<Self, ConfigError> {
-        let raw: RawConfig =
-            toml::from_str(text).map_err(|e| ConfigError::Parse(e.message().to_owned()))?;
+        let raw: RawConfig = toml::from_str(text).map_err(|e| {
+            let line = e.span().map_or(String::new(), |span| {
+                let upto = text.get(..span.start).unwrap_or(text);
+                format!("line {}: ", upto.matches('\n').count() + 1)
+            });
+            ConfigError::Parse(format!("{line}{}", e.message()))
+        })?;
         let threshold_permille = match raw.quota_threshold {
             None => self.threshold_permille,
             Some(t) if t > 0.0 && t <= 1.0 => (t * 1000.0).round() as u32,
@@ -182,10 +194,12 @@ impl RoutingConfig {
             }
             r.chain
                 .iter()
-                .find(|c| !self.agents.contains_key(&c.agent))
-                .map_or(Ok(()), |c| {
+                .enumerate()
+                .find(|(_, c)| !self.agents.contains_key(&c.agent))
+                .map_or(Ok(()), |(index, c)| {
                     Err(ConfigError::UnknownAgent {
                         rule,
+                        index,
                         agent: c.agent.clone(),
                     })
                 })
@@ -247,19 +261,27 @@ fn skip_for(
     })
 }
 
+fn matching_rule<'a>(
+    config: &'a RoutingConfig,
+    request: &RouteRequest<'_>,
+) -> Result<(usize, &'a Rule), RouteError> {
+    config
+        .rules
+        .iter()
+        .enumerate()
+        .find(|(_, r)| rule_matches(r, request))
+        .ok_or_else(|| RouteError::NoRule {
+            stage: request.stage.to_owned(),
+        })
+}
+
 pub fn route(
     config: &RoutingConfig,
     request: &RouteRequest<'_>,
     quota: &QuotaSnapshot,
     now_ms: i64,
 ) -> Result<Routed, RouteError> {
-    let rule = config
-        .rules
-        .iter()
-        .find(|r| rule_matches(r, request))
-        .ok_or_else(|| RouteError::NoRule {
-            stage: request.stage.to_owned(),
-        })?;
+    let (_, rule) = matching_rule(config, request)?;
     let capable: Vec<&Candidate> = rule
         .chain
         .iter()
@@ -289,6 +311,128 @@ pub fn route(
         candidates,
         skipped,
     })
+}
+
+/// Stages the daemon routes, in pipeline order, plus the two cheap ones.
+pub const CHECKED_STAGES: [&str; 8] = [
+    "triage",
+    "grill",
+    "spec",
+    "investigate",
+    "implement",
+    "fix",
+    "review",
+    "memorize",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedCandidate {
+    pub candidate: Candidate,
+    pub adapter: AdapterKind,
+    /// False when the adapter lacks a capability the stage needs, so the
+    /// router would skip it.
+    pub usable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageCheck {
+    pub stage: String,
+    pub required: Vec<Capability>,
+    pub rule: Option<usize>,
+    pub chain: Vec<CheckedCandidate>,
+    pub problem: Option<RouteError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckReport {
+    pub threshold_permille: u32,
+    pub default_backoff_ms: i64,
+    pub stages: Vec<StageCheck>,
+}
+
+impl CheckReport {
+    pub fn is_ok(&self) -> bool {
+        self.stages.iter().all(|s| s.problem.is_none())
+    }
+}
+
+/// Resolve each routed stage against the rules (no repo, standard tier) the
+/// way the daemon would, without any quota state.
+pub fn check(config: &RoutingConfig) -> CheckReport {
+    let stages = CHECKED_STAGES
+        .iter()
+        .map(|stage| {
+            let required = stage_capabilities(stage);
+            let request = RouteRequest {
+                stage,
+                tier: "standard",
+                repo: None,
+                required: &required,
+            };
+            match matching_rule(config, &request) {
+                Err(problem) => StageCheck {
+                    stage: (*stage).to_owned(),
+                    required,
+                    rule: None,
+                    chain: Vec::new(),
+                    problem: Some(problem),
+                },
+                Ok((rule, r)) => {
+                    let chain: Vec<CheckedCandidate> = r
+                        .chain
+                        .iter()
+                        .filter_map(|c| {
+                            config.agents.get(&c.agent).map(|a| CheckedCandidate {
+                                candidate: c.clone(),
+                                adapter: a.adapter,
+                                usable: a.adapter.has(&required),
+                            })
+                        })
+                        .collect();
+                    let problem =
+                        (!chain.iter().any(|c| c.usable)).then(|| RouteError::NoCapableAgent {
+                            stage: (*stage).to_owned(),
+                        });
+                    StageCheck {
+                        stage: (*stage).to_owned(),
+                        required,
+                        rule: Some(rule),
+                        chain,
+                        problem,
+                    }
+                }
+            }
+        })
+        .collect();
+    CheckReport {
+        threshold_permille: config.threshold_permille,
+        default_backoff_ms: config.default_backoff_ms,
+        stages,
+    }
+}
+
+/// Arguments of a cheap, side-effect-free "list models" command, when the
+/// adapter's CLI has one.
+pub fn model_list_args(kind: AdapterKind) -> Option<&'static [&'static str]> {
+    match kind {
+        AdapterKind::Opencode | AdapterKind::Agy => Some(&["models"]),
+        AdapterKind::Claude | AdapterKind::Hermes => None,
+    }
+}
+
+/// First whitespace-separated token of each line, skipping progress lines.
+pub fn parse_model_list(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|l| !l.trim_end().ends_with("..."))
+        .filter_map(|l| l.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A model matches a listed one ignoring an opencode `#variant` suffix.
+pub fn model_known(listed: &[String], model: &str) -> bool {
+    let base = model.split('#').next().unwrap_or(model);
+    listed.iter().any(|m| m == model || m == base)
 }
 
 #[cfg(test)]
@@ -417,8 +561,8 @@ chain = [
         assert_eq!(
             route(&config(), &other_repo, &quota, 0).map(|r| r.candidates.first().cloned()),
             Ok(Some(Candidate {
-                agent: "claude".into(),
-                model: Some("sonnet".into())
+                agent: "opencode".into(),
+                model: None
             }))
         );
     }
@@ -458,12 +602,12 @@ chain = [
     fn a_chain_with_no_capable_agent_is_a_routing_error() {
         let only_cheap = RoutingConfig::builtin("claude").with_owner(
             r#"
-[agents.agy]
-adapter = "agy"
-command = "agy"
+[agents.hermes]
+adapter = "hermes"
+command = "hermes"
 [[rules]]
 stage = "review"
-chain = [{ agent = "agy" }]
+chain = [{ agent = "hermes" }]
 "#,
         );
         let routed = only_cheap.map(|c| {
@@ -587,5 +731,109 @@ chain = [{ agent = "agy" }]
             (builtin.threshold_permille, builtin.default_backoff_ms),
             (DEFAULT_THRESHOLD_PERMILLE, DEFAULT_BACKOFF_MS)
         );
+    }
+
+    #[test]
+    fn opencode_and_agy_follow_the_inlined_stage_prompt_so_they_run_skill_stages() {
+        assert!(AdapterKind::Opencode.has(&[Capability::Skills]));
+        assert!(AdapterKind::Agy.has(&[Capability::Skills]));
+        assert!(!AdapterKind::Hermes.has(&[Capability::Skills]));
+        assert!(!AdapterKind::Opencode.has(&[Capability::Subagents]));
+        assert!(!AdapterKind::Agy.has(&[Capability::Subagents]));
+    }
+
+    #[test]
+    fn config_errors_name_the_field_at_fault() {
+        let base = || RoutingConfig::builtin("claude");
+        let msg = |text: &str| base().with_owner(text).map_err(|e| e.to_string());
+        assert_eq!(
+            msg("[[rules]]\nchain = [{ agent = \"claude\" }]\n[[rules]]\nchain = [{ agent = \"claude\" }, { agent = \"ghost\" }]"),
+            Err("rules[1].chain[1].agent names agent 'ghost' which is not defined under [agents]".to_owned())
+        );
+        assert_eq!(
+            msg("[[rules]]\nchain = []"),
+            Err("rules[0].chain is empty".to_owned())
+        );
+        let parse = msg("\n\nsurprise = true").err().unwrap_or_default();
+        assert!(
+            parse.contains("line 3") && parse.contains("surprise"),
+            "{parse}"
+        );
+    }
+
+    #[test]
+    fn check_resolves_every_stage_to_its_chain_and_flags_unusable_candidates() {
+        let cfg = config();
+        let report = check(&cfg);
+        assert_eq!(report.threshold_permille, 800);
+        let stage = |n: &str| report.stages.iter().find(|s| s.stage == n);
+        let triage = stage("triage");
+        assert_eq!(
+            triage.map(|s| s
+                .chain
+                .iter()
+                .map(|c| c.candidate.agent.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec!["agy", "opencode", "claude"])
+        );
+        assert!(triage.is_some_and(|s| s.problem.is_none()));
+        for name in [
+            "grill",
+            "spec",
+            "implement",
+            "fix",
+            "review",
+            "investigate",
+            "memorize",
+        ] {
+            assert!(stage(name).is_some(), "{name}");
+        }
+        assert!(report.is_ok());
+    }
+
+    #[test]
+    fn check_flags_a_skill_stage_whose_chain_has_no_skills_capable_agent() {
+        let cfg = RoutingConfig::builtin("claude")
+            .with_owner(
+                r#"
+[agents.hermes]
+adapter = "hermes"
+command = "hermes"
+[[rules]]
+stage = "review"
+chain = [{ agent = "hermes" }]
+"#,
+            )
+            .map_err(|e| e.to_string());
+        let report = cfg.map(|c| check(&c));
+        let review = report
+            .as_ref()
+            .ok()
+            .and_then(|r| r.stages.iter().find(|s| s.stage == "review"));
+        assert_eq!(
+            review.map(|s| s.problem.clone()),
+            Some(Some(RouteError::NoCapableAgent {
+                stage: "review".to_owned()
+            }))
+        );
+        assert!(review.is_some_and(|s| s.chain.iter().all(|c| !c.usable)));
+        assert!(report.is_ok_and(|r| !r.is_ok()));
+    }
+
+    #[test]
+    fn model_lists_parse_per_adapter_and_only_cheap_listers_are_probed() {
+        assert_eq!(
+            model_list_args(AdapterKind::Opencode),
+            Some(&["models"][..])
+        );
+        assert_eq!(model_list_args(AdapterKind::Agy), Some(&["models"][..]));
+        assert_eq!(model_list_args(AdapterKind::Claude), None);
+        assert_eq!(model_list_args(AdapterKind::Hermes), None);
+        assert_eq!(
+            parse_model_list("Fetching available models...\ngemini-a-high\tGemini A (High)\n"),
+            vec!["gemini-a-high"]
+        );
+        assert!(model_known(&["x/y".to_owned()], "x/y#fast"));
+        assert!(!model_known(&["x/y".to_owned()], "x/z"));
     }
 }
