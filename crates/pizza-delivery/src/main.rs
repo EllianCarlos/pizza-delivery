@@ -100,6 +100,14 @@ struct Cli {
     )]
     risk_flags: Vec<String>,
 
+    /// Claude model for every stage of this job (e.g. haiku, sonnet)
+    #[arg(
+        long = "model",
+        value_name = "MODEL",
+        help_heading = "Additional Parameters"
+    )]
+    model: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -130,6 +138,7 @@ impl Cli {
             max_stages: self.max_stages,
             context_hint: self.context_hint.clone(),
             risk_flags: self.risk_flags.clone(),
+            model: self.model.clone(),
         };
         (!options.is_empty()).then_some(options)
     }
@@ -841,6 +850,8 @@ mod tests {
             "production",
             "--risk",
             "customer-data",
+            "--model",
+            "haiku",
         ]);
         assert_eq!(
             cli.options(),
@@ -850,6 +861,7 @@ mod tests {
                 max_stages: Some(3),
                 context_hint: Some("see docs".into()),
                 risk_flags: vec!["production".into(), "customer-data".into()],
+                model: Some("haiku".into()),
             })
         );
     }

@@ -685,14 +685,16 @@ pub enum FormField {
     MaxStages,
     ContextHint,
     RiskFlags,
+    Model,
 }
 
-const OPTION_FIELDS: [FormField; 5] = [
+const OPTION_FIELDS: [FormField; 6] = [
     FormField::Template,
     FormField::ReportOnly,
     FormField::MaxStages,
     FormField::ContextHint,
     FormField::RiskFlags,
+    FormField::Model,
 ];
 
 /// The new-job form: a prompt plus a collapsed "Additional Parameters" group.
@@ -707,6 +709,7 @@ pub struct NewJobForm {
     pub max_stages: String,
     pub context_hint: String,
     pub risk_flags: String,
+    pub model: String,
     /// The last triage preview, cleared as soon as the form is edited.
     pub preview: Option<String>,
 }
@@ -722,6 +725,7 @@ impl Default for NewJobForm {
             max_stages: String::new(),
             context_hint: String::new(),
             risk_flags: String::new(),
+            model: String::new(),
             preview: None,
         }
     }
@@ -765,6 +769,7 @@ impl NewJobForm {
             FormField::MaxStages => Some(&mut self.max_stages),
             FormField::ContextHint => Some(&mut self.context_hint),
             FormField::RiskFlags => Some(&mut self.risk_flags),
+            FormField::Model => Some(&mut self.model),
             FormField::Expander | FormField::ReportOnly => None,
         }
     }
@@ -838,6 +843,9 @@ impl NewJobForm {
                 .filter(|f| !f.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            model: Some(self.model.trim())
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned),
         };
         Ok((!options.is_empty()).then_some(options))
     }
@@ -1271,17 +1279,17 @@ mod tests {
     }
 
     #[test]
-    fn opening_the_group_visits_the_five_options_in_order() {
+    fn opening_the_group_visits_every_option_in_order() {
         let mut model = Model::new();
         press(&mut model, &[Key::Char('n'), Key::Tab, Key::Enter]);
         assert!(form_of(&model).open);
         let mut seen = Vec::new();
-        for _ in 0..5 {
+        for _ in OPTION_FIELDS {
             press(&mut model, &[Key::Tab]);
             seen.push(form_of(&model).focus);
         }
         assert_eq!(seen, OPTION_FIELDS);
-        press(&mut model, &[Key::Up, Key::Up, Key::Up, Key::Up, Key::Up]);
+        press(&mut model, &vec![Key::Up; OPTION_FIELDS.len()]);
         assert_eq!(form_of(&model).focus, FormField::Expander);
     }
 
@@ -1297,6 +1305,8 @@ mod tests {
         keys.extend(typed(" the auth path "));
         keys.extend([Key::Tab]);
         keys.extend(typed("production, secrets"));
+        keys.extend([Key::Tab]);
+        keys.extend(typed(" haiku "));
         keys.push(Key::Enter);
         let mut model = Model::new();
         assert_eq!(
@@ -1309,6 +1319,7 @@ mod tests {
                     max_stages: Some(3),
                     context_hint: Some("the auth path".into()),
                     risk_flags: vec!["production".into(), "secrets".into()],
+                    model: Some("haiku".into()),
                 }),
             }]
         );

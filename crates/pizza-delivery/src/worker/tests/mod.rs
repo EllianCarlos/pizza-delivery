@@ -222,6 +222,7 @@ impl Rig {
                 mcp: None,
                 memory: None,
                 auto_merge: true,
+                shadow: None,
                 trust: TrustConfig {
                     default_hosts: vec!["api.anthropic.com".to_owned()],
                     ..TrustConfig::default()

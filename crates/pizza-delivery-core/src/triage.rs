@@ -218,6 +218,7 @@ pub struct Triage {
 pub const DEFAULT_MAX_STAGES: usize = 10;
 pub const MAX_HINT_CHARS: usize = 2000;
 pub const MAX_RISK_FLAG_CHARS: usize = 40;
+pub const MAX_MODEL_CHARS: usize = 64;
 
 /// Optional "Additional Parameters" a submitter can give to sharpen triage.
 /// Every field is optional; all unset means the heuristics decide alone.
@@ -233,6 +234,10 @@ pub struct TriageOptions {
     pub context_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub risk_flags: Vec<String>,
+    /// Pins the Claude model for every stage of the job (for example
+    /// `haiku` or `sonnet`). Unset lets routing pick the stage default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +246,7 @@ pub enum OptionsError {
     BlankHint,
     HintTooLong { chars: usize },
     BadRiskFlag(String),
+    BadModel(String),
 }
 
 impl std::fmt::Display for OptionsError {
@@ -259,6 +265,10 @@ impl std::fmt::Display for OptionsError {
                 f,
                 "risk flag {flag:?} must be kebab-case (lowercase letters, digits, '-') and at most {MAX_RISK_FLAG_CHARS} characters"
             ),
+            Self::BadModel(model) => write!(
+                f,
+                "model {model:?} must be a non-blank name without spaces, at most {MAX_MODEL_CHARS} characters"
+            ),
         }
     }
 }
@@ -271,9 +281,18 @@ impl TriageOptions {
             && self.max_stages.is_none()
             && self.context_hint.is_none()
             && self.risk_flags.is_empty()
+            && self.model.is_none()
     }
 
     pub fn validate(&self) -> Result<(), OptionsError> {
+        if let Some(model) = &self.model {
+            let ok = !model.is_empty()
+                && model.chars().count() <= MAX_MODEL_CHARS
+                && !model.chars().any(char::is_whitespace);
+            if !ok {
+                return Err(OptionsError::BadModel(model.clone()));
+            }
+        }
         if let Some(max) = self.max_stages {
             if max == 0 || max > DEFAULT_MAX_STAGES {
                 return Err(OptionsError::MaxStagesOutOfRange { max });
@@ -1125,8 +1144,18 @@ mod tests {
                 OptionsError::BadRiskFlag(_)
             ));
         }
+        for model in ["", "claude sonnet", &"m".repeat(MAX_MODEL_CHARS + 1)] {
+            assert!(matches!(
+                bad(TriageOptions {
+                    model: Some(model.to_owned()),
+                    ..opts()
+                }),
+                OptionsError::BadModel(_)
+            ));
+        }
         let ok = TriageOptions {
             max_stages: Some(DEFAULT_MAX_STAGES),
+            model: Some("haiku".into()),
             context_hint: Some("x".repeat(MAX_HINT_CHARS)),
             risk_flags: vec!["customer-data".into()],
             ..opts()

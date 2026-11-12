@@ -204,7 +204,8 @@ fn usage_is_recorded_with_unknown_values_left_empty() -> Result<()> {
         _ => None,
     });
     let usage = usage.ok_or_else(|| anyhow!("no agent-finished event"))?;
-    assert_eq!(usage.model, None);
+    // The agent reported no model, so the one routing chose is recorded.
+    assert_eq!(usage.model.as_deref(), Some("sonnet"));
     assert_eq!(usage.input_tokens, None);
     assert_eq!(usage.output_tokens, None);
     assert_eq!(usage.cost_microusd, None);

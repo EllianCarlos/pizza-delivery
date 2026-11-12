@@ -66,6 +66,36 @@ export const STATE_ORDER: JobState[] = [
 
 export type Column = { state: JobState; jobs: JobView[] };
 export type Artifact = { index: number; kind: string; path: string; sha256: string };
+
+/** How an artifact reads in the job view: which stage made it and its file. */
+export type ArtifactLabel = { stage: string; file: string; order: number };
+
+/**
+ * Splits a stored artifact path into the stage that produced it and a short
+ * file name. Paths are `jobs/<job>/stages/<n>-<stage>/<file>`, or point into
+ * the job's worktree (`worktrees/<repo>/<job>/<file>`), which reads as "repo".
+ * Files at the job root (such as context.md) belong to no stage ("job").
+ */
+export function labelArtifact(path: string): ArtifactLabel {
+  const parts = path.split("/");
+  const stages = parts.indexOf("stages");
+  if (parts[0] === "jobs" && stages === 2 && parts.length > 4) {
+    const dir = parts[3] ?? "";
+    const m = /^(\d+)-(.+)$/.exec(dir);
+    return {
+      stage: m?.[2] ?? dir,
+      file: parts.slice(4).join("/"),
+      order: m ? Number(m[1]) : 0,
+    };
+  }
+  if (parts[0] === "worktrees" && parts.length > 3) {
+    return { stage: "repo", file: parts.slice(3).join("/"), order: Number.MAX_SAFE_INTEGER };
+  }
+  if (parts[0] === "jobs" && parts.length > 2) {
+    return { stage: "job", file: parts.slice(2).join("/"), order: -1 };
+  }
+  return { stage: "", file: path, order: 0 };
+}
 export type Segment = { name: string; state: StageState | "pending" };
 export type Lane = { job: JobView; segments: Segment[] };
 

@@ -3,9 +3,13 @@ mod harness;
 use harness::{Harness, TestResult, VALID_HANDOFF_AGENT};
 
 fn agent_reporting(tokens: u64) -> String {
+    agent_reporting_at("implement", tokens)
+}
+
+fn agent_reporting_at(stage: &str, tokens: u64) -> String {
     let plain = r#"echo '{"type":"result","is_error":false}'"#;
     let reporting = format!(
-        r#"case "$PIZZA_DELIVERY_HANDOFF" in *-implement/*) echo '{{"type":"result","is_error":false,"usage":{{"input_tokens":{tokens},"output_tokens":0}}}}';; *) {plain};; esac"#
+        r#"case "$PIZZA_DELIVERY_HANDOFF" in *-{stage}/*) echo '{{"type":"result","is_error":false,"usage":{{"input_tokens":{tokens},"output_tokens":0}}}}';; *) {plain};; esac"#
     );
     VALID_HANDOFF_AGENT.replace(plain, &reporting)
 }
@@ -93,6 +97,20 @@ fn actual_usage_above_the_cap_parks_the_job_as_needs_human_with_feedback() -> Te
     assert_eq!(job["state"], "needs-human");
     assert!(has_high_budget_feedback(&h, &id)?);
     assert!(of_kind(&h, &id, "job-completed")?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn an_overrun_on_the_last_stage_still_ships_the_finished_work() -> TestResult {
+    let h = Harness::with_agent(&agent_reporting_at("review", 3_000_000))?
+        .with_env("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", "2000000");
+    let id = h.submit_in_repo("do the thing")?;
+
+    let job = h.wait_for_end(&id)?;
+
+    assert_eq!(job["state"], "completed");
+    assert!(has_high_budget_feedback(&h, &id)?);
+    assert!(of_kind(&h, &id, "job-needs-human")?.is_empty());
     Ok(())
 }
 

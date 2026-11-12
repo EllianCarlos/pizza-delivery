@@ -201,7 +201,8 @@ fn unknown_usage_is_left_empty_and_known_usage_is_normalized() -> TestResult {
     assert!(bare_usage["input_tokens"].is_null());
     assert!(bare_usage["output_tokens"].is_null());
     assert!(bare_usage["cost_microusd"].is_null());
-    assert!(bare_usage["model"].is_null());
+    // No model reported, so the routed one is kept: Claude never runs unset.
+    assert_eq!(bare_usage["model"], "sonnet");
     assert!(bare_usage["wall_ms"].is_u64());
     assert_eq!(rich_usage["model"], "claude-sonnet-5-5");
     assert_eq!(rich_usage["input_tokens"], 101_196);

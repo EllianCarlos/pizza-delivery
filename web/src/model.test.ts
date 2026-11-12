@@ -20,6 +20,7 @@ import {
   stageRows,
   TOP_NAV_ROUTES,
   toolCallsOf,
+  labelArtifact,
   topNavItems,
   visibleEvents,
 } from "./model";
@@ -221,6 +222,14 @@ test("tool-called events are hidden unless shown or their family is filtered", (
   expect(visibleEvents(events, new Set(), true).map((e) => e.cursor)).toEqual([1, 2, 3]);
   expect(visibleEvents(events, new Set(["tool"]), false).map((e) => e.cursor)).toEqual([2]);
   expect(visibleEvents(events, new Set(["stage"]), true).map((e) => e.cursor)).toEqual([1]);
+});
+
+test("artifact paths read as stage and file", () => {
+  expect(labelArtifact("jobs/01M78/context.md")).toEqual({ stage: "job", file: "context.md", order: -1 });
+  expect(labelArtifact("jobs/01M78/stages/1-grill/handoff.md")).toEqual({ stage: "grill", file: "handoff.md", order: 1 });
+  expect(labelArtifact("jobs/01M78/stages/12-review/out/raw.jsonl")).toEqual({ stage: "review", file: "out/raw.jsonl", order: 12 });
+  expect(labelArtifact("worktrees/pizza-delivery/01M78/docs/specs/01M78/spec.md").file).toBe("docs/specs/01M78/spec.md");
+  expect(labelArtifact("odd.txt")).toEqual({ stage: "", file: "odd.txt", order: 0 });
 });
 
 test("topNavItems without push returns Jobs, Inbox, Events links in order", () => {

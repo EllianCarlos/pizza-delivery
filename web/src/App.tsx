@@ -171,6 +171,9 @@ function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onCl
               <FormField label="Risk flags" description="Comma-separated, kebab-case">
                 <Input value={fields.riskFlags} onChange={({ detail }) => set({ riskFlags: detail.value })} />
               </FormField>
+              <FormField label="Model" description="Claude model for every stage, e.g. haiku or sonnet. Empty lets routing choose.">
+                <Input value={fields.model} onChange={({ detail }) => set({ model: detail.value })} />
+              </FormField>
             </SpaceBetween>
           </ExpandableSection>
         </SpaceBetween>
