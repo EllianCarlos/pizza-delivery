@@ -511,6 +511,7 @@ mod tests {
                     repo: None,
                     priority: Priority::Normal,
                     follow_up: None,
+                    options: None,
                 },
             ),
         )

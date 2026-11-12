@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::event::{Event, EventPayload};
 use crate::id::JobId;
 use crate::schedule::Priority;
+use crate::triage::TriageOptions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
@@ -38,6 +39,8 @@ pub struct Job {
     pub prompt: String,
     pub repo: Option<String>,
     pub priority: Priority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<TriageOptions>,
     pub submitted_at_ms: i64,
     pub last_seq: u64,
 }
@@ -72,6 +75,7 @@ pub fn apply(state: Option<Job>, event: &Event) -> Option<Job> {
                 prompt,
                 repo,
                 priority,
+                options,
                 ..
             },
             None,
@@ -81,6 +85,7 @@ pub fn apply(state: Option<Job>, event: &Event) -> Option<Job> {
             prompt: prompt.clone(),
             repo: repo.clone(),
             priority: *priority,
+            options: options.clone(),
             submitted_at_ms: event.ts_ms,
             last_seq: event.seq,
         }),
@@ -116,6 +121,7 @@ mod tests {
                 repo: Some("/r".into()),
                 priority: Priority::High,
                 follow_up: None,
+                options: None,
             },
         }
     }
@@ -156,6 +162,7 @@ mod tests {
                 prompt: "do it".into(),
                 repo: Some("/r".into()),
                 priority: Priority::High,
+                options: None,
                 submitted_at_ms: 42,
                 last_seq: 1
             })
@@ -237,5 +244,19 @@ mod tests {
     #[test]
     fn empty_history_has_no_job() {
         assert_eq!(fold(&[]), None);
+    }
+
+    #[test]
+    fn fold_copies_options_from_the_submitted_event() {
+        let options = TriageOptions {
+            report_only: true,
+            ..Default::default()
+        };
+        let mut event = submitted(1);
+        if let EventPayload::JobSubmitted { options: o, .. } = &mut event.payload {
+            *o = Some(options.clone());
+        }
+        assert_eq!(fold(&[event]).and_then(|j| j.options), Some(options));
+        assert_eq!(fold(&[submitted(1)]).and_then(|j| j.options), None);
     }
 }

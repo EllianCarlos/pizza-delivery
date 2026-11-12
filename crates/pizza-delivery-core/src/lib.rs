@@ -51,4 +51,5 @@ pub use stage::{
     fix_rounds, fold_stages, next_claim, pipeline, pipeline_done, ClaimPlan, StageState, StageView,
 };
 pub use store::{ClaimRequest, Claimed, ExpiredLease, NewEvent, NewJob, Store, StoreError};
+pub use triage::TriageOptions;
 pub use usage::Usage;

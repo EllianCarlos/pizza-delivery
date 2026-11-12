@@ -5,7 +5,7 @@ use crate::id::JobId;
 use crate::quota::QuotaStatus;
 use crate::resilience::RetryCause;
 use crate::schedule::Priority;
-use crate::triage::{PlannedStage, Triage};
+use crate::triage::{PlannedStage, Triage, TriageOptions};
 use crate::usage::Usage;
 
 fn is_normal(priority: &Priority) -> bool {
@@ -51,6 +51,8 @@ pub enum EventPayload {
         priority: Priority,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         follow_up: Option<FollowUp>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<TriageOptions>,
     },
     JobCompleted {},
     JobCancelled {},
@@ -288,6 +290,7 @@ mod tests {
             repo: None,
             priority: Priority::Normal,
             follow_up: None,
+            options: None,
         };
         assert_eq!(p.kind(), "job-submitted");
         assert_eq!(
@@ -328,5 +331,29 @@ mod tests {
         let stored = serde_json::json!({"kind":"stage-succeeded","payload":{}});
         let parsed: Result<EventPayload, _> = serde_json::from_value(stored);
         assert_eq!(parsed.ok(), Some(EventPayload::StageSucceeded {}));
+    }
+
+    #[test]
+    fn job_submitted_without_options_replays_as_none_and_options_round_trip(
+    ) -> Result<(), serde_json::Error> {
+        let old: EventPayload =
+            serde_json::from_str(r#"{"kind":"job-submitted","payload":{"prompt":"x"}}"#)?;
+        assert!(matches!(
+            old,
+            EventPayload::JobSubmitted { options: None, .. }
+        ));
+        let with = EventPayload::JobSubmitted {
+            prompt: "x".into(),
+            repo: None,
+            priority: Priority::Normal,
+            follow_up: None,
+            options: Some(crate::triage::TriageOptions {
+                context_hint: Some("hint".into()),
+                ..Default::default()
+            }),
+        };
+        let back: EventPayload = serde_json::from_str(&serde_json::to_string(&with)?)?;
+        assert_eq!(back, with);
+        Ok(())
     }
 }

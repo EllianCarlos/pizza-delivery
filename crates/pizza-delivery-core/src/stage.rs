@@ -199,6 +199,7 @@ mod tests {
                 repo: Some("/r".into()),
                 priority: Default::default(),
                 follow_up: None,
+                options: None,
             },
         )
     }

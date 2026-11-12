@@ -135,6 +135,7 @@ fn a_candidate_known_to_be_exhausted_is_skipped_without_being_run() -> Result<()
             repo: Some("/src/my repo".into()),
             priority: Priority::Normal,
             follow_up: None,
+            options: None,
             submitted_at_ms: 0,
         })
         .map(|_| ())

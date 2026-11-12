@@ -11,8 +11,8 @@ use pizza_delivery_core::event::{Actor, EventPayload};
 use pizza_delivery_core::job::JobState;
 use pizza_delivery_core::sandbox::SandboxProfile;
 use pizza_delivery_core::triage::{
-    conclude, parse_choice, reply_text, resolve_repo, tiebreak_prompt, Candidate, Outcome, Project,
-    Triage,
+    conclude_with, parse_choice, reply_text, resolve_repo, tiebreak_prompt, Candidate, Outcome,
+    Project, Triage, TriageOptions,
 };
 use pizza_delivery_core::{Job, JobId, NewEvent, Store, StoreError};
 use sha2::{Digest, Sha256};
@@ -56,12 +56,17 @@ pub struct Report {
     pub context: Option<Context>,
 }
 
-pub fn analyze(prompt: &str, repo_flag: Option<&str>, deps: &Deps<'_>) -> Report {
+pub fn analyze(
+    prompt: &str,
+    repo_flag: Option<&str>,
+    options: Option<&TriageOptions>,
+    deps: &Deps<'_>,
+) -> Report {
     let index = deps.index.projects();
     let resolution = resolve_repo(repo_flag, prompt, &index, &|top| {
         deps.tie_breaker.choose(prompt, top)
     });
-    let outcome = conclude(prompt, resolution);
+    let outcome = conclude_with(prompt, resolution, options);
     let context = outcome.triage.as_ref().map(|t| {
         let repo = Path::new(&t.repo.path);
         let sections: Vec<Section> = deps
@@ -132,7 +137,12 @@ impl Triager<'_> {
         let Some(job) = self.pending()? else {
             return Ok(false);
         };
-        let report = analyze(&job.prompt, job.repo.as_deref(), &self.deps);
+        let report = analyze(
+            &job.prompt,
+            job.repo.as_deref(),
+            job.options.as_ref(),
+            &self.deps,
+        );
         self.record(&job, &report)?;
         Ok(true)
     }
@@ -503,6 +513,7 @@ mod tests {
                 repo: repo.map(str::to_owned),
                 priority: Priority::Normal,
                 follow_up: None,
+                options: None,
                 submitted_at_ms: 0,
             })?;
             Ok(Self {
@@ -615,6 +626,7 @@ mod tests {
         let report = analyze(
             "add a feature",
             Some("/r"),
+            None,
             &Deps {
                 index: &index,
                 tie_breaker: &tie,

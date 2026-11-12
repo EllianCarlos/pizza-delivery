@@ -167,6 +167,7 @@ impl Rig {
             repo: Some("/src/my repo".into()),
             priority: Priority::Normal,
             follow_up: None,
+            options: None,
             submitted_at_ms: 0,
         })?;
         Ok(Self {

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::process::ExitCode as ProcessExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use pizza_delivery_core::triage::render_triage;
+use pizza_delivery_core::triage::{render_triage, Template, TriageOptions};
 use pizza_delivery_core::{
     render_dismissed, render_inbox, render_inbox_entry, render_jobs, render_quota, render_replied,
     render_submitted, render_timeline, ExitCode, OutputMode, Priority, Request, Response,
@@ -62,8 +62,72 @@ struct Cli {
     #[arg(long, value_enum)]
     priority: Option<PriorityArg>,
 
+    /// Plan template, overriding the one triage would pick from the prompt
+    #[arg(
+        long,
+        value_enum,
+        value_name = "TEMPLATE",
+        help_heading = "Additional Parameters"
+    )]
+    template: Option<TemplateArg>,
+
+    /// Stop with findings: drop the implement, review and ship stages
+    #[arg(long, help_heading = "Additional Parameters")]
+    report_only: bool,
+
+    /// Cap the number of planned stages (1 to 10)
+    #[arg(long, value_name = "N", help_heading = "Additional Parameters")]
+    max_stages: Option<usize>,
+
+    /// Extra context for triage, appended to the restated task
+    #[arg(
+        long = "context",
+        value_name = "TEXT",
+        help_heading = "Additional Parameters"
+    )]
+    context_hint: Option<String>,
+
+    /// Extra risk flag to assert (kebab-case, repeatable)
+    #[arg(
+        long = "risk",
+        value_name = "FLAG",
+        help_heading = "Additional Parameters"
+    )]
+    risk_flags: Vec<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TemplateArg {
+    FullFeature,
+    BugFix,
+    Investigate,
+}
+
+impl From<TemplateArg> for Template {
+    fn from(arg: TemplateArg) -> Self {
+        match arg {
+            TemplateArg::FullFeature => Template::FullFeature,
+            TemplateArg::BugFix => Template::BugFix,
+            TemplateArg::Investigate => Template::Investigate,
+        }
+    }
+}
+
+impl Cli {
+    /// Options are sent only when at least one Additional Parameter is set.
+    fn options(&self) -> Option<TriageOptions> {
+        let options = TriageOptions {
+            template: self.template.map(Into::into),
+            report_only: self.report_only,
+            max_stages: self.max_stages,
+            context_hint: self.context_hint.clone(),
+            risk_flags: self.risk_flags.clone(),
+        };
+        (!options.is_empty()).then_some(options)
+    }
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -417,6 +481,7 @@ fn run(cli: Cli) -> ProcessExitCode {
         }
     };
     let tty = std::io::stdout().is_terminal();
+    let options = cli.options();
     match cli.command {
         Some(Command::Daemon) => match config
             .load_routing()
@@ -498,12 +563,17 @@ fn run(cli: Cli) -> ProcessExitCode {
                         .into_owned()
                 });
                 let req = if cli.dry_run {
-                    Request::Triage { prompt, repo }
+                    Request::Triage {
+                        prompt,
+                        repo,
+                        options,
+                    }
                 } else {
                     Request::Submit {
                         prompt,
                         repo,
                         priority: cli.priority.map(Into::into),
+                        options,
                     }
                 };
                 request(&config, req, OutputMode::resolve(cli.json, tty))
@@ -522,4 +592,63 @@ fn run(cli: Cli) -> ProcessExitCode {
 
 fn main() -> ProcessExitCode {
     run(Cli::parse())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::parse_from(std::iter::once("pizza-delivery").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn no_additional_parameters_sends_no_options() {
+        assert_eq!(parse(&["do it"]).options(), None);
+    }
+
+    #[test]
+    fn additional_parameters_map_onto_options() {
+        let cli = parse(&[
+            "do it",
+            "--template",
+            "bug-fix",
+            "--report-only",
+            "--max-stages",
+            "3",
+            "--context",
+            "see docs",
+            "--risk",
+            "production",
+            "--risk",
+            "customer-data",
+        ]);
+        assert_eq!(
+            cli.options(),
+            Some(TriageOptions {
+                template: Some(Template::BugFix),
+                report_only: true,
+                max_stages: Some(3),
+                context_hint: Some("see docs".into()),
+                risk_flags: vec!["production".into(), "customer-data".into()],
+            })
+        );
+    }
+
+    #[test]
+    fn help_groups_the_flags_under_additional_parameters() {
+        let help = Cli::command().render_long_help().to_string();
+        let (_, group) = help
+            .split_once("Additional Parameters:")
+            .unwrap_or_default();
+        for flag in [
+            "--template",
+            "--report-only",
+            "--max-stages",
+            "--context",
+            "--risk",
+        ] {
+            assert!(group.contains(flag), "{flag} missing");
+        }
+    }
 }

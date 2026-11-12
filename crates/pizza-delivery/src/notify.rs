@@ -209,6 +209,7 @@ mod tests {
                 repo: Some("/r".into()),
                 priority: Priority::Normal,
                 follow_up: None,
+                options: None,
                 submitted_at_ms: 1,
             })
             .map(|_| ())

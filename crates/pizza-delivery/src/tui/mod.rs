@@ -146,6 +146,7 @@ fn act(config: &Config, command: Command, tx: &Sender<Msg>) {
                     prompt,
                     repo: None,
                     priority: None,
+                    options: None,
                 },
             ),
             Command::Reply { targets, text } => call(

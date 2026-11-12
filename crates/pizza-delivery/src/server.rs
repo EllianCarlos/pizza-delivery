@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use listenfd::ListenFd;
 use pizza_delivery_core::api::{ApiError, ErrorKind};
-use pizza_delivery_core::{ExpiredLease, JobId, Request, Response, Store};
+use pizza_delivery_core::{ExpiredLease, JobId, Request, Response, Store, TriageOptions};
 
 use crate::agent::{CliAgent, Fleet};
 use crate::config::Config;
@@ -109,9 +109,12 @@ fn dry_run(
     config: &Config,
     prompt: &str,
     repo: Option<&str>,
+    options: Option<&TriageOptions>,
 ) -> Response {
     let agent = CliAgent::new(AdapterKind::Claude, &config.agent_command);
-    let report = with_deps(store, config, &agent, |deps| analyze(prompt, repo, &deps));
+    let report = with_deps(store, config, &agent, |deps| {
+        analyze(prompt, repo, options, &deps)
+    });
     Response::Triaged {
         outcome: report.outcome,
         context_sources: report.context.map(|c| c.included).unwrap_or_default(),
@@ -415,7 +418,24 @@ fn connection(
         Ok(Request::Triage { prompt, .. }) if prompt.trim().is_empty() => {
             failure(ErrorKind::Usage, "prompt must not be empty")
         }
-        Ok(Request::Triage { prompt, repo }) => dry_run(store, config, &prompt, repo.as_deref()),
+        Ok(Request::Triage {
+            options: Some(options),
+            ..
+        }) if options.validate().is_err() => {
+            let reason = options.validate().err().map(|e| e.to_string());
+            failure(ErrorKind::Usage, reason.unwrap_or_default())
+        }
+        Ok(Request::Triage {
+            prompt,
+            repo,
+            options,
+        }) => dry_run(
+            store,
+            config,
+            &prompt,
+            repo.as_deref(),
+            options.filter(|o| !o.is_empty()).as_ref(),
+        ),
         Ok(request) => dispatch(request, store, env, stop, kill_grace),
         Err(e) => failure(ErrorKind::Usage, format!("bad request: {e}")),
     };

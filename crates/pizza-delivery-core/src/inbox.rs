@@ -149,6 +149,7 @@ mod tests {
                         entries: vec!["E1".into()],
                         reply: "r".into(),
                     }),
+                    options: None,
                 },
             ),
             event(

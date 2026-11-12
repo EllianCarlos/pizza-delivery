@@ -641,6 +641,7 @@ fn submit(api: &Api, req: &Req) -> Reply {
         prompt: b.prompt,
         repo: b.repo,
         priority: b.priority,
+        options: None,
     }) {
         Response::Submitted { id, short_id } => ok(&SubmittedView {
             id: id.as_str().to_owned(),

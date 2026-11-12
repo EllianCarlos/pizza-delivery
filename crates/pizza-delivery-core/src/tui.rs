@@ -677,6 +677,7 @@ mod tests {
                 repo: None,
                 priority: crate::schedule::Priority::Normal,
                 follow_up: None,
+                options: None,
             },
         )
     }
