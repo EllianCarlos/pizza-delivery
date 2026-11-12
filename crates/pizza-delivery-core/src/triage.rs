@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, EventPayload};
+use crate::gate::Impact;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -371,6 +372,27 @@ pub struct Feedback {
     pub severity: String,
     pub text: String,
     pub confidence: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<Impact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+impl Feedback {
+    /// Feedback with no gate metadata; hard stops use this and always reach the inbox.
+    pub fn new(kind: &str, severity: &str, text: String, confidence: Option<u8>) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            severity: severity.to_owned(),
+            text,
+            confidence,
+            alternatives: Vec::new(),
+            impact: None,
+            evidence: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -396,26 +418,25 @@ pub fn conclude(prompt: &str, resolution: Option<Resolution>) -> Outcome {
     match resolution {
         None => Outcome {
             triage: None,
-            feedback: vec![Feedback {
-                kind: "needs-human".to_owned(),
-                severity: "high".to_owned(),
-                text: "no repository matched the prompt; pass --repo or name the project"
-                    .to_owned(),
-                confidence: None,
-            }],
+            feedback: vec![Feedback::new(
+                "needs-human",
+                "high",
+                "no repository matched the prompt; pass --repo or name the project".to_owned(),
+                None,
+            )],
         },
         Some(resolution) => {
             let feedback = if resolution.is_low() {
-                vec![Feedback {
-                    kind: "assumption".to_owned(),
-                    severity: "medium".to_owned(),
-                    text: format!(
+                vec![Feedback::new(
+                    "assumption",
+                    "medium",
+                    format!(
                         "assumed the repository is {} (best of {} candidates)",
                         resolution.path,
                         resolution.alternatives.len() + 1
                     ),
-                    confidence: Some(resolution.confidence),
-                }]
+                    Some(resolution.confidence),
+                )]
             } else {
                 vec![]
             };

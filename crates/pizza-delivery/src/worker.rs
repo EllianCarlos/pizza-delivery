@@ -9,7 +9,8 @@ use pizza_delivery_core::budget::{
 };
 use pizza_delivery_core::classify::{classify, Classified, Failure, RawRun};
 use pizza_delivery_core::event::{Actor, EventPayload};
-use pizza_delivery_core::handoff::validate;
+use pizza_delivery_core::gate::{gate, GateDecision, GateItem, GateThresholds, Impact};
+use pizza_delivery_core::handoff::{self, validate};
 use pizza_delivery_core::prompt::{
     render_stage_prompt, with_interruption_note, TEMPLATE_NAME, TEMPLATE_VERSION,
 };
@@ -41,6 +42,7 @@ pub struct WorkerConfig {
     pub retention_ms: i64,
     pub trust: TrustConfig,
     pub budget_cap_tokens: u64,
+    pub gate: GateThresholds,
     pub require_triage: bool,
 }
 
@@ -640,6 +642,7 @@ impl Worker<'_> {
                 &claimed.name,
                 &job.prompt,
                 &run.handoff_path.to_string_lossy(),
+                self.config.gate.auto_at,
             ),
             note,
         );
@@ -814,6 +817,9 @@ impl Worker<'_> {
                 severity: f.severity,
                 text: f.text.clone(),
                 confidence: f.confidence,
+                alternatives: f.alternatives,
+                impact: f.impact,
+                evidence: f.evidence,
             },
         )?;
         Ok(Some(f.text))
@@ -841,6 +847,44 @@ impl Worker<'_> {
         )
     }
 
+    fn ingest_items(&self, claimed: &Claimed, text: &str) -> Result<()> {
+        for item in handoff::items(text) {
+            let decision = gate(
+                GateItem {
+                    confidence: item.confidence,
+                    impact: item.impact,
+                },
+                self.config.gate,
+            );
+            let payload = if decision == GateDecision::Inbox {
+                EventPayload::FeedbackRecorded {
+                    kind: item.kind.as_str().to_owned(),
+                    severity: match item.impact {
+                        Some(Impact::Irreversible | Impact::High) | None => "high",
+                        Some(Impact::Medium) => "medium",
+                        Some(Impact::Low) => "low",
+                    }
+                    .to_owned(),
+                    text: item.text,
+                    confidence: item.confidence,
+                    alternatives: item.alternatives,
+                    impact: item.impact,
+                    evidence: item.evidence,
+                }
+            } else {
+                EventPayload::FeedbackSuppressed {
+                    kind: item.kind.as_str().to_owned(),
+                    text: item.text,
+                    confidence: item.confidence,
+                    impact: item.impact,
+                    decision,
+                }
+            };
+            self.append(&claimed.job.id, Some(&claimed.stage_id), payload)?;
+        }
+        Ok(())
+    }
+
     fn accept_handoff(&self, claimed: &Claimed, handoff_rel: &Path) -> Result<Verdict> {
         let path = self.config.data_dir.join(handoff_rel);
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -859,6 +903,8 @@ impl Worker<'_> {
                         path: handoff_rel.to_string_lossy().into_owned(),
                     },
                 )?;
+                // Ingestion is best effort: a ledger hiccup here must not fail the stage.
+                let _ = self.ingest_items(claimed, &text);
                 Ok(Verdict::Succeeded)
             }
             Err(e) => Ok(Verdict::Retry(
@@ -1030,6 +1076,7 @@ mod tests {
                     caps: Caps::default(),
                     retention_ms: 1000,
                     budget_cap_tokens: DEFAULT_CAP_TOKENS,
+                    gate: GateThresholds::default(),
                     require_triage: false,
                     trust: TrustConfig {
                         default_hosts: vec!["api.anthropic.com".to_owned()],

@@ -8,6 +8,10 @@
 
 **Feedback entry**: something the agent surfaces for the human: an assumption it made, a question it could not answer, or a risk it noticed.
 
+**Confidence gate**: the pure rule that decides whether an assumption, open question or risk from a handoff reaches the inbox. Items below the inbox threshold (default 50) with high or irreversible impact go to the inbox; items at or above the auto threshold (default 80) are auto-resolved; the rest stay in the handoff. Missing or malformed confidence or impact metadata goes to the inbox. Budget-cap, unresolved-repo and diff-policy stops bypass the gate.
+
+**Suppressed feedback**: a handoff item the confidence gate kept out of the inbox. It is recorded as a `feedback-suppressed` ledger event so nothing is dropped silently.
+
 **Follow-up job**: a job created by the human replying to one or more feedback entries of an earlier job.
 
 **Ledger**: the append-only log of everything that happened to every job.

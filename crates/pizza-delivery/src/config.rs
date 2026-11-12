@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
+use pizza_delivery_core::gate::{GateThresholds, DEFAULT_AUTO_AT, DEFAULT_INBOX_BELOW};
 use pizza_delivery_core::routing::{ConfigError as RoutingError, RoutingConfig};
 use pizza_delivery_core::{Caps, DEFAULT_RETENTION_MS};
 use thiserror::Error;
@@ -24,6 +25,7 @@ pub struct Config {
     pub engram_command: PathBuf,
     pub mnemon_command: PathBuf,
     pub budget_cap_tokens: u64,
+    pub gate: GateThresholds,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +40,10 @@ pub enum ConfigError {
     NoDataDir,
     #[error("cannot read routing config {path}: {reason}")]
     RoutingUnreadable { path: PathBuf, reason: String },
+    #[error("{key} must be a whole number from 0 to 100, got '{value}'")]
+    GateValue { key: &'static str, value: String },
+    #[error("PIZZA_DELIVERY_GATE_INBOX_BELOW ({inbox_below}) must not exceed PIZZA_DELIVERY_GATE_AUTO_AT ({auto_at})")]
+    GateOrder { inbox_below: u8, auto_at: u8 },
     #[error("routing config {path}: {source}")]
     Routing { path: PathBuf, source: RoutingError },
 }
@@ -83,6 +89,25 @@ impl Config {
                         required: false,
                     })
             });
+        let gate_value = |key: &'static str, default: u8| match get(key) {
+            None => Ok(default),
+            Some(v) => v
+                .trim()
+                .parse::<u8>()
+                .ok()
+                .filter(|n| *n <= 100)
+                .ok_or(ConfigError::GateValue { key, value: v }),
+        };
+        let gate = GateThresholds {
+            inbox_below: gate_value("PIZZA_DELIVERY_GATE_INBOX_BELOW", DEFAULT_INBOX_BELOW)?,
+            auto_at: gate_value("PIZZA_DELIVERY_GATE_AUTO_AT", DEFAULT_AUTO_AT)?,
+        };
+        if gate.inbox_below > gate.auto_at {
+            return Err(ConfigError::GateOrder {
+                inbox_below: gate.inbox_below,
+                auto_at: gate.auto_at,
+            });
+        }
         Ok(Self {
             routing: RoutingConfig::builtin(&agent_command.to_string_lossy()),
             routing_file,
@@ -106,6 +131,7 @@ impl Config {
             engram_command: path_or("PIZZA_DELIVERY_ENGRAM", PathBuf::from("engram")),
             mnemon_command: path_or("PIZZA_DELIVERY_MNEMON", PathBuf::from("mnemon")),
             budget_cap_tokens: number("PIZZA_DELIVERY_BUDGET_CAP_TOKENS", DEFAULT_CAP_TOKENS),
+            gate,
         })
     }
 
@@ -279,6 +305,42 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn gate_thresholds_default_to_50_and_80_and_read_from_env() -> Result<(), ConfigError> {
+        let d = Config::from_lookup(lookup(&[("HOME", "/h")]))?;
+        assert_eq!((d.gate.inbox_below, d.gate.auto_at), (50, 80));
+        let c = Config::from_lookup(lookup(&[
+            ("HOME", "/h"),
+            ("PIZZA_DELIVERY_GATE_INBOX_BELOW", "30"),
+            ("PIZZA_DELIVERY_GATE_AUTO_AT", "90"),
+        ]))?;
+        assert_eq!((c.gate.inbox_below, c.gate.auto_at), (30, 90));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_gate_thresholds_are_rejected() {
+        let with = |k: &'static str, v: &'static str| {
+            Config::from_lookup(lookup(&[("HOME", "/h"), (k, v)]))
+        };
+        assert!(matches!(
+            with("PIZZA_DELIVERY_GATE_AUTO_AT", "abc"),
+            Err(ConfigError::GateValue { .. })
+        ));
+        assert!(matches!(
+            with("PIZZA_DELIVERY_GATE_AUTO_AT", "101"),
+            Err(ConfigError::GateValue { .. })
+        ));
+        assert!(matches!(
+            with("PIZZA_DELIVERY_GATE_INBOX_BELOW", "-1"),
+            Err(ConfigError::GateValue { .. })
+        ));
+        assert!(matches!(
+            with("PIZZA_DELIVERY_GATE_INBOX_BELOW", "81"),
+            Err(ConfigError::GateOrder { .. })
+        ));
     }
 
     #[test]
