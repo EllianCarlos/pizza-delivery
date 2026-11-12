@@ -265,7 +265,12 @@ impl Git for SystemGit {
             let _ = gh(worktree, &["label", "create", label, "--force"]);
             args.extend(["--label", label]);
         }
-        let out = gh(worktree, &args)?;
+        let out = match gh(worktree, &args) {
+            Ok(out) => out,
+            // A repeated ship (a retried stage, a restarted daemon) finds the
+            // PR it opened before; reuse it instead of failing the job.
+            Err(e) => return existing_pr_url(&format!("{e:#}")).ok_or(e),
+        };
         out.lines()
             .last()
             .map(str::to_owned)
@@ -311,6 +316,18 @@ impl Git for SystemGit {
     }
 }
 
+/// The URL of the PR that `gh pr create` refused to duplicate, if that is why it failed.
+fn existing_pr_url(error: &str) -> Option<String> {
+    if !error.contains("already exists") {
+        return None;
+    }
+    error
+        .lines()
+        .map(str::trim)
+        .rfind(|l| l.starts_with("https://") && l.contains("/pull/"))
+        .map(str::to_owned)
+}
+
 fn gh(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("gh")
         .current_dir(dir)
@@ -320,9 +337,11 @@ fn gh(dir: &Path, args: &[&str]) -> Result<String> {
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     } else {
+        // Name the subcommand only: the arguments may hold a whole PR body.
+        let command: Vec<&str> = args.iter().take(2).copied().collect();
         Err(anyhow!(
             "gh {} failed: {}",
-            args.join(" "),
+            command.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
@@ -414,6 +433,16 @@ mod tests {
 
     fn poll(json: &str) -> PrPoll {
         classify_pr_view(json).unwrap_or_else(|e| PrPoll::Blocked(format!("invalid json: {e}")))
+    }
+
+    #[test]
+    fn a_duplicate_pr_error_yields_the_existing_pr() {
+        let err = "gh pr create failed: a pull request for branch \"pizza/J1\" into branch \"main\" already exists:\nhttps://github.com/o/r/pull/1";
+        assert_eq!(
+            existing_pr_url(err).as_deref(),
+            Some("https://github.com/o/r/pull/1")
+        );
+        assert_eq!(existing_pr_url("gh pr create failed: no commits"), None);
     }
 
     #[test]
