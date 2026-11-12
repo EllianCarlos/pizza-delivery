@@ -69,6 +69,7 @@ export function DetailPanel({
         empty={<Box>No feedback</Box>}
         columnDefinitions={[
           { id: "kind", header: "Kind", cell: (e) => e.kind },
+          { id: "status", header: "Status", cell: (e) => e.status },
           { id: "sev", header: "Severity", cell: (e) => e.severity },
           { id: "text", header: "Text", cell: (e) => e.text },
           { id: "status", header: "Status", cell: (e) => e.status },
@@ -123,10 +124,14 @@ export function InboxPanel({ api }: { api: Api }) {
   const [selected, setSelected] = useState<InboxEntry[]>([]);
   const [text, setText] = useState("");
   const [note, setNote] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const entries = data?.entries ?? [];
+  // The server only accepts open entries; one answered entry rejects the whole batch.
+  const open = selected.filter((e) => e.status === "open");
   return (
     <SpaceBetween size="m">
       {error && <Alert type="error">{error}</Alert>}
+      {actionError && <Alert type="error" dismissible onDismiss={() => setActionError(null)}>{actionError}</Alert>}
       {note && <Alert type="success" dismissible onDismiss={() => setNote(null)}>{note}</Alert>}
       <Table
         header={<Header counter={`(${entries.length})`}>Feedback inbox</Header>}
@@ -148,23 +153,34 @@ export function InboxPanel({ api }: { api: Api }) {
       <SpaceBetween size="xs" direction="horizontal">
         <Button
           variant="primary"
-          disabled={selected.length === 0 || text.trim() === ""}
+          disabled={open.length === 0 || text.trim() === ""}
           onClick={async () => {
-            const out = await api.reply(selected.map((e) => e.id), text);
-            setNote(`Follow-up job ${out.short_id} created`);
-            setSelected([]);
-            setText("");
-            await refresh();
+            try {
+              const out = await api.reply(open.map((e) => e.id), text);
+              setNote(`Follow-up job ${out.short_id} created`);
+              setActionError(null);
+              setSelected([]);
+              setText("");
+              await refresh();
+            } catch (e) {
+              setActionError(e instanceof Error ? e.message : String(e));
+            }
           }}
         >
           Reply
         </Button>
         <Button
-          disabled={selected.length === 0}
+          disabled={open.length === 0}
           onClick={async () => {
-            await api.dismiss(selected.map((e) => e.id));
-            setSelected([]);
-            await refresh();
+            try {
+              await api.dismiss(open.map((e) => e.id));
+              setNote(`Dismissed ${open.length} ${open.length === 1 ? "entry" : "entries"}`);
+              setActionError(null);
+              setSelected([]);
+              await refresh();
+            } catch (e) {
+              setActionError(e instanceof Error ? e.message : String(e));
+            }
           }}
         >
           Dismiss
