@@ -379,7 +379,12 @@ impl Api {
             .and_then(|e| e.as_array())
             .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        let Response::Inbox { entries } = self.run(Request::Inbox { all: true }) else {
+        let Response::Inbox { entries } = self.run(Request::Inbox {
+            all: true,
+            filter: Default::default(),
+            query: None,
+            limit: None,
+        }) else {
             return Vec::new();
         };
         let mut jobs: Vec<String> = entries
@@ -435,7 +440,12 @@ fn route(api: &Api, req: &Req) -> Reply {
         },
         ("GET", ["api", "inbox"]) => {
             let all = matches!(query(req, "all"), Some("1" | "true"));
-            match api.run(Request::Inbox { all }) {
+            match api.run(Request::Inbox {
+                all,
+                filter: Default::default(),
+                query: None,
+                limit: None,
+            }) {
                 Response::Inbox { entries } => ok(&InboxView { entries }),
                 Response::Error { error } => failed(error),
                 _ => bad(ErrorKind::Internal, "unexpected response"),
@@ -555,7 +565,12 @@ fn detail(api: &Api, reference: &str) -> Reply {
         Response::Error { error } => return failed(error),
         _ => return bad(ErrorKind::Internal, "unexpected response"),
     };
-    let inbox = match api.run(Request::Inbox { all: true }) {
+    let inbox = match api.run(Request::Inbox {
+        all: true,
+        filter: Default::default(),
+        query: None,
+        limit: None,
+    }) {
         Response::Inbox { entries } => entries,
         _ => Vec::new(),
     };

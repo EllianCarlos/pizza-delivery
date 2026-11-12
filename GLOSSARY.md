@@ -20,4 +20,8 @@
 
 **Pipeline**: the view that shows one lane per job with one segment per stage.
 
+**Filter**: a set of property constraints that narrows a list of events, artifacts or feedback entries (the inbox). The inbox filter also covers an entry's status: open, answered or dismissed. Different properties are ANDed; repeated values of one property are ORed.
+
+**Search**: a case-insensitive substring match over an item's text fields, ANDed with the filter.
+
 **Triage options**: the optional "Additional Parameters" a submitter can give with a job (template, report-only, max stages, context hint, extra risk flags) to override or sharpen what triage would decide from the prompt alone.

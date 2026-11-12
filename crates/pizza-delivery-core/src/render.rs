@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::api::JobView;
+use crate::api::{JobView, Response};
 use crate::event::Event;
 use crate::id::JobId;
 use crate::inbox::InboxEntry;
@@ -260,6 +260,66 @@ pub fn render_timeline(
             format!("{head}{stage_rows}{rows}")
         }
     }
+}
+
+fn stamp(ts_ms: i64) -> String {
+    let secs = ts_ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // civil-from-days (Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+pub fn render_artifacts(response: &Response, mode: OutputMode) -> String {
+    let Response::ArtifactItems { items } = response else {
+        return String::new();
+    };
+    if mode == OutputMode::Json {
+        return line(&json!(response));
+    }
+    items
+        .iter()
+        .map(|a| format!("{} {} {} {}\n", stamp(a.ts_ms), a.short_id, a.kind, a.path))
+        .collect()
+}
+
+pub fn render_events(response: &Response, mode: OutputMode) -> String {
+    let Response::EventItems { items } = response else {
+        return String::new();
+    };
+    if mode == OutputMode::Json {
+        return line(&json!(response));
+    }
+    items
+        .iter()
+        .map(|e| {
+            format!(
+                "{} {} {} {}{}\n",
+                stamp(e.ts_ms),
+                e.job_id.as_str().get(..8).unwrap_or(e.job_id.as_str()),
+                e.payload.kind(),
+                e.actor.as_str(),
+                e.stage_id
+                    .as_deref()
+                    .map(|s| format!(" {s}"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
