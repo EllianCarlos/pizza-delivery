@@ -420,6 +420,9 @@ impl Worker<'_> {
                             self.append(job, None, EventPayload::JobFailed { reason })?;
                         }
                     }
+                } else if let Some(f) = actual_overrun(&events, self.config.budget_cap_tokens) {
+                    // Work done so far is kept; only new stages are held back.
+                    self.append(job, None, EventPayload::JobNeedsHuman { reason: f.text })?;
                 }
             }
             Verdict::NeedsHuman(reason) => {
