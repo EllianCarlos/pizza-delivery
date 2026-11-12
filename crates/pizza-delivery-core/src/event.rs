@@ -226,13 +226,23 @@ pub enum EventPayload {
         count: u32,
         reasons: std::collections::BTreeMap<String, u32>,
     },
+    Conciliated {
+        repo: String,
+        pr: u64,
+        branch: String,
+        action: String,
+        detail: String,
+    },
 }
 
 pub const SYSTEM_JOB: &str = "system";
 
 impl EventPayload {
     pub fn is_system(&self) -> bool {
-        matches!(self, EventPayload::AuthRejected { .. })
+        matches!(
+            self,
+            EventPayload::AuthRejected { .. } | EventPayload::Conciliated { .. }
+        )
     }
 
     pub fn kind(&self) -> &'static str {
@@ -276,6 +286,7 @@ impl EventPayload {
             EventPayload::WriteBack { .. } => "write-back",
             EventPayload::RemoteAction { .. } => "remote-action",
             EventPayload::AuthRejected { .. } => "auth-rejected",
+            EventPayload::Conciliated { .. } => "conciliated",
         }
     }
 }

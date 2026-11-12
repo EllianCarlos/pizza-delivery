@@ -2,6 +2,8 @@ mod access;
 mod agent;
 mod assets;
 mod client;
+mod conciliate;
+mod conciliate_lock;
 mod config;
 mod git;
 mod handler;
@@ -204,6 +206,15 @@ enum Command {
         /// Path substring (repeatable)
         #[arg(long)]
         path: Vec<String>,
+    },
+    /// Merge main into clean open pizza PR branches and report conflicts
+    Conciliate {
+        /// Repo checkout to conciliate (default: the current directory)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Print the plan only; change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Cancel a job, terminate its running stage and keep its worktree
     Cancel { job: String },
@@ -542,6 +553,16 @@ fn install_service() -> ProcessExitCode {
     }
 }
 
+fn run_conciliate(config: &Config, repo: Option<PathBuf>, dry_run: bool) -> ProcessExitCode {
+    match conciliate::execute(config, repo, dry_run) {
+        Ok(()) => exit(ExitCode::Success),
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            exit(ExitCode::General)
+        }
+    }
+}
+
 fn run(cli: Cli) -> ProcessExitCode {
     match cli.command {
         Some(Command::InstallService) => return install_service(),
@@ -583,6 +604,7 @@ fn run(cli: Cli) -> ProcessExitCode {
                 exit(ExitCode::General)
             }
         },
+        Some(Command::Conciliate { repo, dry_run }) => run_conciliate(&config, repo, dry_run),
         Some(Command::McpBroker { .. } | Command::InstallService | Command::Completions { .. }) => {
             exit(ExitCode::General)
         }
