@@ -247,8 +247,16 @@ pub fn serve(
     listener
         .set_nonblocking(true)
         .context("nonblocking listener")?;
+    let http = config
+        .http_listen
+        .map(|addr| std::net::TcpListener::bind(addr).with_context(|| format!("bind {addr}")))
+        .transpose()?;
     let store = Arc::new(Mutex::new(store));
     let stop = Arc::new(AtomicBool::new(false));
+    if let Some(http) = http {
+        let (config, stop) = (config.clone(), Arc::clone(&stop));
+        std::thread::spawn(move || crate::http::serve_http(http, config, stop));
+    }
     let git = Arc::new(LockedGit::new(SystemGit));
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
     {

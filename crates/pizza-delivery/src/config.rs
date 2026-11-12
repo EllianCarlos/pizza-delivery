@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
@@ -24,6 +25,8 @@ pub struct Config {
     pub engram_command: PathBuf,
     pub mnemon_command: PathBuf,
     pub budget_cap_tokens: u64,
+    /// Loopback address for the opt-in web form; `None` opens no TCP listener.
+    pub http_listen: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +43,8 @@ pub enum ConfigError {
     RoutingUnreadable { path: PathBuf, reason: String },
     #[error("routing config {path}: {source}")]
     Routing { path: PathBuf, source: RoutingError },
+    #[error("PIZZA_DELIVERY_HTTP_LISTEN={value:?}: {reason}")]
+    HttpListen { value: String, reason: String },
 }
 
 impl Config {
@@ -83,7 +88,14 @@ impl Config {
                         required: false,
                     })
             });
+        let http_listen = get("PIZZA_DELIVERY_HTTP_LISTEN")
+            .map(|value| {
+                crate::http::parse_listen(&value)
+                    .map_err(|reason| ConfigError::HttpListen { value, reason })
+            })
+            .transpose()?;
         Ok(Self {
+            http_listen,
             routing: RoutingConfig::builtin(&agent_command.to_string_lossy()),
             routing_file,
             data_dir,
@@ -152,6 +164,25 @@ mod tests {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         move |k| map.get(k).cloned()
+    }
+
+    #[test]
+    fn http_is_off_by_default_and_loopback_only_when_set() {
+        let base = [("PIZZA_DELIVERY_DATA_DIR", "/d")];
+        let off = Config::from_lookup(lookup(&base));
+        assert_eq!(off.map(|c| c.http_listen).ok(), Some(None));
+        let on = Config::from_lookup(lookup(&[
+            base[0],
+            ("PIZZA_DELIVERY_HTTP_LISTEN", "127.0.0.1:7878"),
+        ]));
+        assert_eq!(
+            on.map(|c| c.http_listen).ok(),
+            Some("127.0.0.1:7878".parse().ok())
+        );
+        for bad in ["0.0.0.0:7878", "nonsense"] {
+            let cfg = Config::from_lookup(lookup(&[base[0], ("PIZZA_DELIVERY_HTTP_LISTEN", bad)]));
+            assert!(matches!(cfg, Err(ConfigError::HttpListen { .. })), "{bad}");
+        }
     }
 
     #[test]

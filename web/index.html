@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pizza-delivery: new job</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+  label { display: block; margin: .75rem 0 .25rem; font-weight: 600; }
+  textarea, input[type=text], input[type=number], select { width: 100%; box-sizing: border-box; padding: .4rem; font: inherit; }
+  details { margin: 1rem 0; border: 1px solid #8884; border-radius: 6px; padding: .5rem .75rem; }
+  summary { cursor: pointer; font-weight: 600; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "> "; font-family: monospace; }
+  details[open] > summary::before { content: "v "; }
+  .check { font-weight: normal; display: flex; gap: .5rem; align-items: center; }
+  .check input { width: auto; }
+  button { margin-right: .5rem; padding: .45rem .9rem; font: inherit; }
+  #result { white-space: pre-wrap; margin-top: 1rem; font-family: monospace; }
+  #result.error { color: #b00020; }
+</style>
+</head>
+<body>
+<h1>New job</h1>
+<form id="job-form">
+  <label for="prompt">Prompt</label>
+  <textarea id="prompt" name="prompt" rows="5" required></textarea>
+  <label for="repo">Repository (optional)</label>
+  <input type="text" id="repo" name="repo" placeholder="/path/to/repo">
+  <label for="priority">Priority</label>
+  <select id="priority" name="priority">
+    <option value="">normal</option>
+    <option value="low">low</option>
+  </select>
+
+  <details id="additional-parameters">
+    <summary>Additional Parameters</summary>
+    <label for="template">Template</label>
+    <select id="template" name="template">
+      <option value="">let triage decide</option>
+      <option value="full-feature">full-feature</option>
+      <option value="bug-fix">bug-fix</option>
+      <option value="investigate">investigate</option>
+    </select>
+    <label class="check"><input type="checkbox" name="report_only"> Report only (stop with findings)</label>
+    <label for="max_stages">Max stages (1 to 10)</label>
+    <input type="number" id="max_stages" name="max_stages" min="1" max="10" step="1">
+    <label for="context_hint">Context hint</label>
+    <input type="text" id="context_hint" name="context_hint">
+    <label for="risk_flags">Risk flags (kebab-case, separated by commas or spaces)</label>
+    <input type="text" id="risk_flags" name="risk_flags" placeholder="touches-auth, schema-change">
+  </details>
+
+  <button type="button" id="preview">Preview triage</button>
+  <button type="submit">Submit</button>
+</form>
+<div id="result" role="status"></div>
+<script type="module" src="/form.js"></script>
+</body>
+</html>
