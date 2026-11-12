@@ -9,6 +9,7 @@ mod sandbox;
 mod server;
 mod sqlite_store;
 mod triage;
+mod tui;
 mod worker;
 
 use std::io::IsTerminal;
@@ -156,6 +157,8 @@ enum Command {
     Daemon,
     /// Ask the running daemon to exit
     Stop,
+    /// Interactive new-job form with collapsed Additional Parameters
+    Tui,
 }
 
 fn render_triaged(
@@ -254,6 +257,13 @@ fn run(cli: Cli) -> ProcessExitCode {
             Ok(()) => exit(ExitCode::Success),
             Err(e) => {
                 eprintln!("error: {e:#}");
+                exit(ExitCode::General)
+            }
+        },
+        Some(Command::Tui) => match tui::run(&config) {
+            Ok(()) => exit(ExitCode::Success),
+            Err(e) => {
+                eprintln!("error: {e}");
                 exit(ExitCode::General)
             }
         },
