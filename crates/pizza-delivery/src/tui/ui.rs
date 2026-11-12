@@ -213,6 +213,11 @@ fn draw_new_job(frame: &mut Frame, form: &NewJobForm, caps: Caps, area: Rect) {
             ),
         ]);
     }
+    if let Some(preview) = &form.preview {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("Triage preview"));
+        lines.extend(preview.lines().map(|l| Line::raw(format!("  {l}"))));
+    }
     let inner = usize::from(area.width.saturating_sub(2));
     let lines: Vec<Line> = lines
         .into_iter()
@@ -257,8 +262,8 @@ fn footer(model: &Model, caps: Caps) -> Line<'static> {
     let text = match model.mode() {
         Mode::Reply { targets, text } => format!("reply to {}: {text}_", targets.join(",")),
         Mode::NewJob { form } => match form.focus {
-            FormField::Prompt => format!("new job: {}_", form.prompt),
-            _ => "new job: tab next, up back, ret expand/send, esc cancel".to_owned(),
+            FormField::Prompt => format!("new job: {}_ (^p preview)", form.prompt),
+            _ => "new job: tab next, up back, ret expand/send, ^p preview, esc cancel".to_owned(),
         },
         Mode::ConfirmCancel { job } => format!("cancel job {job}? y/N"),
         Mode::Normal => match model.notice() {
@@ -509,6 +514,13 @@ fn draw_detail(frame: &mut Frame, model: &Model, caps: Caps, area: Rect) {
             inner,
             &g,
         )));
+        if let Some(evidence) = &entry.evidence {
+            lines.push(Line::raw(fit(
+                &format!("    evidence: {evidence}"),
+                inner,
+                &g,
+            )));
+        }
     }
     let room = usize::from(area.height.saturating_sub(2));
     let fixed = lines.len();
@@ -609,7 +621,7 @@ mod tests {
                     confidence: None,
                     alternatives: vec![],
                     impact: None,
-                    evidence: None,
+                    evidence: Some("docs/adr/0001.md".into()),
                 },
             ),
         )
@@ -851,6 +863,36 @@ mod tests {
         let detail_title = lines.iter().position(|l| l.starts_with("+Detail 01JA"));
         assert!(detail_title.is_some(), "{lines:#?}");
         assert!(lines.iter().any(|l| l.contains("! high question")));
+    }
+
+    #[test]
+    fn inbox_detail_shows_the_evidence_an_entry_cites() {
+        let mut m = sample();
+        m.handle_key(Key::Char('4'));
+        m.handle_key(Key::Enter);
+        let lines = frame(&m, ASCII, 80, 24);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("evidence: docs/adr/0001.md")),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn the_new_job_form_shows_the_triage_preview() {
+        let mut m = sample();
+        m.handle_key(Key::Char('n'));
+        m.show_preview("repo: /r (confidence 90%)\nplan:\n  1. spec: why".into());
+        let lines = frame(&m, ASCII, 80, 24);
+        assert!(
+            lines.iter().any(|l| l.contains("Triage preview")),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("1. spec: why")),
+            "{lines:#?}"
+        );
     }
 
     #[test]

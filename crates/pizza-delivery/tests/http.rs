@@ -6,7 +6,7 @@ use serde_json::json;
 fn harness() -> TestResult<Harness> {
     let script = harness::VALID_HANDOFF_AGENT.replace(
         "## Assumptions\nnone",
-        "## Assumptions\n- The API stays v1 [confidence: 70; alternatives: bump to v2; impact: clients break]",
+        "## Assumptions\n- The API stays v1 [confidence: 70; alternatives: bump to v2; impact: clients break; evidence: Cargo.toml]",
     );
     Harness::with_agent(&script)
 }
@@ -66,6 +66,71 @@ fn quota_and_inbox_are_readable() -> TestResult {
     finished_job(&h)?;
     assert!(h.get("/api/quota")?["agents"].is_array());
     assert_eq!(h.get("/api/inbox")?["entries"][0]["status"], "open");
+    Ok(())
+}
+
+#[test]
+fn inbox_entries_carry_their_evidence() -> TestResult {
+    let h = harness()?;
+    finished_job(&h)?;
+    assert_eq!(h.get("/api/inbox")?["entries"][0]["evidence"], "Cargo.toml");
+    Ok(())
+}
+
+#[test]
+fn inbox_is_filtered_and_searched_by_query_parameters() -> TestResult {
+    let h = harness()?;
+    finished_job(&h)?;
+    let count = |path: &str| -> TestResult<usize> {
+        Ok(h.get(path)?["entries"]
+            .as_array()
+            .ok_or("no entries")?
+            .len())
+    };
+    let all = count("/api/inbox")?;
+    assert!(all >= 1);
+    assert_eq!(count("/api/inbox?q=nothing-matches-this")?, 0);
+    assert_eq!(count("/api/inbox?q=api%20stays")?, all);
+    assert_eq!(count("/api/inbox?q=API+STAYS")?, all);
+    assert_eq!(count("/api/inbox?status=open")?, all);
+    assert_eq!(count("/api/inbox?status=dismissed")?, 0);
+    assert_eq!(count("/api/inbox?status=dismissed,open")?, all);
+    assert_eq!(count("/api/inbox?status=open&q=nothing-matches-this")?, 0);
+    assert_eq!(count("/api/inbox?limit=1")?, 1);
+    Ok(())
+}
+
+#[test]
+fn dry_run_returns_the_triage_and_enqueues_nothing() -> TestResult {
+    let h = harness()?;
+    let repo = h.repo()?.to_string_lossy().into_owned();
+    let (status, out) = h.http(
+        "POST",
+        "/api/dry-run",
+        Some(&json!({
+            "prompt": "add a toggle",
+            "repo": repo,
+            "options": {"template": "bug-fix", "report_only": true}
+        })),
+    )?;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["outcome"]["triage"]["template"], "bug-fix");
+    assert!(out["outcome"]["triage"]["plan"].is_array());
+    assert!(out["context_sources"].is_array());
+    assert_eq!(h.get("/api/jobs")?["jobs"], json!([]));
+    assert!(h.ledger().map(|l| l.is_empty()).unwrap_or(true));
+
+    let (status, body) = h.http("POST", "/api/dry-run", Some(&json!({"prompt": "  "})))?;
+    assert_eq!(status, 400);
+    assert_eq!(body["kind"], "usage");
+    let (status, _) = h.http(
+        "POST",
+        "/api/dry-run",
+        Some(&json!({"prompt": "x", "options": {"max_stages": 0}})),
+    )?;
+    assert_eq!(status, 400);
+    let (status, _) = h.http("GET", "/api/dry-run", None)?;
+    assert_eq!(status, 405);
     Ok(())
 }
 

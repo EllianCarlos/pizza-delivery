@@ -8,7 +8,9 @@ import type { Priority } from "./generated/Priority";
 import type { QuotaPanelView } from "./generated/QuotaPanelView";
 import type { RepliedView } from "./generated/RepliedView";
 import type { SubmittedView } from "./generated/SubmittedView";
+import { inboxPath, type InboxQuery } from "./inbox";
 import type { TriageOptions } from "./options";
+import type { TriagePreview } from "./triage";
 
 export type ArtifactContent = { path: string; content: string };
 
@@ -88,7 +90,7 @@ export function createApi(
     jobs: () => call<JobsView>("/api/jobs"),
     job: (ref: string) => call<JobDetailView>(`/api/jobs/${ref}`),
     quota: () => call<QuotaPanelView>("/api/quota"),
-    inbox: (all = false) => call<InboxView>(all ? "/api/inbox?all=1" : "/api/inbox"),
+    inbox: (query: InboxQuery = {}) => call<InboxView>(inboxPath(query)),
     events: (since = 0) => call<EventsView>(`/api/events?since=${since}`),
     artifact: (ref: string, index: number) =>
       call<ArtifactContent>(`/api/jobs/${ref}/artifacts/${index}`),
@@ -100,6 +102,12 @@ export function createApi(
         prompt,
         ...(repo ? { repo } : {}),
         ...(priority ? { priority } : {}),
+        ...(options ? { options } : {}),
+      }),
+    preview: (prompt: string, repo?: string, options?: TriageOptions) =>
+      call<TriagePreview>("/api/dry-run", {
+        prompt,
+        ...(repo ? { repo } : {}),
         ...(options ? { options } : {}),
       }),
     cancel: (ref: string) => post(`/api/jobs/${ref}/cancel`),

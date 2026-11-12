@@ -2,4 +2,4 @@
 import type { EntryStatus } from "./EntryStatus";
 import type { JobId } from "./JobId";
 
-export type InboxEntry = { id: string, short_id: string, job: JobId, kind: string, severity: string, text: string, confidence: number | null, alternatives: Array<string>, impact: string | null, status: EntryStatus, answered_by: JobId | null, };
+export type InboxEntry = { id: string, short_id: string, job: JobId, kind: string, severity: string, text: string, confidence: number | null, alternatives: Array<string>, impact: string | null, evidence: string | null, status: EntryStatus, answered_by: JobId | null, };
