@@ -19,3 +19,9 @@
 **Board**: the view that groups jobs into one column per job state.
 
 **Pipeline**: the view that shows one lane per job with one segment per stage.
+
+**Filter**: a set of property constraints that narrows a list of events, artifacts or inbox items. Different properties are ANDed; repeated values of one property are ORed.
+
+**Search**: a case-insensitive substring match over an item's text fields, ANDed with the filter.
+
+**Inbox item**: one feedback entry in the ledger (a `FeedbackRecorded` event) shown as a row with its kind, severity, text and confidence.

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::context::SourceUse;
 use crate::event::Event;
 use crate::exit::ExitCode;
+use crate::filter::{ArtifactFilter, ArtifactItem, EventFilter, InboxFilter, InboxItem};
 use crate::id::JobId;
 use crate::job::JobState;
 use crate::quota::QuotaView;
@@ -32,6 +33,30 @@ pub enum Request {
         job: Option<String>,
     },
     Quota,
+    Inbox {
+        #[serde(default)]
+        filter: InboxFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    Events {
+        #[serde(default)]
+        filter: EventFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    Artifacts {
+        #[serde(default)]
+        filter: ArtifactFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
     Stop,
 }
 
@@ -97,6 +122,15 @@ pub enum Response {
         id: JobId,
         short_id: String,
     },
+    InboxItems {
+        items: Vec<InboxItem>,
+    },
+    EventItems {
+        items: Vec<Event>,
+    },
+    ArtifactItems {
+        items: Vec<ArtifactItem>,
+    },
     Stopped,
     Error {
         error: ApiError,
@@ -128,5 +162,33 @@ mod tests {
         let text = serde_json::to_string(&req).unwrap_or_default();
         assert_eq!(text, r#"{"op":"status","job":"@last"}"#);
         assert_eq!(serde_json::from_str::<Request>(&text).ok(), Some(req));
+    }
+
+    #[test]
+    fn filter_requests_and_responses_round_trip_as_tagged_json() {
+        let req = Request::Events {
+            filter: EventFilter {
+                kinds: vec!["stage-failed".into()],
+                ..Default::default()
+            },
+            query: Some("boom".into()),
+            limit: Some(5),
+        };
+        let text = serde_json::to_string(&req).unwrap_or_default();
+        assert!(text.starts_with(r#"{"op":"events","filter":{"#), "{text}");
+        assert_eq!(serde_json::from_str::<Request>(&text).ok(), Some(req));
+        let bare: Result<Request, _> = serde_json::from_str(r#"{"op":"inbox"}"#);
+        assert_eq!(
+            bare.ok(),
+            Some(Request::Inbox {
+                filter: InboxFilter::default(),
+                query: None,
+                limit: None
+            })
+        );
+        let resp = Response::ArtifactItems { items: vec![] };
+        let text = serde_json::to_string(&resp).unwrap_or_default();
+        assert_eq!(text, r#"{"type":"artifact-items","items":[]}"#);
+        assert_eq!(serde_json::from_str::<Response>(&text).ok(), Some(resp));
     }
 }

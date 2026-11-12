@@ -17,8 +17,9 @@ use std::process::ExitCode as ProcessExitCode;
 use clap::{CommandFactory, Parser, Subcommand};
 use pizza_delivery_core::triage::render_triage;
 use pizza_delivery_core::{
-    render_jobs, render_quota, render_submitted, render_timeline, ExitCode, OutputMode, Priority,
-    Request, Response,
+    parse_when, render_artifacts, render_events, render_inbox, render_jobs, render_quota,
+    render_submitted, render_timeline, ArtifactFilter, EventFilter, ExitCode, InboxFilter,
+    OutputMode, Priority, Request, Response,
 };
 
 use client::{send, ClientError, Start};
@@ -85,12 +86,94 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List feedback entries (assumptions, questions, risks), newest first
+    Inbox {
+        #[command(flatten)]
+        common: ListArgs,
+        /// Feedback kind (repeatable)
+        #[arg(long)]
+        kind: Vec<String>,
+        /// Severity (repeatable)
+        #[arg(long)]
+        severity: Vec<String>,
+        /// Minimum confidence, 0-100; entries without confidence are excluded
+        #[arg(long)]
+        min_confidence: Option<u8>,
+    },
+    /// List ledger events, newest first
+    Events {
+        #[command(flatten)]
+        common: ListArgs,
+        /// Event kind such as stage-failed (repeatable)
+        #[arg(long)]
+        kind: Vec<String>,
+        /// Actor: daemon, agent or human (repeatable)
+        #[arg(long)]
+        actor: Vec<String>,
+    },
+    /// List recorded artifacts, newest first
+    Artifacts {
+        #[command(flatten)]
+        common: ListArgs,
+        /// Artifact kind (repeatable)
+        #[arg(long)]
+        kind: Vec<String>,
+        /// Path substring (repeatable)
+        #[arg(long)]
+        path: Vec<String>,
+    },
     /// Cancel a job, terminate its running stage and keep its worktree
     Cancel { job: String },
     /// Run the daemon in the foreground (socket-activated or started on demand)
     Daemon,
     /// Ask the running daemon to exit
     Stop,
+}
+
+#[derive(clap::Args)]
+struct ListArgs {
+    /// Job id prefix or @last (repeatable)
+    #[arg(long)]
+    job: Vec<String>,
+    /// Stage id (repeatable)
+    #[arg(long)]
+    stage: Vec<String>,
+    /// Only items at or after this time: RFC 3339 or relative (2h, 3d)
+    #[arg(long)]
+    since: Option<String>,
+    /// Only items at or before this time: RFC 3339 or relative (2h, 3d)
+    #[arg(long)]
+    until: Option<String>,
+    /// Case-insensitive substring search
+    #[arg(short = 'q', long = "search")]
+    search: Option<String>,
+    /// Maximum number of items
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Emit JSON even on a terminal
+    #[arg(long)]
+    json: bool,
+}
+
+type Window = (Option<i64>, Option<i64>);
+
+fn window(args: &ListArgs) -> Result<Window, String> {
+    let now = handler::Env::now_ms(&handler::SystemEnv);
+    let parse = |v: &Option<String>| v.as_deref().map(|t| parse_when(t, now)).transpose();
+    Ok((parse(&args.since)?, parse(&args.until)?))
+}
+
+fn list_request(
+    common: &ListArgs,
+    build: impl FnOnce(Window) -> Request,
+) -> Result<Request, ProcessExitCode> {
+    match window(common) {
+        Ok(w) => Ok(build(w)),
+        Err(e) => {
+            eprintln!("error: {e}");
+            Err(exit(ExitCode::Usage))
+        }
+    }
 }
 
 fn render_triaged(
@@ -151,6 +234,18 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
             print!("{}", render_submitted(&id, &short_id, mode));
             exit(ExitCode::Success)
         }
+        Ok(r @ Response::InboxItems { .. }) => {
+            print!("{}", render_inbox(&r, mode));
+            exit(ExitCode::Success)
+        }
+        Ok(r @ Response::EventItems { .. }) => {
+            print!("{}", render_events(&r, mode));
+            exit(ExitCode::Success)
+        }
+        Ok(r @ Response::ArtifactItems { .. }) => {
+            print!("{}", render_artifacts(&r, mode));
+            exit(ExitCode::Success)
+        }
         Ok(Response::Stopped) => exit(ExitCode::Success),
         Ok(Response::Error { error }) => {
             eprintln!("error: {}", error.message);
@@ -195,6 +290,75 @@ fn run(cli: Cli) -> ProcessExitCode {
             send(&config, &Request::Stop, Start::Never),
             OutputMode::resolve(false, tty),
         ),
+        Some(Command::Inbox {
+            common,
+            kind,
+            severity,
+            min_confidence,
+        }) => match list_request(&common, |(since_ms, until_ms)| Request::Inbox {
+            filter: InboxFilter {
+                jobs: common.job.clone(),
+                stages: common.stage.clone(),
+                kinds: kind,
+                severities: severity,
+                min_confidence,
+                since_ms,
+                until_ms,
+            },
+            query: common.search.clone(),
+            limit: common.limit,
+        }) {
+            Ok(req) => request(
+                &config,
+                req,
+                OutputMode::resolve(common.json || cli.json, tty),
+            ),
+            Err(code) => code,
+        },
+        Some(Command::Events {
+            common,
+            kind,
+            actor,
+        }) => match list_request(&common, |(since_ms, until_ms)| Request::Events {
+            filter: EventFilter {
+                jobs: common.job.clone(),
+                stages: common.stage.clone(),
+                kinds: kind,
+                actors: actor,
+                since_ms,
+                until_ms,
+            },
+            query: common.search.clone(),
+            limit: common.limit,
+        }) {
+            Ok(req) => request(
+                &config,
+                req,
+                OutputMode::resolve(common.json || cli.json, tty),
+            ),
+            Err(code) => code,
+        },
+        Some(Command::Artifacts { common, kind, path }) => {
+            match list_request(&common, |(since_ms, until_ms)| Request::Artifacts {
+                filter: ArtifactFilter {
+                    jobs: common.job.clone(),
+                    stages: common.stage.clone(),
+                    kinds: kind,
+                    paths: path,
+                    since_ms,
+                    until_ms,
+                },
+                query: common.search.clone(),
+                limit: common.limit,
+            }) {
+                Ok(req) => request(
+                    &config,
+                    req,
+                    OutputMode::resolve(common.json || cli.json, tty),
+                ),
+                Err(code) => code,
+            }
+        }
         Some(Command::Cancel { job }) => request(
             &config,
             Request::Cancel { job },
