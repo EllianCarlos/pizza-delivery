@@ -116,8 +116,12 @@ exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
 printf 'pid %s (%s) listens on 127.0.0.1:%s\n' "$pid" "${exe:-unknown}" "$port"
 
 base="http://127.0.0.1:$port"
-bytes="$(curl -fsS --max-time 10 "$base/app.js" | wc -c)" || die "GET $base/app.js failed"
-[ "$bytes" -gt 0 ] || die "served app.js is empty"
-printf 'app.js served, %s bytes\n' "$bytes"
+# The bundle name is content-hashed (app-<hash>.js), so read it from the page.
+index="$(curl -fsS --max-time 10 "$base/")" || die "GET $base/ failed"
+script="$(printf '%s' "$index" | sed -n 's/.*src="\(\/app[^"]*\.js\)".*/\1/p' | head -n 1)"
+[ -n "$script" ] || die "index page references no app bundle"
+bytes="$(curl -fsS --max-time 10 "$base$script" | wc -c)" || die "GET $base$script failed"
+[ "$bytes" -gt 0 ] || die "served $script is empty"
+printf '%s served, %s bytes\n' "$script" "$bytes"
 
 step "deployed $sha successfully"
