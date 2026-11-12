@@ -108,6 +108,36 @@ fn a_crash_leaves_a_note_and_a_wip_commit_for_the_next_attempt() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn an_expired_lease_on_a_finished_stage_is_released_not_retried() -> Result<()> {
+    let rig = Rig::new(vec![good()])?;
+    let shipping = ClaimRequest {
+        holder: "shipping-daemon".into(),
+        now_ms: 100,
+        ttl_ms: 1000,
+        stage_id: "S0".into(),
+        event_ids: ["EP0".into(), "EC0".into()],
+        require_triage: false,
+        agent: "claude".into(),
+        caps: Caps::default(),
+    };
+    acquire(&rig.store, "store")?.claim_stage(shipping)?;
+    rig.worker().append(
+        &JobId::new("J1"),
+        Some("S0"),
+        EventPayload::StageSucceeded {},
+    )?;
+    rig.env.now.store(5000, Ordering::SeqCst);
+
+    rig.worker().reap()?;
+
+    assert_eq!(retry_causes(&rig)?, vec![]);
+    let kinds = rig.kinds()?;
+    assert!(kinds.contains(&"lease-released"));
+    assert!(!kinds.contains(&"stage-retried"));
+    Ok(())
+}
+
 fn completed_rig(pushed: bool, dirty: bool) -> Result<Rig> {
     let rig = Rig::new(vec![good()])?;
     rig.worker().tick()?;

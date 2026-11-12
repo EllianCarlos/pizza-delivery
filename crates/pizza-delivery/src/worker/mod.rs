@@ -28,7 +28,7 @@ use pizza_delivery_core::routing::{
 use pizza_delivery_core::sandbox::{blocked_hosts, Mount, SandboxProfile, TrustConfig};
 use pizza_delivery_core::ship::{pr_title, render_pr_body, DiffPolicy};
 use pizza_delivery_core::spec;
-use pizza_delivery_core::stage::PIPELINE_STAGES;
+use pizza_delivery_core::stage::{StageState, PIPELINE_STAGES};
 use pizza_delivery_core::triage::{
     amend_plan, current_plan, Feedback, PlannedStage, DEFAULT_MAX_STAGES,
 };
@@ -288,11 +288,26 @@ impl Worker<'_> {
                 },
             )?;
             let events = self.with_store(|s| s.read_timeline(&lease.job_id))?;
-            if let Some(view) = fold_stages(&events)
+            let view = fold_stages(&events)
                 .iter()
                 .find(|s| s.id == lease.stage_id)
-                .cloned()
+                .cloned();
+            // A stage that already finished keeps its lease while the job
+            // ships; its expiry must not run the finished stage again.
+            if view
+                .as_ref()
+                .is_some_and(|v| matches!(v.state, StageState::Succeeded | StageState::Failed))
             {
+                self.append(
+                    &lease.job_id,
+                    stage,
+                    EventPayload::LeaseReleased {
+                        holder: lease.holder.clone(),
+                    },
+                )?;
+                continue;
+            }
+            if let Some(view) = view {
                 self.interrupt(
                     &Target {
                         job: &lease.job_id,
