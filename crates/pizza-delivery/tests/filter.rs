@@ -11,16 +11,13 @@ fn seed_event(
     payload: serde_json::Value,
 ) -> TestResult {
     h.raw_db()?.execute(
+        // The daemon appends to these same jobs concurrently and allocates
+        // `MAX(seq) + 1`; a fixed seed seq can collide with one of its events.
+        // Allocate the seed's seq the same way, atomically in one statement.
         "INSERT INTO events (id, job_id, stage_id, seq, ts_ms, actor, kind, payload)
-         VALUES (?1, ?2, 's1', ?3, ?4, 'agent', ?5, ?6)",
-        rusqlite::params![
-            format!("SEED{n}"),
-            job,
-            100 + n,
-            ts_ms,
-            kind,
-            payload.to_string()
-        ],
+         SELECT ?1, ?2, 's1', COALESCE(MAX(seq), 0) + 1, ?3, 'agent', ?4, ?5
+         FROM events WHERE job_id = ?2",
+        rusqlite::params![format!("SEED{n}"), job, ts_ms, kind, payload.to_string()],
     )?;
     Ok(())
 }

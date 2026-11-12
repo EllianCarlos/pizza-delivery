@@ -19,6 +19,18 @@ Submit forms with a collapsed "> Additional Parameters" group (template, report 
 - TUI: `pizza-delivery tui`, then `n` for a new job (Tab moves, Enter on the expander toggles it, Enter submits, Esc cancels).
 - Web: open the web UI (default <http://127.0.0.1:7878/>), choose "Submit a job" and expand "Additional Parameters".
 
+## Deploying
+
+`scripts/deploy.sh` rolls the user service forward to `origin/main`: it syncs the deploy checkout (default `~/Projects/pizza-delivery-deploy`), builds `web/` with bun and the release binary with cargo (honouring a redirected cargo target dir), installs the binary atomically at the path in the unit's `ExecStart`, restarts `pizza-delivery-daemon.service`, and verifies that the new pid listens on `127.0.0.1:7878`, the unit is active and `/app.js` is non-empty. Every step fails loudly with its own message.
+
+```sh
+scripts/deploy.sh                    # build, install, restart, verify
+scripts/deploy.sh --no-restart       # build and install only
+scripts/deploy.sh --deploy-dir DIR --unit UNIT --port PORT
+```
+
+It expects `git`, `bun`, `cargo`, `curl`, `systemctl` and `ss` on PATH (for example `devenv shell -- scripts/deploy.sh`). The deploy checkout is hard-reset to `origin/main`; keep no local work in it.
+
 ## Routing
 
 Which agent runs a stage comes from a TOML routing file (`PIZZA_DELIVERY_ROUTING`, else `~/.config/pizza-delivery/routing.toml`; absent means claude only). Each `[[rules]]` entry matches on `stage`, `tier`, `repo` and `requires`, and gives an ordered `chain` of `{ agent, model }`; agents are declared under `[agents.<name>]` with an `adapter` (`claude`, `opencode`, `hermes`, `agy`) and a `command`. `quota_threshold` (0 to 1, default 0.9) skips an agent proactively once its utilization reaches it.

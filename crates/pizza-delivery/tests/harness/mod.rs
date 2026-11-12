@@ -263,7 +263,10 @@ impl Harness {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let cli = self.run(&["status", id])?;
-            let job = cli.json_lines()?.into_iter().next().ok_or("no status")?;
+            let job =
+                cli.json_lines()?.into_iter().next().ok_or_else(|| {
+                    format!("no status (code {}): stderr: {}", cli.code, cli.stderr)
+                })?;
             if job["state"].as_str().is_some_and(|s| states.contains(&s)) {
                 return Ok(job);
             }
@@ -278,7 +281,10 @@ impl Harness {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let cli = self.run(&["status", id])?;
-            let job = cli.json_lines()?.into_iter().next().ok_or("no status")?;
+            let job =
+                cli.json_lines()?.into_iter().next().ok_or_else(|| {
+                    format!("no status (code {}): stderr: {}", cli.code, cli.stderr)
+                })?;
             if matches!(
                 job["state"].as_str(),
                 Some("completed" | "failed" | "cancelled")
@@ -419,7 +425,9 @@ impl Harness {
     }
 
     pub fn raw_db(&self) -> TestResult<Connection> {
-        Ok(Connection::open(self.db_path())?)
+        let conn = Connection::open(self.db_path())?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        Ok(conn)
     }
 }
 

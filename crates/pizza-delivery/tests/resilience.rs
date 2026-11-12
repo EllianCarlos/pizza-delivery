@@ -99,6 +99,15 @@ fn a_crash_is_recovered_as_a_new_attempt_with_a_note_and_without_duplicate_work(
         .query_row("SELECT holder FROM leases", [], |r| r.get(0))?;
     let pid = holder.trim_start_matches("daemon-");
     assert!(Command::new("kill").args(["-9", pid]).status()?.success());
+    // `kill` returns before the kernel has finished tearing the daemon down,
+    // and a child forked by the daemon but not yet exec'd can briefly keep its
+    // listening socket open. A client that connects in that window is reset
+    // mid-request ("Connection reset by peer") instead of being refused and
+    // starting a fresh daemon. Wait until the socket really refuses.
+    let socket = h.root().join("pd.sock");
+    wait_until("the killed daemon to stop listening", 15, || {
+        Ok(!alive(pid) && std::os::unix::net::UnixStream::connect(&socket).is_err())
+    })?;
 
     let job = h.wait_for_end(&id)?;
 
