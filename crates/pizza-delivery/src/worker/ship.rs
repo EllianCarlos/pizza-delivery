@@ -131,6 +131,7 @@ impl Worker<'_> {
                     confidence: risk.confidence,
                     alternatives: risk.alternatives,
                     impact: risk.impact,
+                    evidence: risk.evidence,
                 },
             };
             self.with_store(|s| s.append_event(event))?;

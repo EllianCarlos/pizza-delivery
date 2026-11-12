@@ -53,6 +53,7 @@ pub fn fold_inbox<'a>(events: impl IntoIterator<Item = &'a Event>) -> Vec<InboxE
                 confidence,
                 alternatives,
                 impact,
+                ..
             } => entries.push(InboxEntry {
                 id: event.id.clone(),
                 short_id: String::new(),
@@ -128,6 +129,7 @@ mod tests {
             confidence: None,
             alternatives: vec![],
             impact: None,
+            evidence: None,
         }
     }
 

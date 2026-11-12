@@ -6,7 +6,13 @@ use thiserror::Error;
 use crate::grill::DEFAULT_ROUND_CAP;
 use crate::handoff;
 
-const PREAMBLE: &str = "You are running unattended. Never ask the human anything. Wherever a skill or instruction says to ask, interview or check with the user, take the recommended answer and note it as an assumption in the handoff. Record every assumption you make, every question you could not answer and every risk you notice as a bullet in the handoff sections Assumptions, Open questions and Risks, ending each bullet with [confidence: 0-100; alternatives: a, b; impact: what changes if this is wrong].";
+const PREAMBLE: &str = "You are running unattended. Never ask the human anything. Wherever a skill or instruction says to ask, interview or check with the user, take the recommended answer and note it as an assumption in the handoff. Record every assumption you make, every question you could not answer and every risk you notice as a bullet in the handoff sections Assumptions, Open questions and Risks.";
+
+fn calibration(auto_at: u8) -> String {
+    format!(
+        "Every bullet under Assumptions, Open questions and Risks must end with [confidence: 0-100; alternatives: a, b; impact: low|medium|high|irreversible; evidence: <source>], where evidence cites the file, command or document you checked. When your confidence is {auto_at} or higher, take the recommended answer and keep going; only low-confidence, high-impact items are escalated to the human, and a bullet without this bracket is escalated too."
+    )
+}
 
 const EMBEDDED: [(&str, &str); 6] = [
     ("grill", include_str!("../prompts/grill.md")),
@@ -87,6 +93,8 @@ pub struct Vars<'a> {
     pub spec_dir: &'a str,
     pub previous_handoff: Option<&'a str>,
     pub review_report: Option<&'a str>,
+    /// Confidence at or above which the agent proceeds without escalating.
+    pub auto_at: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,7 +144,8 @@ fn substitute(body: &str, vars: &Vars<'_>) -> String {
 pub fn render(templates: &Templates, vars: &Vars<'_>) -> Option<Rendered> {
     let template = templates.get(vars.stage)?;
     let text = format!(
-        "{PREAMBLE}\n\n{}\n\nWhen the work is done, write the handoff document to {} using exactly this structure (the Risks section is optional):\n\n{}",
+        "{PREAMBLE}\n\n{}\n\n{}\n\nWhen the work is done, write the handoff document to {} using exactly this structure (the Risks section is optional):\n\n{}",
+        calibration(vars.auto_at),
         substitute(&template.body, vars).trim_end(),
         vars.handoff_path,
         handoff::template(vars.job, vars.stage)
@@ -186,6 +195,7 @@ mod tests {
             spec_dir: "docs/specs/J1",
             previous_handoff: None,
             review_report: None,
+            auto_at: 80,
         }
     }
 
@@ -238,7 +248,7 @@ mod tests {
         let prompt = render_stage("review");
         assert_eq!(
             prompt.as_ref().map(|p| (p.template.as_str(), p.version)),
-            Some(("review", 1))
+            Some(("review", 2))
         );
         assert_eq!(
             prompt.as_ref().map(|p| p.prompt_sha256.clone()),
@@ -288,5 +298,16 @@ mod tests {
             noted.map(|p| p.prompt_sha256),
             base.map(|p| p.prompt_sha256)
         );
+    }
+
+    #[test]
+    fn the_prompt_asks_for_calibrated_metadata_with_the_configured_threshold() {
+        let mut v = vars("grill");
+        v.auto_at = 73;
+        let prompt = render(&Templates::embedded(), &v)
+            .map(|p| p.text)
+            .unwrap_or_default();
+        assert!(prompt.contains("[confidence: 0-100; alternatives: a, b; impact: low|medium|high|irreversible; evidence: <source>]"));
+        assert!(prompt.contains("confidence is 73 or higher"));
     }
 }

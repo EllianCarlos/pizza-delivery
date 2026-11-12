@@ -161,6 +161,7 @@ impl Triager<'_> {
                     confidence: f.confidence,
                     alternatives: f.alternatives.clone(),
                     impact: f.impact.clone(),
+                    evidence: f.evidence.clone(),
                 },
             )?;
         }
@@ -210,6 +211,7 @@ impl Triager<'_> {
                     confidence: f.confidence,
                     alternatives: f.alternatives,
                     impact: f.impact,
+                    evidence: f.evidence,
                 },
             )?;
         }

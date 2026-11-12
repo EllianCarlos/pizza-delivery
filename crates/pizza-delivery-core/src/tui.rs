@@ -695,6 +695,7 @@ mod tests {
                 confidence: None,
                 alternatives: vec![],
                 impact: None,
+                evidence: None,
             },
         )
     }

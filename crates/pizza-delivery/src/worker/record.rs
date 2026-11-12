@@ -47,6 +47,7 @@ impl Worker<'_> {
                 confidence: f.confidence,
                 alternatives: f.alternatives,
                 impact: f.impact,
+                evidence: f.evidence,
             },
         )?;
         Ok(Some(f.text))

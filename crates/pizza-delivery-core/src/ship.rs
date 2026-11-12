@@ -62,6 +62,7 @@ impl DiffPolicy {
             ),
             confidence: None,
             alternatives: vec![],
+            evidence: None,
             impact: Some("pushed as a labelled draft pull request for review".to_owned()),
         })
     }

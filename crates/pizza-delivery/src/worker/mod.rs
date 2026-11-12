@@ -10,6 +10,7 @@ use pizza_delivery_core::budget::{
 use pizza_delivery_core::classify::{classify, Classified, Failure, RawRun};
 use pizza_delivery_core::event::{Actor, Event, EventPayload};
 use pizza_delivery_core::feedback::parse_feedback;
+use pizza_delivery_core::gate::{gate, GateDecision, GateItem, GateThresholds, Impact};
 use pizza_delivery_core::grill;
 use pizza_delivery_core::handoff::validate;
 use pizza_delivery_core::memorize::{
@@ -57,6 +58,7 @@ pub struct WorkerConfig {
     pub trust: TrustConfig,
     pub budget_cap_tokens: u64,
     pub budget_defaults: Defaults,
+    pub gate: GateThresholds,
     pub require_triage: bool,
     pub mcp: Option<McpSetup>,
     pub memory: Option<MemorySetup>,

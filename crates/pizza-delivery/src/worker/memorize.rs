@@ -23,6 +23,7 @@ impl Worker<'_> {
                     ),
                     confidence: None,
                     alternatives: vec![],
+                    evidence: None,
                     impact: Some("the job result is unaffected".to_owned()),
                 },
             );
@@ -258,6 +259,7 @@ impl Worker<'_> {
                             confidence: risk.confidence,
                             alternatives: risk.alternatives,
                             impact: risk.impact,
+                            evidence: risk.evidence,
                         },
                     )?;
                     (id.clone(), "contradiction".to_owned())

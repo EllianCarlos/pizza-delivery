@@ -57,6 +57,7 @@ impl Worker<'_> {
                 spec_dir: &spec_dir(&claimed.job.id),
                 previous_handoff: previous.as_deref(),
                 review_report: report.as_deref(),
+                auto_at: self.config.gate.auto_at,
             },
         ))
     }

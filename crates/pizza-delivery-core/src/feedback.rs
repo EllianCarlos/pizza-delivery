@@ -12,6 +12,7 @@ struct Attributes {
     severity: Option<String>,
     alternatives: Vec<String>,
     impact: Option<String>,
+    evidence: Option<String>,
 }
 
 fn split_attributes(bullet: &str) -> (&str, Attributes) {
@@ -20,6 +21,7 @@ fn split_attributes(bullet: &str) -> (&str, Attributes) {
         severity: None,
         alternatives: Vec::new(),
         impact: None,
+        evidence: None,
     };
     let Some(open) = bullet.rfind('[') else {
         return (bullet, empty);
@@ -41,6 +43,7 @@ fn split_attributes(bullet: &str) -> (&str, Attributes) {
                         .collect();
                 }
                 "impact" => acc.impact = Some(value.to_owned()).filter(|i| !i.is_empty()),
+                "evidence" => acc.evidence = Some(value.to_owned()).filter(|e| !e.is_empty()),
                 _ => {}
             }
         }
@@ -79,6 +82,7 @@ pub fn parse_feedback(handoff: &str) -> Vec<Feedback> {
                         confidence: attributes.confidence,
                         alternatives: attributes.alternatives,
                         impact: attributes.impact,
+                        evidence: attributes.evidence,
                     }
                 })
         })
@@ -106,6 +110,7 @@ mod tests {
                 confidence: Some(70),
                 alternatives: vec!["bump to v2".into(), "keep both".into()],
                 impact: Some("clients break on v2".into()),
+                evidence: None,
             })
         );
     }
@@ -122,6 +127,7 @@ mod tests {
                 confidence: None,
                 alternatives: vec![],
                 impact: None,
+                evidence: None,
             })
         );
     }

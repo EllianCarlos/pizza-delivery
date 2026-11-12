@@ -21,11 +21,46 @@ impl Worker<'_> {
                     confidence: f.confidence,
                     alternatives: f.alternatives,
                     impact: f.impact,
+                    evidence: f.evidence,
                 },
             };
             self.with_store(|s| s.append_event(event))?;
         }
         Ok(())
+    }
+
+    /// Agent-written items pass the confidence gate: only those it sends to the
+    /// inbox become feedback; the rest are kept as suppressed audit events.
+    fn record_gated_feedback(&self, claimed: &Claimed, entries: Vec<Feedback>) -> Result<()> {
+        let (inbox, rest): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .partition(|f| self.gate_decision(f) == GateDecision::Inbox);
+        self.record_feedback(claimed, Actor::Agent, inbox)?;
+        for f in rest {
+            let decision = self.gate_decision(&f);
+            self.append(
+                &claimed.job.id,
+                Some(&claimed.stage_id),
+                EventPayload::FeedbackSuppressed {
+                    kind: f.kind,
+                    text: f.text,
+                    confidence: f.confidence,
+                    impact: f.impact.as_deref().and_then(Impact::parse),
+                    decision,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    fn gate_decision(&self, f: &Feedback) -> GateDecision {
+        gate(
+            GateItem {
+                confidence: f.confidence,
+                impact: f.impact.as_deref().and_then(Impact::parse),
+            },
+            self.config.gate,
+        )
     }
 
     pub(super) fn accept_output(&self, claimed: &Claimed, run: &StageRun) -> Result<Verdict> {
@@ -61,7 +96,7 @@ impl Worker<'_> {
                 path: handoff_rel.to_string_lossy().into_owned(),
             },
         )?;
-        self.record_feedback(claimed, Actor::Agent, parse_feedback(&text))?;
+        self.record_gated_feedback(claimed, parse_feedback(&text))?;
         self.record_feedback(claimed, Actor::Daemon, extra)?;
         if claimed.name == "review" {
             self.plan_review_follow_up(claimed, run)?;

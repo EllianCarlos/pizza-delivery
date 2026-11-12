@@ -300,6 +300,7 @@ pub fn contradiction_risk(entry: &Entry, store: Store, id: &str) -> Feedback {
             entry.content.trim()
         ),
         confidence: None,
+        evidence: None,
         alternatives: vec![],
         impact: Some(
             "the existing memory was left untouched and the new fact was not saved".to_owned(),

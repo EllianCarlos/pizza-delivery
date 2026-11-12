@@ -508,6 +508,7 @@ mod tests {
                 confidence: Some(90),
                 alternatives: vec![],
                 impact: None,
+                evidence: None,
             },
         )?;
         add(
@@ -521,6 +522,7 @@ mod tests {
                 confidence: Some(20),
                 alternatives: vec![],
                 impact: None,
+                evidence: None,
             },
         )?;
         add(

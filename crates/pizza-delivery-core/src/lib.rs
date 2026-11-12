@@ -7,6 +7,7 @@ pub mod event;
 pub mod exit;
 pub mod feedback;
 pub mod filter;
+pub mod gate;
 pub mod grill;
 pub mod handoff;
 pub mod id;
@@ -39,6 +40,7 @@ pub use filter::{
     check_range, filter_artifacts, filter_events, filter_inbox, parse_when, ArtifactFilter,
     ArtifactItem, EventFilter, InboxFilter,
 };
+pub use gate::{gate, GateDecision, GateItem, GateThresholds, Impact};
 pub use id::{resolve, short_id, JobId, ResolveError};
 pub use job::{apply, fold, Job, JobState};
 pub use quota::{fold_quota, quota_views, QuotaSnapshot, QuotaStatus, QuotaView};

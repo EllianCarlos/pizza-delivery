@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 ---
 Run a self-grill on the task below. Interview yourself about the task, one round at a time, and answer every question yourself from the context file, the repository and your memory tools. You have at most {{grill_round_cap}} rounds; stop earlier when no new questions remain.
 

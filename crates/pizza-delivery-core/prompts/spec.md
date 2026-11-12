@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 ---
 Write a specification for the task below, then break it into tickets. Both are local Markdown files committed in the job worktree (your working directory); do not use an external tracker.
 

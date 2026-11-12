@@ -274,6 +274,7 @@ impl Broker {
                     self.stage
                 ),
                 confidence: None,
+                evidence: None,
                 alternatives: Vec::new(),
                 impact: None,
             },
@@ -430,6 +431,7 @@ auto = true
                     severity: String::new(),
                     text: String::new(),
                     confidence: None,
+                    evidence: None,
                     alternatives: vec![],
                     impact: None,
                 },

@@ -1,5 +1,5 @@
 ---
-version: 1
+version: 2
 ---
 Review the changes on the current branch against the task, the spec under {{spec_dir}} if one exists, and the repository conventions. Do not change code in this stage.
 

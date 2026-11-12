@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
 use pizza_delivery_core::event::Event;
+use pizza_delivery_core::gate::GateThresholds;
 use pizza_delivery_core::job::JobState;
 use pizza_delivery_core::{NewJob, Priority};
 
@@ -182,6 +183,7 @@ impl Rig {
                 retention_ms: 1000,
                 budget_cap_tokens: DEFAULT_CAP_TOKENS,
                 budget_defaults: Defaults::standard(),
+                gate: GateThresholds::default(),
                 require_triage: false,
                 mcp: None,
                 memory: None,

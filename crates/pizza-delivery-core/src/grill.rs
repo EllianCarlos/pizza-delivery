@@ -42,6 +42,7 @@ impl Entry {
                 format!("{} -> {}", self.question, self.answer.trim())
             },
             confidence: self.confidence,
+            evidence: None,
             alternatives: self.alternatives.clone(),
             impact: self.impact.clone(),
         })
@@ -107,6 +108,7 @@ pub fn assess(transcript: &str, cap: u32) -> Assessment {
                 "self-grill stopped at the round cap of {cap}; {dropped} further round(s) were not considered"
             ),
             confidence: None,
+            evidence: None,
             alternatives: Vec::new(),
             impact: Some("open questions may remain in the spec".to_owned()),
         });
@@ -150,6 +152,7 @@ mod tests {
                 severity: "low".into(),
                 text: "Which port? -> 8080".into(),
                 confidence: Some(30),
+                evidence: None,
                 alternatives: vec!["80".into(), "9000".into()],
                 impact: Some("clients must reconfigure".into()),
             })

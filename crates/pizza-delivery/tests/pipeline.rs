@@ -318,7 +318,7 @@ fn agent_invoked_events_carry_template_name_version_and_prompt_hash() -> TestRes
         .collect();
     assert_eq!(templates, vec!["grill", "implement", "review"]);
     for row in &invoked {
-        assert_eq!(row.payload["version"], 1);
+        assert_eq!(row.payload["version"], 2);
         assert!(row.payload["prompt_sha256"]
             .as_str()
             .is_some_and(|h| h.len() == 64));

@@ -112,15 +112,13 @@ pub fn estimated_total(estimates: &[StageEstimate]) -> u64 {
 
 pub fn estimate_overrun(estimates: &[StageEstimate], cap: u64) -> Option<Feedback> {
     let total = estimated_total(estimates);
-    (total > cap).then(|| Feedback {
-        kind: "budget".to_owned(),
-        severity: "high".to_owned(),
-        text: format!(
-            "estimated {total} tokens exceeds the job budget cap of {cap}; running anyway"
-        ),
-        confidence: None,
-        alternatives: Vec::new(),
-        impact: None,
+    (total > cap).then(|| {
+        Feedback::new(
+            "budget",
+            "high",
+            format!("estimated {total} tokens exceeds the job budget cap of {cap}; running anyway"),
+            None,
+        )
     })
 }
 
@@ -139,13 +137,13 @@ pub fn actual_total(events: &[Event]) -> u64 {
 
 pub fn actual_overrun(events: &[Event], cap: u64) -> Option<Feedback> {
     let total = actual_total(events);
-    (total > cap).then(|| Feedback {
-        kind: "budget".to_owned(),
-        severity: "high".to_owned(),
-        text: format!("actual usage of {total} tokens exceeds the job budget cap of {cap}"),
-        confidence: None,
-        alternatives: Vec::new(),
-        impact: None,
+    (total > cap).then(|| {
+        Feedback::new(
+            "budget",
+            "high",
+            format!("actual usage of {total} tokens exceeds the job budget cap of {cap}"),
+            None,
+        )
     })
 }
 

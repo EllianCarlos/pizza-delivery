@@ -81,6 +81,7 @@ pub fn decide(findings: &[Finding], fix_rounds_done: u32, can_plan_fix: bool) ->
                 severity: "high".to_owned(),
                 text: format!("unresolved review finding: {}", f.text),
                 confidence: None,
+                evidence: None,
                 alternatives: Vec::new(),
                 impact: Some(format!(
                     "shipped after {fix_rounds_done} fix round(s) with this finding still open"

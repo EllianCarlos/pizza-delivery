@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::budget::{SizeTier, StageEstimate};
+use crate::gate::{GateDecision, Impact};
 use crate::id::JobId;
 use crate::quota::QuotaStatus;
 use crate::resilience::RetryCause;
@@ -156,6 +157,17 @@ pub enum EventPayload {
         alternatives: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         impact: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<String>,
+    },
+    FeedbackSuppressed {
+        kind: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confidence: Option<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        impact: Option<Impact>,
+        decision: GateDecision,
     },
     FeedbackDismissed {
         entry: String,
@@ -250,6 +262,7 @@ impl EventPayload {
             EventPayload::ContextRead { .. } => "context-read",
             EventPayload::TriageCompleted { .. } => "triage-completed",
             EventPayload::FeedbackRecorded { .. } => "feedback-recorded",
+            EventPayload::FeedbackSuppressed { .. } => "feedback-suppressed",
             EventPayload::FeedbackDismissed { .. } => "feedback-dismissed",
             EventPayload::PlanAmended { .. } => "plan-amended",
             EventPayload::JobNeedsHuman { .. } => "job-needs-human",
@@ -297,6 +310,46 @@ mod tests {
             serde_json::to_value(&p).ok(),
             Some(serde_json::json!({"kind":"job-submitted","payload":{"prompt":"x"}}))
         );
+    }
+
+    #[test]
+    fn old_feedback_rows_without_gate_fields_still_deserialize() -> Result<(), serde_json::Error> {
+        let old = serde_json::json!({"kind":"feedback-recorded","payload":{"kind":"assumption","severity":"medium","text":"t","confidence":40}});
+        let p: EventPayload = serde_json::from_value(old)?;
+        assert!(matches!(
+            p,
+            EventPayload::FeedbackRecorded { ref alternatives, impact: None, evidence: None, confidence: Some(40), .. } if alternatives.is_empty()
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn feedback_with_gate_fields_round_trips_and_suppression_has_its_own_kind(
+    ) -> Result<(), serde_json::Error> {
+        let p = EventPayload::FeedbackRecorded {
+            kind: "open-question".into(),
+            severity: "high".into(),
+            text: "q".into(),
+            confidence: Some(20),
+            alternatives: vec!["a".into(), "b".into()],
+            impact: Some("high".into()),
+            evidence: Some("src".into()),
+        };
+        let back: EventPayload = serde_json::from_value(serde_json::to_value(&p)?)?;
+        assert_eq!(back, p);
+        let s = EventPayload::FeedbackSuppressed {
+            kind: "assumption".into(),
+            text: "t".into(),
+            confidence: Some(90),
+            impact: Some(Impact::Low),
+            decision: GateDecision::AutoResolved,
+        };
+        assert_eq!(s.kind(), "feedback-suppressed");
+        let v = serde_json::to_value(&s)?;
+        assert_eq!(v["payload"]["decision"], "auto-resolved");
+        let back: EventPayload = serde_json::from_value(v)?;
+        assert_eq!(back, s);
+        Ok(())
     }
 
     #[test]
