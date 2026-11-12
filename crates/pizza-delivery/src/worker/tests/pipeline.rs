@@ -285,3 +285,45 @@ fn a_lease_that_expires_on_the_last_attempt_fails_the_job() -> Result<()> {
     assert_eq!(rig.job_state()?, JobState::Failed);
     Ok(())
 }
+
+#[test]
+fn each_tool_use_is_ledgered_as_a_small_event_before_agent_finished() -> Result<()> {
+    let stdout: &'static str = Box::leak(
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"tool_use","name":"Read","input":{"file_path":"/a.rs"}},
+                {"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}),
+            OK_RESULT.trim()
+        )
+        .into_boxed_str(),
+    );
+    let rig = Rig::new(vec![Script {
+        handoff: Some(HANDOFF),
+        stdout,
+        ..Script::default()
+    }])?;
+
+    rig.worker().tick()?;
+
+    let calls: Vec<(String, String)> = rig
+        .timeline()?
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            EventPayload::ToolCalled { name, summary } => Some((name, summary)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![
+            ("Read".to_owned(), "/a.rs".to_owned()),
+            ("Bash".to_owned(), "ls".to_owned())
+        ]
+    );
+    let kinds = rig.kinds()?;
+    let finished = kinds.iter().position(|k| *k == "agent-finished");
+    let last_tool = kinds.iter().rposition(|k| *k == "tool-called");
+    assert!(last_tool < finished);
+    Ok(())
+}

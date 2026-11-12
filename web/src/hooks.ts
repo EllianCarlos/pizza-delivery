@@ -54,6 +54,7 @@ const KINDS = [
   "stage-budget-recorded",
   "agent-invoked",
   "agent-finished",
+  "tool-called",
   "agent-fell-back",
   "quota-signal",
   "sandbox-audit",

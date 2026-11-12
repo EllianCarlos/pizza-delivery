@@ -9,12 +9,23 @@ import Select from "@cloudscape-design/components/select";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import Table from "@cloudscape-design/components/table";
 import Textarea from "@cloudscape-design/components/textarea";
+import Toggle from "@cloudscape-design/components/toggle";
 import type { Api } from "./api";
 import { useEventStream, usePolled } from "./hooks";
 import type { InboxEntry } from "./generated/InboxEntry";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobView } from "./generated/JobView";
-import { artifactsOf, eventFamilies, filterEvents } from "./model";
+import {
+  artifactsOf,
+  eventFamilies,
+  formatCost,
+  formatDuration,
+  formatTokens,
+  jobSummary,
+  stageRows,
+  toolCallsOf,
+  visibleEvents,
+} from "./model";
 import { StateBadge } from "./views";
 
 export function DetailPanel({
@@ -27,6 +38,18 @@ export function DetailPanel({
   onChanged: () => void;
 }) {
   const cancellable = detail.job.state === "queued" || detail.job.state === "running";
+  const [showTools, setShowTools] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const anyRunning = detail.stages.some((s) => s.state === "running");
+  useEffect(() => {
+    if (!anyRunning) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [anyRunning]);
+  const rows = useMemo(() => stageRows(detail, now), [detail, now]);
+  const summary = useMemo(() => jobSummary(detail, now), [detail, now]);
+  const toolCalls = useMemo(() => toolCallsOf(detail.events), [detail.events]);
   return (
     <SpaceBetween size="m">
       <Header
@@ -47,20 +70,57 @@ export function DetailPanel({
       >
         {detail.job.short_id} <StateBadge state={detail.job.state} />
       </Header>
+      <Box>
+        <b>Total time</b> {formatDuration(summary.wallMs)}
+        {" | "}
+        <b>Total cost</b> {formatCost(summary.costMicrousd)}
+        {" | "}
+        <b>Models</b> {summary.models.length > 0 ? summary.models.join(", ") : "-"}
+      </Box>
       <Table
         variant="embedded"
         header={<Header variant="h3">Stages</Header>}
-        items={detail.stages}
+        items={rows}
         trackBy="id"
         empty={<Box>No stages have run</Box>}
         columnDefinitions={[
-          { id: "n", header: "#", cell: (s) => s.n },
+          { id: "n", header: "#", cell: (s) => detail.stages.find((x) => x.id === s.id)?.n },
           { id: "name", header: "Stage", cell: (s) => s.name },
           { id: "state", header: "State", cell: (s) => <StateBadge state={s.state} /> },
-          { id: "attempt", header: "Attempt", cell: (s) => s.attempt },
-          { id: "agent", header: "Agent", cell: (s) => s.usage?.agent ?? "-" },
+          { id: "attempt", header: "Attempt", cell: (s) => detail.stages.find((x) => x.id === s.id)?.attempt },
+          { id: "agent", header: "Agent", cell: (s) => s.agent ?? "-" },
+          { id: "model", header: "Model", cell: (s) => s.model ?? "-" },
+          {
+            id: "time",
+            header: "Time",
+            cell: (s) => formatDuration(s.wallMs) + (s.live ? " (running)" : ""),
+          },
+          { id: "tokens", header: "Tokens", cell: (s) => formatTokens(s.inputTokens, s.outputTokens) },
+          { id: "cost", header: "Cost", cell: (s) => formatCost(s.costMicrousd) },
         ]}
       />
+      <Toggle checked={showTools} onChange={({ detail: d }) => setShowTools(d.checked)}>
+        Show tool calls
+      </Toggle>
+      {showTools && (
+        <Table
+          variant="embedded"
+          header={<Header variant="h3" counter={`(${toolCalls.length})`}>Tool calls</Header>}
+          items={toolCalls}
+          trackBy="cursor"
+          empty={<Box>No tool calls recorded</Box>}
+          columnDefinitions={[
+            { id: "time", header: "Time", cell: (t) => new Date(t.ts_ms).toLocaleTimeString() },
+            {
+              id: "stage",
+              header: "Stage",
+              cell: (t) => detail.stages.find((s) => s.id === t.stage_id)?.name ?? "-",
+            },
+            { id: "tool", header: "Tool", cell: (t) => t.name },
+            { id: "summary", header: "Summary", cell: (t) => t.summary },
+          ]}
+        />
+      )}
       <Table
         variant="embedded"
         header={<Header variant="h3">Feedback</Header>}
@@ -179,9 +239,13 @@ export function EventsPanel({ api }: { api: Api }) {
   const events = useEventStream(data?.events ?? []);
   const [families, setFamilies] = useState<string[]>([]);
   const options = eventFamilies(events).map((f) => ({ label: f, value: f }));
-  const shown = filterEvents(events, new Set(families));
+  const [showTools, setShowTools] = useState(false);
+  const shown = visibleEvents(events, new Set(families), showTools);
   return (
     <SpaceBetween size="m">
+      <Toggle checked={showTools} onChange={({ detail }) => setShowTools(detail.checked)}>
+        Show tool calls
+      </Toggle>
       <Multiselect
         selectedOptions={families.map((f) => ({ label: f, value: f }))}
         options={options}

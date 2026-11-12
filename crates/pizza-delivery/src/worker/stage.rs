@@ -337,6 +337,16 @@ impl Worker<'_> {
             .input_tokens
             .zip(usage.output_tokens)
             .map(|(i, o)| i.saturating_add(o));
+        for call in pizza_delivery_core::claude::tool_calls(&output.stdout) {
+            self.append(
+                &job.id,
+                stage,
+                EventPayload::ToolCalled {
+                    name: call.name,
+                    summary: call.summary,
+                },
+            )?;
+        }
         self.append(&job.id, stage, EventPayload::AgentFinished { usage })?;
         let until = self.record_quota(claimed, candidate, &classified)?;
         if let Some(reason) =
