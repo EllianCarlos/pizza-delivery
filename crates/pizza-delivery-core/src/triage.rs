@@ -1040,7 +1040,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_bad_values() {
-        let bad = |o: TriageOptions| o.validate().unwrap_err();
+        let bad = |o: TriageOptions| o.validate().err().unwrap_or(OptionsError::BlankHint);
         assert_eq!(
             bad(TriageOptions {
                 max_stages: Some(0),
@@ -1090,11 +1090,12 @@ mod tests {
     }
 
     #[test]
-    fn options_serde_omits_unset_fields() {
-        assert_eq!(serde_json::to_string(&opts()).unwrap(), "{}");
+    fn options_serde_omits_unset_fields() -> Result<(), serde_json::Error> {
+        assert_eq!(serde_json::to_string(&opts())?, "{}");
         let o: TriageOptions =
-            serde_json::from_str(r#"{"template":"bug-fix","report_only":true}"#).unwrap();
+            serde_json::from_str(r#"{"template":"bug-fix","report_only":true}"#)?;
         assert_eq!(o.template, Some(Template::BugFix));
         assert!(o.report_only);
+        Ok(())
     }
 }

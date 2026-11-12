@@ -134,3 +134,46 @@ fn empty_prompt_is_a_usage_error() -> TestResult {
     assert!(h.ledger().map(|l| l.is_empty()).unwrap_or(true));
     Ok(())
 }
+
+#[test]
+fn additional_parameters_are_persisted_on_the_submitted_event() -> TestResult {
+    let h = Harness::new()?;
+    let cli = h.run(&[
+        "--report-only",
+        "--max-stages",
+        "2",
+        "--risk",
+        "customer-data",
+        "tidy",
+    ])?;
+    assert_eq!(cli.code, 0, "stderr: {}", cli.stderr);
+    let options = &h.ledger()?[0].payload["options"];
+    assert_eq!(options["report_only"], true);
+    assert_eq!(options["max_stages"], 2);
+    assert_eq!(options["risk_flags"][0], "customer-data");
+    Ok(())
+}
+
+#[test]
+fn no_additional_parameters_leaves_the_event_without_an_options_key() -> TestResult {
+    let h = Harness::new()?;
+    h.submit("plain")?;
+    assert!(h.ledger()?[0].payload.get("options").is_none());
+    Ok(())
+}
+
+#[test]
+fn invalid_additional_parameters_exit_with_a_usage_error() -> TestResult {
+    let h = Harness::new()?;
+    for args in [
+        vec!["--max-stages", "0", "x"],
+        vec!["--max-stages", "11", "x"],
+        vec!["--context", "   ", "x"],
+        vec!["--risk", "Not Kebab", "x"],
+    ] {
+        let cli = h.run(&args)?;
+        assert_eq!(cli.code, 2, "{args:?}: {}", cli.stderr);
+    }
+    assert!(h.ledger()?.is_empty());
+    Ok(())
+}

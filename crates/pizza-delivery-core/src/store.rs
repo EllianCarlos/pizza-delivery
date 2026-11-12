@@ -4,6 +4,7 @@ use crate::event::{Actor, Event, EventPayload};
 use crate::id::JobId;
 use crate::job::Job;
 use crate::schedule::{Caps, Priority};
+use crate::triage::TriageOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewJob {
@@ -12,6 +13,7 @@ pub struct NewJob {
     pub prompt: String,
     pub repo: Option<String>,
     pub priority: Priority,
+    pub options: Option<TriageOptions>,
     pub submitted_at_ms: i64,
 }
 
