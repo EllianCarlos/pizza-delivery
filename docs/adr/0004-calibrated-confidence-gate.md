@@ -1,5 +1,7 @@
 # Calibrated confidence gate for the inbox
 
+Status: accepted
+
 Agents annotate each assumption, open question and risk with `[confidence; alternatives; impact; evidence]`. A pure function (`gate`) maps confidence and impact to inbox, handoff-only or auto-resolved, using thresholds from daemon config (default 50 and 80). Items kept out of the inbox are still ledgered as `feedback-suppressed`.
 
 ## Consequences
