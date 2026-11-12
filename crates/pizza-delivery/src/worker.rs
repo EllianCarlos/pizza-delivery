@@ -1017,6 +1017,7 @@ mod tests {
                 prompt: "do it".into(),
                 repo: Some("/src/my repo".into()),
                 priority: Priority::Normal,
+                options: None,
                 submitted_at_ms: 0,
             })?;
             Ok(Self {
@@ -1590,6 +1591,7 @@ chain = [{ agent = "claude" }, { agent = "opencode" }]
                 prompt: "second".into(),
                 repo: Some("/src/my repo".into()),
                 priority: Priority::Normal,
+                options: None,
                 submitted_at_ms: 0,
             })
             .map(|_| ())

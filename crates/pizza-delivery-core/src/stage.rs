@@ -150,6 +150,7 @@ mod tests {
                 prompt: "p".into(),
                 repo: Some("/r".into()),
                 priority: Default::default(),
+                options: None,
             },
         )
     }

@@ -103,9 +103,17 @@ pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Respons
             error(ErrorKind::Usage, "prompt must not be empty", vec![])
         }
         Request::Submit {
+            options: Some(options),
+            ..
+        } if options.validate().is_err() => {
+            let reason = options.validate().err().map(|e| e.to_string());
+            error(ErrorKind::Usage, reason.unwrap_or_default(), vec![])
+        }
+        Request::Submit {
             prompt,
             repo,
             priority,
+            options,
         } => {
             let new = NewJob {
                 id: JobId::new(env.new_ulid()),
@@ -113,6 +121,7 @@ pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Respons
                 prompt,
                 repo,
                 priority: priority.unwrap_or_default(),
+                options: options.filter(|o| !o.is_empty()),
                 submitted_at_ms: env.now_ms(),
             };
             let result = store.enqueue_job(new).and_then(|job| {

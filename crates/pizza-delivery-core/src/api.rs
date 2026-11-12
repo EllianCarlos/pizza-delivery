@@ -8,7 +8,7 @@ use crate::job::JobState;
 use crate::quota::QuotaView;
 use crate::schedule::Priority;
 use crate::stage::StageView;
-use crate::triage::Outcome;
+use crate::triage::{Outcome, TriageOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
@@ -19,6 +19,8 @@ pub enum Request {
         repo: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         priority: Option<Priority>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<TriageOptions>,
     },
     Cancel {
         job: String,
@@ -27,6 +29,8 @@ pub enum Request {
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repo: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<TriageOptions>,
     },
     Status {
         job: Option<String>,
@@ -128,5 +132,42 @@ mod tests {
         let text = serde_json::to_string(&req).unwrap_or_default();
         assert_eq!(text, r#"{"op":"status","job":"@last"}"#);
         assert_eq!(serde_json::from_str::<Request>(&text).ok(), Some(req));
+    }
+
+    #[test]
+    fn submit_without_options_deserializes_and_serializes_without_the_key(
+    ) -> Result<(), serde_json::Error> {
+        let req: Request = serde_json::from_str(r#"{"op":"submit","prompt":"x"}"#)?;
+        assert_eq!(
+            req,
+            Request::Submit {
+                prompt: "x".into(),
+                repo: None,
+                priority: None,
+                options: None
+            }
+        );
+        let json = serde_json::to_string(&req)?;
+        assert!(!json.contains("options"));
+        let triage: Request = serde_json::from_str(r#"{"op":"triage","prompt":"x"}"#)?;
+        assert!(matches!(triage, Request::Triage { options: None, .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn submit_options_round_trip() -> Result<(), serde_json::Error> {
+        let req = Request::Submit {
+            prompt: "x".into(),
+            repo: None,
+            priority: None,
+            options: Some(TriageOptions {
+                report_only: true,
+                max_stages: Some(3),
+                ..Default::default()
+            }),
+        };
+        let back: Request = serde_json::from_str(&serde_json::to_string(&req)?)?;
+        assert_eq!(back, req);
+        Ok(())
     }
 }
