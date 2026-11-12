@@ -1,12 +1,16 @@
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { extname } from "node:path";
+import { buildId, COMPRESSIBLE, compress, renderIndex, renderWorker } from "./src/release";
 
 await rm("dist", { recursive: true, force: true });
 await mkdir("dist", { recursive: true });
 
+// Content-hashed names let the server mark them immutable; index.html and sw.js are the
+// only entry points whose names stay fixed.
 const result = await Bun.build({
   entrypoints: ["src/main.tsx"],
   outdir: "dist",
-  naming: { entry: "app.[ext]", asset: "[name].[ext]", chunk: "[name].js" },
+  naming: { entry: "app-[hash].[ext]", asset: "[name]-[hash].[ext]", chunk: "chunk-[hash].js" },
   minify: true,
   target: "browser",
 });
@@ -15,26 +19,31 @@ if (!result.success) {
   process.exit(1);
 }
 
+const built = result.outputs.map((o) => o.path.split("/").pop() ?? "");
+const script = built.find((n) => n.startsWith("app-") && n.endsWith(".js"));
+const style = built.find((n) => n.startsWith("app-") && n.endsWith(".css"));
+if (!script || !style) throw new Error(`bundle lacks a script or stylesheet: ${built.join(", ")}`);
+
 await cp("public", "dist", { recursive: true });
 
-await writeFile(
-  "dist/index.html",
-  `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>pizza-delivery</title>
-    <meta name="theme-color" content="#0f1b2a" />
-    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
-    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <link rel="apple-touch-icon" href="/icon-192.png" />
-    <link rel="stylesheet" href="/app.css" />
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/app.js"></script>
-  </body>
-</html>
-`,
+const bundle = built.filter((n) => n.endsWith(".js") || n.endsWith(".css"));
+const publicFiles = await readdir("public");
+const id = buildId(
+  await Promise.all(
+    [...bundle.map((n) => [n, `dist/${n}`]), ...publicFiles.map((n) => [n, `public/${n}`])].map(
+      async ([name, path]) => [name!, await readFile(path!)] as [string, Uint8Array],
+    ),
+  ),
 );
+
+await writeFile("dist/index.html", renderIndex({ script, style }));
+await writeFile("dist/sw.js", renderWorker(await readFile("public/sw.js", "utf8"), id, bundle));
+
+// Precompress so the server never spends CPU on it and the tunnel carries the small bytes.
+for (const name of await readdir("dist")) {
+  if (!COMPRESSIBLE.includes(extname(name))) continue;
+  const packed = compress(await readFile(`dist/${name}`));
+  if (!packed) continue;
+  await writeFile(`dist/${name}.br`, packed.br);
+  await writeFile(`dist/${name}.gz`, packed.gz);
+}

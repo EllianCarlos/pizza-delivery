@@ -4,7 +4,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 dest="$root/crates/pizza-delivery/web-assets"
 rm -rf "$dest"
 mkdir -p "$dest"
-for name in index.html app.js app.css; do
-  cp "$root/web/dist/$name" "$dest/$name"
+# The whole dist: hashed bundle, index, the rewritten sw.js and the .br/.gz variants.
+cp "$root"/web/dist/* "$dest/"
+for name in "$root"/web/public/*; do
+  [ -e "$dest/$(basename "$name")" ] || cp "$name" "$dest/"
 done
-cp "$root"/web/public/* "$dest/"

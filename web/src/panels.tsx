@@ -12,12 +12,13 @@ import Table from "@cloudscape-design/components/table";
 import Textarea from "@cloudscape-design/components/textarea";
 import Toggle from "@cloudscape-design/components/toggle";
 import type { Api } from "./api";
-import { useEventStream, usePolled } from "./hooks";
+import { useJobDetails, useLiveEvents, usePolled } from "./hooks";
 import type { InboxStatus } from "./inbox";
 import type { InboxEntry } from "./generated/InboxEntry";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobView } from "./generated/JobView";
 import {
+  type Artifact,
   artifactsOf,
   eventFamilies,
   formatCost,
@@ -142,8 +143,17 @@ export function DetailPanel({
   );
 }
 
-export function ArtifactList({ detail, api }: { detail: JobDetailView; api: Api }) {
-  const artifacts = useMemo(() => artifactsOf(detail.events), [detail.events]);
+export function ArtifactList({
+  detail,
+  api,
+}: {
+  detail: JobDetailView & { artifacts?: Artifact[] };
+  api: Api;
+}) {
+  const artifacts = useMemo(
+    () => detail.artifacts ?? artifactsOf(detail.events),
+    [detail.artifacts, detail.events],
+  );
   const [open, setOpen] = useState<number | null>(null);
   const [content, setContent] = useState<string>("");
   useEffect(() => {
@@ -300,8 +310,7 @@ export function InboxPanel({ api }: { api: Api }) {
 }
 
 export function EventsPanel({ api }: { api: Api }) {
-  const { data } = usePolled(() => api.events(0), 60000);
-  const events = useEventStream(data?.events ?? []);
+  const events = useLiveEvents(() => api.events(0));
   const [families, setFamilies] = useState<string[]>([]);
   const options = eventFamilies(events).map((f) => ({ label: f, value: f }));
   const [showTools, setShowTools] = useState(false);
@@ -335,7 +344,9 @@ export function EventsPanel({ api }: { api: Api }) {
 
 export function ArtifactBrowser({ jobs, api }: { jobs: JobView[]; api: Api }) {
   const [ref, setRef] = useState<string | null>(null);
-  const { data } = usePolled(() => (ref ? api.job(ref) : Promise.resolve(null)), 5000);
+  const selected = jobs.find((j) => j.short_id === ref)?.id ?? null;
+  const details = useJobDetails(api.jobFull, jobs, selected, false, 5000);
+  const data = details.data?.[0] ?? null;
   return (
     <SpaceBetween size="m">
       <Select

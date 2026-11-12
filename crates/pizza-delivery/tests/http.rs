@@ -61,6 +61,39 @@ fn job_detail_carries_plan_with_estimates_stages_and_feedback() -> TestResult {
 }
 
 #[test]
+fn job_detail_endpoint_bundles_job_stages_events_and_artifacts() -> TestResult {
+    let h = harness()?;
+    let id = finished_job(&h)?;
+
+    let plain = h.get(&format!("/api/jobs/{id}"))?;
+    let full = h.get(&format!("/api/jobs/{id}/detail"))?;
+    for key in ["job", "plan", "stages", "feedback", "events"] {
+        assert_eq!(full[key], plain[key], "{key} matches the plain detail");
+    }
+    let recorded = full["events"]
+        .as_array()
+        .ok_or("no events")?
+        .iter()
+        .filter(|e| e["kind"] == "artifact-recorded")
+        .count();
+    let artifacts = full["artifacts"].as_array().ok_or("no artifacts")?;
+    assert_eq!(artifacts.len(), recorded);
+    for (n, a) in artifacts.iter().enumerate() {
+        assert_eq!(a["index"], n);
+        assert!(a["path"].is_string() && a["kind"].is_string() && a["sha256"].is_string());
+        let content = h.get(&format!("/api/jobs/{id}/artifacts/{n}"))?;
+        assert_eq!(content["path"], a["path"]);
+    }
+
+    let (status, body) = h.http("GET", "/api/jobs/nope/detail", None)?;
+    assert_eq!(status, 404);
+    assert_eq!(body["kind"], "not-found");
+    let (status, _) = h.http("POST", &format!("/api/jobs/{id}/detail"), Some(&json!({})))?;
+    assert_eq!(status, 405);
+    Ok(())
+}
+
+#[test]
 fn quota_and_inbox_are_readable() -> TestResult {
     let h = harness()?;
     finished_job(&h)?;
@@ -291,9 +324,58 @@ fn the_web_ui_is_served_from_the_root() -> TestResult {
     assert_eq!(status, 200);
     assert!(head.contains("Content-Type: text/html"), "{head}");
     assert!(body.contains("<div id=\"root\">"), "{body}");
-    let (status, head, _) = h.raw_get("/app.js")?;
+    let (status, head, _) = h.raw_get(&script_path(&body)?)?;
     assert_eq!(status, 200);
     assert!(head.contains("javascript"), "{head}");
+    Ok(())
+}
+
+fn script_path(index: &str) -> TestResult<String> {
+    let rest = index
+        .split("<script type=\"module\" src=\"")
+        .nth(1)
+        .ok_or("index.html has no module script")?;
+    Ok(rest.split('"').next().unwrap_or_default().to_owned())
+}
+
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines()
+        .filter_map(|l| l.split_once(':'))
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.trim())
+}
+
+#[test]
+fn the_shell_revalidates_and_hashed_assets_are_immutable_and_compressed() -> TestResult {
+    let h = harness()?;
+    let (_, head, index) = h.raw_get("/")?;
+    assert_eq!(header(&head, "cache-control"), Some("no-cache"), "{head}");
+    assert_eq!(header(&head, "vary"), Some("Accept-Encoding"), "{head}");
+    let (_, head, _) = h.raw_get("/sw.js")?;
+    assert_eq!(header(&head, "cache-control"), Some("no-cache"), "{head}");
+
+    let script = script_path(&index)?;
+    let (_, head, plain) = h.raw_get(&script)?;
+    assert_eq!(header(&head, "content-encoding"), None, "{head}");
+    assert_eq!(header(&head, "vary"), Some("Accept-Encoding"), "{head}");
+    let hashed = script.starts_with("/app-");
+    let expected = if hashed {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    assert_eq!(header(&head, "cache-control"), Some(expected), "{head}");
+
+    if hashed {
+        let (_, head, _) = h.raw_get_with(&script, &[("Accept-Encoding", "gzip, br")])?;
+        assert_eq!(header(&head, "content-encoding"), Some("br"), "{head}");
+        let (_, head, _) = h.raw_get_with(&script, &[("Accept-Encoding", "gzip")])?;
+        assert_eq!(header(&head, "content-encoding"), Some("gzip"), "{head}");
+        let length: usize = header(&head, "content-length")
+            .ok_or("no length")?
+            .parse()?;
+        assert!(length < plain.len(), "{length} vs {}", plain.len());
+    }
     Ok(())
 }
 

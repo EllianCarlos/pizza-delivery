@@ -3,6 +3,7 @@ import type { DismissedView } from "./generated/DismissedView";
 import type { EventsView } from "./generated/EventsView";
 import type { InboxView } from "./generated/InboxView";
 import type { JobDetailView } from "./generated/JobDetailView";
+import type { JobFullView } from "./generated/JobFullView";
 import type { JobsView } from "./generated/JobsView";
 import type { Priority } from "./generated/Priority";
 import type { QuotaPanelView } from "./generated/QuotaPanelView";
@@ -89,6 +90,7 @@ export function createApi(
     staleSince: () => stale,
     jobs: () => call<JobsView>("/api/jobs"),
     job: (ref: string) => call<JobDetailView>(`/api/jobs/${ref}`),
+    jobFull: (ref: string) => call<JobFullView>(`/api/jobs/${ref}/detail`),
     quota: () => call<QuotaPanelView>("/api/quota"),
     inbox: (query: InboxQuery = {}) => call<InboxView>(inboxPath(query)),
     events: (since = 0) => call<EventsView>(`/api/events?since=${since}`),

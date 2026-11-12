@@ -6,5 +6,5 @@ const root = document.getElementById("root");
 if (root) createRoot(root).render(<App />);
 
 if ("serviceWorker" in navigator) {
-  void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  void navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).catch(() => undefined);
 }
