@@ -39,6 +39,7 @@ pub struct Config {
     pub remote: Option<RemoteConfig>,
     pub reject_window_ms: u64,
     pub vapid_subject: String,
+    pub auto_merge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +184,12 @@ impl Config {
         let remote = remote_config(&get)?;
         Ok(Self {
             remote,
+            auto_merge: !matches!(
+                get("PIZZA_DELIVERY_AUTO_MERGE")
+                    .map(|v| v.to_lowercase())
+                    .as_deref(),
+                Some("0" | "false" | "off" | "no")
+            ),
             reject_window_ms: number("PIZZA_DELIVERY_AUTH_REJECT_WINDOW_MS", 60_000),
             vapid_subject: get("PIZZA_DELIVERY_VAPID_SUBJECT")
                 .unwrap_or_else(|| "mailto:owner@pizza-delivery.invalid".to_owned()),
@@ -422,6 +429,25 @@ mod tests {
             ("PIZZA_DELIVERY_GATE_AUTO_AT", "90"),
         ]))?;
         assert_eq!((c.gate.inbox_below, c.gate.auto_at), (30, 90));
+        Ok(())
+    }
+
+    #[test]
+    fn auto_merge_defaults_on_and_the_env_switch_turns_it_off() -> Result<(), ConfigError> {
+        let on = Config::from_lookup(lookup(&[("HOME", "/h")]))?;
+        assert!(on.auto_merge);
+        for off in ["0", "false", "off", "no"] {
+            let c = Config::from_lookup(lookup(&[
+                ("HOME", "/h"),
+                ("PIZZA_DELIVERY_AUTO_MERGE", off),
+            ]))?;
+            assert!(!c.auto_merge, "{off}");
+        }
+        let c = Config::from_lookup(lookup(&[
+            ("HOME", "/h"),
+            ("PIZZA_DELIVERY_AUTO_MERGE", "1"),
+        ]))?;
+        assert!(c.auto_merge);
         Ok(())
     }
 

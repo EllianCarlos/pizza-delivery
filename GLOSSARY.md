@@ -14,6 +14,8 @@
 
 **Follow-up job**: a job created by the human replying to one or more feedback entries of an earlier job.
 
+**Auto-merge**: the ship-time step that marks a job's PR ready and merges it with a merge commit once review passed, the diff policy is clean, CI is green, the mergeable state is clean and any parent job's PR is already merged. When it does not merge, a `pr-not-merged` ledger event records the reason.
+
 **Ledger**: the append-only log of everything that happened to every job.
 
 **View**: one way of presenting the same set of jobs.

@@ -106,6 +106,7 @@ pub enum Key {
     Esc,
     Backspace,
     Tab,
+    Ctrl(char),
     Interrupt,
 }
 
@@ -113,6 +114,11 @@ pub enum Key {
 pub enum Command {
     Quit,
     Submit {
+        prompt: String,
+        options: Option<TriageOptions>,
+    },
+    /// Dry-run the triage for the form's prompt; nothing is enqueued.
+    Preview {
         prompt: String,
         options: Option<TriageOptions>,
     },
@@ -268,6 +274,15 @@ impl Model {
 
     pub fn set_notice(&mut self, text: impl Into<String>) {
         self.notice = Some(text.into());
+    }
+
+    /// Show a triage preview in the new-job form, or as a notice when the form
+    /// has been closed in the meantime.
+    pub fn show_preview(&mut self, text: String) {
+        match &mut self.mode {
+            Mode::NewJob { form } => form.preview = Some(text),
+            _ => self.notice = Some(text),
+        }
     }
 
     pub fn connection(&self) -> Connection {
@@ -525,6 +540,19 @@ impl Model {
                         None
                     }
                 },
+                FormStep::Preview => match form.to_preview() {
+                    Ok(command) => {
+                        self.mode = Mode::NewJob { form };
+                        Some(command)
+                    }
+                    Err(reason) => {
+                        if !reason.is_empty() {
+                            self.set_notice(reason);
+                        }
+                        self.mode = Mode::NewJob { form };
+                        None
+                    }
+                },
                 FormStep::Cancel => {
                     self.mode = Mode::Normal;
                     None
@@ -679,6 +707,8 @@ pub struct NewJobForm {
     pub max_stages: String,
     pub context_hint: String,
     pub risk_flags: String,
+    /// The last triage preview, cleared as soon as the form is edited.
+    pub preview: Option<String>,
 }
 
 impl Default for NewJobForm {
@@ -692,6 +722,7 @@ impl Default for NewJobForm {
             max_stages: String::new(),
             context_hint: String::new(),
             risk_flags: String::new(),
+            preview: None,
         }
     }
 }
@@ -699,6 +730,7 @@ impl Default for NewJobForm {
 pub enum FormStep {
     Continue,
     Submit,
+    Preview,
     Cancel,
 }
 
@@ -740,6 +772,7 @@ impl NewJobForm {
     pub fn key(&mut self, key: &Key) -> FormStep {
         match key {
             Key::Esc => return FormStep::Cancel,
+            Key::Ctrl('p') => return FormStep::Preview,
             Key::Tab | Key::Down => self.shift(1),
             Key::Up => self.shift(-1),
             Key::Enter if self.focus == FormField::Expander => self.toggle(),
@@ -748,15 +781,18 @@ impl NewJobForm {
             Key::Char(' ') if self.focus == FormField::Expander => self.toggle(),
             Key::Char(' ') if self.focus == FormField::ReportOnly => {
                 self.report_only = !self.report_only;
+                self.preview = None;
             }
             Key::Backspace => {
                 if let Some(text) = self.text_mut() {
                     text.pop();
+                    self.preview = None;
                 }
             }
             Key::Char(c) => {
                 if let Some(text) = self.text_mut() {
                     text.push(*c);
+                    self.preview = None;
                 }
             }
             _ => {}
@@ -816,6 +852,14 @@ impl NewJobForm {
             prompt: self.prompt.clone(),
             options: self.options()?,
         })
+    }
+
+    /// The same prompt and options as `to_command`, for a dry run.
+    pub fn to_preview(&self) -> Result<Command, String> {
+        match self.to_command()? {
+            Command::Submit { prompt, options } => Ok(Command::Preview { prompt, options }),
+            other => Ok(other),
+        }
     }
 }
 
@@ -1292,6 +1336,76 @@ mod tests {
         assert!(press(&mut model, &keys).is_empty());
         assert!(matches!(model.mode(), Mode::NewJob { .. }));
         assert!(model.notice().is_some_and(|n| n.contains("template")));
+    }
+
+    #[test]
+    fn ctrl_p_previews_the_triage_without_submitting_or_leaving_the_form() {
+        let mut model = Model::new();
+        let mut keys = vec![Key::Char('n')];
+        keys.extend(typed("fix the build"));
+        keys.push(Key::Ctrl('p'));
+        assert_eq!(
+            press(&mut model, &keys),
+            [Command::Preview {
+                prompt: "fix the build".into(),
+                options: None
+            }]
+        );
+        assert_eq!(form_of(&model).prompt, "fix the build");
+    }
+
+    #[test]
+    fn previewing_carries_the_additional_parameters() {
+        let mut model = Model::new();
+        let mut keys = vec![Key::Char('n')];
+        keys.extend(typed("x"));
+        keys.extend([Key::Tab, Key::Enter, Key::Tab]);
+        keys.extend(typed("bug-fix"));
+        keys.push(Key::Ctrl('p'));
+        let commands = press(&mut model, &keys);
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Preview { options: Some(o), .. }] if o.template == Some(Template::BugFix)
+        ));
+    }
+
+    #[test]
+    fn a_blank_prompt_or_bad_option_is_not_previewed() {
+        let mut model = Model::new();
+        assert!(press(&mut model, &[Key::Char('n'), Key::Ctrl('p')]).is_empty());
+        let mut keys: Vec<Key> = typed("x");
+        keys.extend([Key::Tab, Key::Enter, Key::Tab]);
+        keys.extend(typed("nope"));
+        keys.push(Key::Ctrl('p'));
+        assert!(press(&mut model, &keys).is_empty());
+        assert!(model.notice().is_some_and(|n| n.contains("template")));
+    }
+
+    #[test]
+    fn ctrl_p_outside_the_form_does_nothing() {
+        let mut model = Model::new();
+        assert!(press(&mut model, &[Key::Ctrl('p')]).is_empty());
+        assert_eq!(model.mode(), &Mode::Normal);
+    }
+
+    #[test]
+    fn the_preview_result_shows_in_the_form_until_the_prompt_changes() {
+        let mut model = Model::new();
+        press(&mut model, &[Key::Char('n'), Key::Char('a')]);
+        model.show_preview("plan: grill, spec".into());
+        assert_eq!(
+            form_of(&model).preview.as_deref(),
+            Some("plan: grill, spec")
+        );
+        press(&mut model, &[Key::Char('b')]);
+        assert_eq!(form_of(&model).preview, None);
+    }
+
+    #[test]
+    fn a_preview_arriving_after_the_form_closed_becomes_a_notice() {
+        let mut model = Model::new();
+        model.show_preview("plan: grill".into());
+        assert_eq!(model.notice(), Some("plan: grill"));
     }
 
     #[test]

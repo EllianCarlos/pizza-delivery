@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pizza_delivery_core::api::{ApiError, ErrorKind};
+use pizza_delivery_core::filter::InboxFilter;
 use pizza_delivery_core::schedule::Priority;
 use pizza_delivery_core::triage::TriageOptions;
 use pizza_delivery_core::view::{
-    board_view, events_view, job_detail, jobs_view, quota_panel, DismissedView, InboxView,
-    RepliedView, SubmittedView,
+    board_view, events_view, job_detail, job_full, jobs_view, quota_panel, DismissedView,
+    InboxView, RepliedView, SubmittedView,
 };
 use pizza_delivery_core::{EventPayload, JobState, Request, Response, Store};
 use serde::de::DeserializeOwned;
@@ -19,11 +20,12 @@ use serde::{Deserialize, Serialize};
 use pizza_delivery_core::event::SYSTEM_JOB;
 use pizza_delivery_core::{Actor, JobId, NewEvent};
 
+use crate::config::Config;
 use crate::handler::{handle, Env};
 use crate::lock::acquire;
 use crate::push::{endpoint_allowed, Push, Subscription};
 use crate::remote::{self, Gate, Origin, Submit};
-use crate::server::dispatch;
+use crate::server::{dispatch, triage_response};
 
 const MAX_BODY: usize = 1 << 20;
 const POLL: Duration = Duration::from_millis(100);
@@ -39,6 +41,7 @@ pub struct Api {
     pub data_dir: PathBuf,
     pub gate: Arc<Gate>,
     pub push: Arc<Push>,
+    pub config: Arc<Config>,
 }
 
 struct Req {
@@ -116,7 +119,7 @@ fn connection(stream: TcpStream, api: &Api) -> std::io::Result<()> {
         return stream_events(&stream, api, &req);
     }
     if req.method == "GET" && !req.path.starts_with("/api/") {
-        return write_asset(&stream, &req.path);
+        return write_asset(&stream, &req);
     }
     let remote = matches!(origin, Origin::Remote { .. });
     if req.method != "GET" && !remote::write_allowed(&req.headers, remote) {
@@ -150,7 +153,10 @@ fn connection(stream: TcpStream, api: &Api) -> std::io::Result<()> {
 }
 
 fn creates_job(path: &str) -> bool {
-    matches!(path.trim_end_matches('/'), "/api/jobs" | "/api/inbox/reply")
+    matches!(
+        path.trim_end_matches('/'),
+        "/api/jobs" | "/api/inbox/reply" | "/api/dry-run"
+    )
 }
 
 fn denied(status: u16, kind: &str, message: &str) -> Reply {
@@ -160,18 +166,33 @@ fn denied(status: u16, kind: &str, message: &str) -> Reply {
     }
 }
 
-fn write_asset(mut stream: &TcpStream, path: &str) -> std::io::Result<()> {
-    let (status, content_type, body) = match crate::assets::lookup(path) {
-        Some((content_type, body)) => ("200 OK", content_type, body),
-        None => (
-            "404 Not Found",
-            "text/plain; charset=utf-8",
-            b"not found".as_slice(),
-        ),
-    };
+fn write_asset(mut stream: &TcpStream, req: &Req) -> std::io::Result<()> {
+    let accept = req
+        .headers
+        .iter()
+        .find(|(name, _)| name == "accept-encoding")
+        .map_or("", |(_, value)| value.as_str());
+    let (status, content_type, body, encoding, cache) =
+        match crate::assets::lookup(&req.path, accept) {
+            Some(s) => (
+                "200 OK",
+                s.content_type,
+                s.body,
+                s.encoding,
+                s.cache_control,
+            ),
+            None => (
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"not found".as_slice(),
+                None,
+                crate::assets::REVALIDATE,
+            ),
+        };
+    let encoding = encoding.map_or(String::new(), |e| format!("Content-Encoding: {e}\r\n"));
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{encoding}Vary: Accept-Encoding\r\nContent-Length: {}\r\nCache-Control: {cache}\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
@@ -295,6 +316,33 @@ fn query<'a>(req: &'a Req, key: &str) -> Option<&'a str> {
         .iter()
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.as_str())
+}
+
+/// Percent-decode a query value (`+` is a space).
+fn decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                match hex {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 2;
+                    }
+                    None => out.push(b'%'),
+                }
+            }
+            byte => out.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn body<T: DeserializeOwned>(req: &Req) -> Result<T, Reply> {
@@ -434,7 +482,8 @@ fn route(api: &Api, req: &Req) -> Reply {
             Response::Error { error } => failed(error),
             _ => bad(ErrorKind::Internal, "unexpected response"),
         },
-        ("GET", ["api", "jobs", reference]) => detail(api, reference),
+        ("GET", ["api", "jobs", reference]) => detail(api, reference, false),
+        ("GET", ["api", "jobs", reference, "detail"]) => detail(api, reference, true),
         ("GET", ["api", "jobs", reference, "artifacts", index]) => artifact(api, reference, index),
         ("GET", ["api", "quota"]) => match api.run(Request::Quota) {
             Response::Quota { agents, now_ms } => ok(&quota_panel(agents, now_ms)),
@@ -443,11 +492,24 @@ fn route(api: &Api, req: &Req) -> Reply {
         },
         ("GET", ["api", "inbox"]) => {
             let all = matches!(query(req, "all"), Some("1" | "true"));
+            let statuses = query(req, "status")
+                .map(decode)
+                .map(|s| {
+                    s.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
             match api.run(Request::Inbox {
                 all,
-                filter: Default::default(),
-                query: None,
-                limit: None,
+                filter: InboxFilter {
+                    statuses,
+                    ..Default::default()
+                },
+                query: query(req, "q").map(decode).filter(|q| !q.trim().is_empty()),
+                limit: query(req, "limit").and_then(|l| l.parse().ok()),
             }) {
                 Response::Inbox { entries } => ok(&InboxView { entries }),
                 Response::Error { error } => failed(error),
@@ -456,6 +518,7 @@ fn route(api: &Api, req: &Req) -> Reply {
         }
         ("GET", ["api", "events"]) => events(api, req),
         ("POST", ["api", "jobs"]) => submit(api, req),
+        ("POST", ["api", "dry-run"]) => dry_run(api, req),
         ("POST", ["api", "jobs", reference, "cancel"]) => {
             match api.write(Request::Cancel {
                 job: (*reference).to_owned(),
@@ -476,10 +539,14 @@ fn route(api: &Api, req: &Req) -> Reply {
         ("POST", ["api", "push", "unsubscribe"]) => unsubscribe(api, req),
         ("POST", ["api", "inbox", "reply"]) => reply(api, req),
         ("POST", ["api", "inbox", "dismiss"]) => dismiss(api, req),
-        (_, ["api", "jobs"] | ["api", "board" | "quota" | "inbox" | "events" | "stream"]) => {
+        (
+            _,
+            ["api", "jobs"]
+            | ["api", "board" | "quota" | "inbox" | "events" | "stream" | "dry-run"],
+        ) => method_not_allowed(),
+        (_, ["api", "jobs", _]) | (_, ["api", "jobs", _, "cancel" | "detail"]) => {
             method_not_allowed()
         }
-        (_, ["api", "jobs", _]) | (_, ["api", "jobs", _, "cancel"]) => method_not_allowed(),
         (_, ["api", "inbox", "reply" | "dismiss"]) => method_not_allowed(),
         (_, ["api", "push", "key" | "subscribe" | "unsubscribe"]) => method_not_allowed(),
         _ => bad(ErrorKind::NotFound, "no such route"),
@@ -560,7 +627,7 @@ fn jobs(api: &Api, req: &Req) -> Reply {
     }
 }
 
-fn detail(api: &Api, reference: &str) -> Reply {
+fn detail(api: &Api, reference: &str, full: bool) -> Reply {
     let job = match api.run(Request::Status {
         job: Some(reference.to_owned()),
     }) {
@@ -582,6 +649,7 @@ fn detail(api: &Api, reference: &str) -> Reply {
         Err(e) => return bad(ErrorKind::Internal, e.to_string()),
     };
     match timeline {
+        Ok(events) if full => ok(&job_full(job, &events, &inbox)),
         Ok(events) => ok(&job_detail(job, &events, &inbox)),
         Err(e) => bad(ErrorKind::Internal, e.to_string()),
     }
@@ -665,6 +733,29 @@ fn submit(api: &Api, req: &Req) -> Reply {
             id: id.as_str().to_owned(),
             short_id,
         }),
+        Response::Error { error } => failed(error),
+        _ => bad(ErrorKind::Internal, "unexpected response"),
+    }
+}
+
+/// Triage preview: the same body as a submit, the CLI's `--dry-run` path, and
+/// nothing is enqueued.
+fn dry_run(api: &Api, req: &Req) -> Reply {
+    let b: SubmitBody = match body(req) {
+        Ok(b) => b,
+        Err(reply) => return reply,
+    };
+    match triage_response(
+        &api.store,
+        &api.config,
+        &b.prompt,
+        b.repo.as_deref(),
+        b.options,
+    ) {
+        Response::Triaged {
+            outcome,
+            context_sources,
+        } => ok(&serde_json::json!({"outcome": outcome, "context_sources": context_sources})),
         Response::Error { error } => failed(error),
         _ => bad(ErrorKind::Internal, "unexpected response"),
     }

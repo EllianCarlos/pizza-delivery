@@ -5,6 +5,7 @@ use std::process::{Command as Process, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
+use pizza_delivery_core::triage::{render_triage, TriageOptions};
 use pizza_delivery_core::tui::{resume_plan, Caps, Command, Connection, Key, Model, Resume};
 use pizza_delivery_core::view::EventView;
 use pizza_delivery_core::{Request, Response};
@@ -18,6 +19,7 @@ enum Msg {
     Reset,
     Connection(Connection),
     Notice(String),
+    Preview(String),
 }
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -65,6 +67,7 @@ fn event_loop(
                 Msg::Reset => model.reset(),
                 Msg::Connection(c) => model.set_connection(c),
                 Msg::Notice(text) => model.set_notice(text),
+                Msg::Preview(text) => model.show_preview(text),
             }
         }
     }
@@ -72,7 +75,11 @@ fn event_loop(
 
 fn translate(code: KeyCode, modifiers: KeyModifiers) -> Option<Key> {
     if modifiers.contains(KeyModifiers::CONTROL) {
-        return matches!(code, KeyCode::Char('c')).then_some(Key::Interrupt);
+        return match code {
+            KeyCode::Char('c') => Some(Key::Interrupt),
+            KeyCode::Char(c) => Some(Key::Ctrl(c)),
+            _ => None,
+        };
     }
     Some(match code {
         KeyCode::Char(c) => Key::Char(c),
@@ -149,6 +156,11 @@ fn act(config: &Config, command: Command, tx: &Sender<Msg>) {
                     options,
                 },
             ),
+            Command::Preview { prompt, options } => {
+                let text = preview(&config, prompt, options);
+                let _ = tx.send(Msg::Preview(text));
+                return;
+            }
             Command::Reply { targets, text } => call(
                 &config,
                 Request::Reply {
@@ -174,6 +186,20 @@ fn open(config: &Config, target: &str) -> String {
     {
         Ok(_) => format!("opened {target}"),
         Err(e) => format!("cannot open {target}: {e}"),
+    }
+}
+
+fn preview(config: &Config, prompt: String, options: Option<TriageOptions>) -> String {
+    let request = Request::Triage {
+        prompt,
+        repo: None,
+        options,
+    };
+    match send(config, &request, Start::Never) {
+        Ok(Response::Triaged { outcome, .. }) => render_triage(&outcome, false),
+        Ok(Response::Error { error }) => format!("error: {}", error.message),
+        Ok(_) => "unexpected reply from the daemon".to_owned(),
+        Err(e) => format!("error: {e}"),
     }
 }
 

@@ -2,6 +2,7 @@ pub mod api;
 pub mod budget;
 pub mod classify;
 pub mod claude;
+pub mod conciliate;
 pub mod context;
 pub mod event;
 pub mod exit;

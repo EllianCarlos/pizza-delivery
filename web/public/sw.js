@@ -1,5 +1,9 @@
-const SHELL = "pizza-delivery-shell-v1";
-const FILES = ["/", "/app.js", "/app.css", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png"];
+// web/build.ts rewrites the two marked lines: BUILD changes with every bundle, so the
+// worker file changes byte-for-byte and browsers install it; ASSETS are the hashed files.
+const BUILD = "dev"; // @build
+const ASSETS = []; // @assets
+const SHELL = `pizza-delivery-shell-${BUILD}`;
+const FILES = ["/", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png", ...ASSETS];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -19,6 +23,12 @@ self.addEventListener("activate", (event) => {
   );
 });
 
+function store(key, response) {
+  if (!response.ok) return;
+  const copy = response.clone();
+  void caches.open(SHELL).then((cache) => cache.put(key, copy));
+}
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
@@ -26,13 +36,26 @@ self.addEventListener("fetch", (event) => {
   if (url.pathname.startsWith("/api/")) return;
   const key = request.mode === "navigate" ? "/" : url.pathname;
   if (!FILES.includes(key)) return;
+  if (ASSETS.includes(key)) {
+    // Content-hashed: the cached copy can never be stale, so skip the network.
+    event.respondWith(
+      caches.match(key).then(
+        (hit) =>
+          hit ??
+          fetch(request).then((response) => {
+            store(key, response);
+            return response;
+          }),
+      ),
+    );
+    return;
+  }
+  // The shell and icons revalidate on every load, which is how a deploy reaches the page
+  // without a hard refresh: the fresh index names the new hashed bundle.
   event.respondWith(
     fetch(request)
       .then((response) => {
-        if (response.ok) {
-          const copy = response.clone();
-          void caches.open(SHELL).then((cache) => cache.put(key, copy));
-        }
+        store(key, response);
         return response;
       })
       .catch(() => caches.match(key).then((hit) => hit ?? Response.error())),

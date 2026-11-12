@@ -5,17 +5,20 @@ import Button from "@cloudscape-design/components/button";
 import Container from "@cloudscape-design/components/container";
 import Header from "@cloudscape-design/components/header";
 import Multiselect from "@cloudscape-design/components/multiselect";
+import Input from "@cloudscape-design/components/input";
 import Select from "@cloudscape-design/components/select";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import Table from "@cloudscape-design/components/table";
 import Textarea from "@cloudscape-design/components/textarea";
 import Toggle from "@cloudscape-design/components/toggle";
 import type { Api } from "./api";
-import { useEventStream, usePolled } from "./hooks";
+import { useJobDetails, useLiveEvents, usePolled } from "./hooks";
+import type { InboxStatus } from "./inbox";
 import type { InboxEntry } from "./generated/InboxEntry";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobView } from "./generated/JobView";
 import {
+  type Artifact,
   artifactsOf,
   eventFamilies,
   formatCost,
@@ -132,7 +135,7 @@ export function DetailPanel({
           { id: "status", header: "Status", cell: (e) => e.status },
           { id: "sev", header: "Severity", cell: (e) => e.severity },
           { id: "text", header: "Text", cell: (e) => e.text },
-          { id: "status", header: "Status", cell: (e) => e.status },
+          { id: "evidence", header: "Evidence", cell: (e) => e.evidence ?? "-" },
         ]}
       />
       <ArtifactList detail={detail} api={api} />
@@ -140,8 +143,17 @@ export function DetailPanel({
   );
 }
 
-export function ArtifactList({ detail, api }: { detail: JobDetailView; api: Api }) {
-  const artifacts = useMemo(() => artifactsOf(detail.events), [detail.events]);
+export function ArtifactList({
+  detail,
+  api,
+}: {
+  detail: JobDetailView & { artifacts?: Artifact[] };
+  api: Api;
+}) {
+  const artifacts = useMemo(
+    () => detail.artifacts ?? artifactsOf(detail.events),
+    [detail.artifacts, detail.events],
+  );
   const [open, setOpen] = useState<number | null>(null);
   const [content, setContent] = useState<string>("");
   useEffect(() => {
@@ -179,8 +191,38 @@ export function ArtifactList({ detail, api }: { detail: JobDetailView; api: Api 
   );
 }
 
+const STATUS_OPTIONS: Array<{ value: InboxStatus; label: string }> = [
+  { value: "active", label: "Open and answered" },
+  { value: "open", label: "Open" },
+  { value: "answered", label: "Answered" },
+  { value: "dismissed", label: "Dismissed" },
+  { value: "all", label: "All" },
+];
+
+export function EntryDetail({ entry }: { entry: InboxEntry }) {
+  return (
+    <Container header={<Header variant="h3">{entry.short_id}</Header>}>
+      <SpaceBetween size="xs">
+        <Box>{entry.text}</Box>
+        <Box>
+          <b>Evidence</b> {entry.evidence ?? "-"}
+        </Box>
+        <Box>
+          <b>Confidence</b> {entry.confidence ?? "-"}
+          {" | "}
+          <b>Impact</b> {entry.impact ?? "-"}
+          {" | "}
+          <b>Alternatives</b> {entry.alternatives.length > 0 ? entry.alternatives.join(", ") : "-"}
+        </Box>
+      </SpaceBetween>
+    </Container>
+  );
+}
+
 export function InboxPanel({ api }: { api: Api }) {
-  const { data, error, refresh } = usePolled(() => api.inbox(false));
+  const [status, setStatus] = useState<InboxStatus>("active");
+  const [query, setQuery] = useState("");
+  const { data, error, refresh } = usePolled(() => api.inbox({ status, q: query }), 5000, [status, query]);
   const [selected, setSelected] = useState<InboxEntry[]>([]);
   const [text, setText] = useState("");
   const [note, setNote] = useState<string | null>(null);
@@ -193,6 +235,21 @@ export function InboxPanel({ api }: { api: Api }) {
       {error && <Alert type="error">{error}</Alert>}
       {actionError && <Alert type="error" dismissible onDismiss={() => setActionError(null)}>{actionError}</Alert>}
       {note && <Alert type="success" dismissible onDismiss={() => setNote(null)}>{note}</Alert>}
+      <SpaceBetween size="xs" direction="horizontal">
+        <Select
+          selectedOption={STATUS_OPTIONS.find((o) => o.value === status) ?? STATUS_OPTIONS[0]!}
+          options={STATUS_OPTIONS}
+          onChange={({ detail }) => setStatus((detail.selectedOption.value ?? "active") as InboxStatus)}
+          ariaLabel="Filter by status"
+        />
+        <Input
+          type="search"
+          value={query}
+          onChange={({ detail }) => setQuery(detail.value)}
+          placeholder="Search kind, severity or text"
+          ariaLabel="Search the inbox"
+        />
+      </SpaceBetween>
       <Table
         header={<Header counter={`(${entries.length})`}>Feedback inbox</Header>}
         items={entries}
@@ -207,8 +264,10 @@ export function InboxPanel({ api }: { api: Api }) {
           { id: "sev", header: "Severity", cell: (e) => e.severity },
           { id: "text", header: "Text", cell: (e) => e.text },
           { id: "conf", header: "Confidence", cell: (e) => e.confidence ?? "-" },
+          { id: "status", header: "Status", cell: (e) => e.status },
         ]}
       />
+      {selected.length === 1 && selected[0] && <EntryDetail entry={selected[0]} />}
       <Textarea value={text} onChange={({ detail }) => setText(detail.value)} placeholder="Reply to the selected entries" />
       <SpaceBetween size="xs" direction="horizontal">
         <Button
@@ -251,8 +310,7 @@ export function InboxPanel({ api }: { api: Api }) {
 }
 
 export function EventsPanel({ api }: { api: Api }) {
-  const { data } = usePolled(() => api.events(0), 60000);
-  const events = useEventStream(data?.events ?? []);
+  const events = useLiveEvents(() => api.events(0));
   const [families, setFamilies] = useState<string[]>([]);
   const options = eventFamilies(events).map((f) => ({ label: f, value: f }));
   const [showTools, setShowTools] = useState(false);
@@ -286,7 +344,9 @@ export function EventsPanel({ api }: { api: Api }) {
 
 export function ArtifactBrowser({ jobs, api }: { jobs: JobView[]; api: Api }) {
   const [ref, setRef] = useState<string | null>(null);
-  const { data } = usePolled(() => (ref ? api.job(ref) : Promise.resolve(null)), 5000);
+  const selected = jobs.find((j) => j.short_id === ref)?.id ?? null;
+  const details = useJobDetails(api.jobFull, jobs, selected, false, 5000);
+  const data = details.data?.[0] ?? null;
   return (
     <SpaceBetween size="m">
       <Select

@@ -33,7 +33,110 @@ pub trait Git: Send + Sync {
     ) -> Result<String> {
         Err(anyhow!("open_draft_pr is not supported"))
     }
+    /// Whether the pull request may be merged now: CI checks pass and the
+    /// mergeable state is clean. Waits for pending checks.
+    fn merge_readiness(&self, _worktree: &Path, _pr_url: &str) -> Result<MergeReadiness> {
+        Err(anyhow!("merge_readiness is not supported"))
+    }
+    /// Marks the pull request ready for review and merges it with a merge
+    /// commit.
+    fn merge_pr(&self, _worktree: &Path, _pr_url: &str) -> Result<()> {
+        Err(anyhow!("merge_pr is not supported"))
+    }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeReadiness {
+    Ready,
+    Blocked(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrPoll {
+    Ready,
+    NoChecks,
+    Pending(String),
+    Blocked(String),
+}
+
+/// Classifies `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`.
+fn classify_pr_view(json: &str) -> Result<PrPoll> {
+    let view: serde_json::Value = serde_json::from_str(json).context("parse gh pr view")?;
+    let text = |v: &serde_json::Value, key: &str| {
+        v.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+    match text(&view, "mergeable").as_str() {
+        "CONFLICTING" => {
+            return Ok(PrPoll::Blocked(
+                "merge conflicts with the base branch".into(),
+            ))
+        }
+        "MERGEABLE" => {}
+        _ => {
+            return Ok(PrPoll::Pending(
+                "mergeability is still being computed".into(),
+            ))
+        }
+    }
+    let mut failing = Vec::new();
+    let mut pending = Vec::new();
+    let checks = view
+        .get("statusCheckRollup")
+        .and_then(serde_json::Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    for check in checks {
+        let name = [text(check, "name"), text(check, "context")]
+            .into_iter()
+            .find(|n| !n.is_empty())
+            .unwrap_or_else(|| "check".to_owned());
+        if check.get("status").is_some() {
+            if text(check, "status") != "COMPLETED" {
+                pending.push(name);
+            } else if !matches!(
+                text(check, "conclusion").as_str(),
+                "SUCCESS" | "NEUTRAL" | "SKIPPED"
+            ) {
+                failing.push(name);
+            }
+        } else {
+            match text(check, "state").as_str() {
+                "SUCCESS" => {}
+                "PENDING" | "EXPECTED" => pending.push(name),
+                _ => failing.push(name),
+            }
+        }
+    }
+    if !failing.is_empty() {
+        return Ok(PrPoll::Blocked(format!(
+            "checks failing: {}",
+            failing.join(", ")
+        )));
+    }
+    if !pending.is_empty() {
+        return Ok(PrPoll::Pending(format!(
+            "checks pending: {}",
+            pending.join(", ")
+        )));
+    }
+    match text(&view, "mergeStateStatus").as_str() {
+        "CLEAN" | "DRAFT" | "HAS_HOOKS" if checks.is_empty() => Ok(PrPoll::NoChecks),
+        "CLEAN" | "DRAFT" | "HAS_HOOKS" => Ok(PrPoll::Ready),
+        "UNKNOWN" | "" => Ok(PrPoll::Pending("merge state is unknown".into())),
+        other => Ok(PrPoll::Blocked(format!(
+            "merge state is {} rather than clean",
+            other.to_lowercase()
+        ))),
+    }
+}
+
+const READINESS_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// A PR with no checks at all is only treated as check-free once CI has had
+/// this long to register its runs.
+const NO_CHECKS_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub struct SystemGit;
 
@@ -168,6 +271,44 @@ impl Git for SystemGit {
             .map(str::to_owned)
             .ok_or_else(|| anyhow!("gh pr create printed no URL"))
     }
+
+    fn merge_readiness(&self, worktree: &Path, pr_url: &str) -> Result<MergeReadiness> {
+        let started = std::time::Instant::now();
+        loop {
+            let json = gh(
+                worktree,
+                &[
+                    "pr",
+                    "view",
+                    pr_url,
+                    "--json",
+                    "mergeable,mergeStateStatus,statusCheckRollup",
+                ],
+            )?;
+            let waiting = match classify_pr_view(&json)? {
+                PrPoll::Ready => return Ok(MergeReadiness::Ready),
+                PrPoll::Blocked(reason) => return Ok(MergeReadiness::Blocked(reason)),
+                PrPoll::NoChecks if started.elapsed() >= NO_CHECKS_GRACE => {
+                    return Ok(MergeReadiness::Ready)
+                }
+                PrPoll::NoChecks => "no checks have reported yet".to_owned(),
+                PrPoll::Pending(reason) => reason,
+            };
+            if started.elapsed() >= READINESS_TIMEOUT {
+                return Ok(MergeReadiness::Blocked(format!(
+                    "{waiting} after {}s",
+                    READINESS_TIMEOUT.as_secs()
+                )));
+            }
+            std::thread::sleep(READINESS_POLL);
+        }
+    }
+
+    fn merge_pr(&self, worktree: &Path, pr_url: &str) -> Result<()> {
+        gh(worktree, &["pr", "ready", pr_url])?;
+        gh(worktree, &["pr", "merge", pr_url, "--merge"])?;
+        Ok(())
+    }
 }
 
 fn gh(dir: &Path, args: &[&str]) -> Result<String> {
@@ -254,6 +395,14 @@ impl<G: Git> Git for LockedGit<G> {
     ) -> Result<String> {
         self.inner.open_draft_pr(worktree, title, body, labels)
     }
+
+    fn merge_readiness(&self, worktree: &Path, pr_url: &str) -> Result<MergeReadiness> {
+        self.inner.merge_readiness(worktree, pr_url)
+    }
+
+    fn merge_pr(&self, worktree: &Path, pr_url: &str) -> Result<()> {
+        self.inner.merge_pr(worktree, pr_url)
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +411,62 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    fn poll(json: &str) -> PrPoll {
+        classify_pr_view(json).unwrap_or_else(|e| PrPoll::Blocked(format!("invalid json: {e}")))
+    }
+
+    #[test]
+    fn a_clean_pr_with_passing_checks_is_ready() {
+        let json = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[
+            {"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"},
+            {"name":"lint","status":"COMPLETED","conclusion":"SKIPPED"},
+            {"context":"legacy","state":"SUCCESS"}]}"#;
+        assert_eq!(poll(json), PrPoll::Ready);
+    }
+
+    #[test]
+    fn a_draft_pr_is_judged_on_mergeable_and_checks_alone() {
+        let json = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"DRAFT","statusCheckRollup":[
+            {"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}"#;
+        assert_eq!(poll(json), PrPoll::Ready);
+    }
+
+    #[test]
+    fn failing_checks_block_and_name_the_check() {
+        let json = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"UNSTABLE","statusCheckRollup":[
+            {"name":"ci","status":"COMPLETED","conclusion":"FAILURE"}]}"#;
+        assert_eq!(poll(json), PrPoll::Blocked("checks failing: ci".into()));
+    }
+
+    #[test]
+    fn running_checks_are_pending() {
+        let json = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED","statusCheckRollup":[
+            {"name":"ci","status":"IN_PROGRESS","conclusion":""}]}"#;
+        assert_eq!(poll(json), PrPoll::Pending("checks pending: ci".into()));
+    }
+
+    #[test]
+    fn conflicts_and_unclean_states_block_but_unknown_mergeability_waits() {
+        let conflict =
+            r#"{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY","statusCheckRollup":[]}"#;
+        assert!(matches!(poll(conflict), PrPoll::Blocked(_)));
+        let behind = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"BEHIND","statusCheckRollup":[
+            {"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}"#;
+        assert_eq!(
+            poll(behind),
+            PrPoll::Blocked("merge state is behind rather than clean".into())
+        );
+        let unknown =
+            r#"{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN","statusCheckRollup":[]}"#;
+        assert!(matches!(poll(unknown), PrPoll::Pending(_)));
+    }
+
+    #[test]
+    fn a_pr_with_no_checks_reports_no_checks_so_ci_gets_time_to_register() {
+        let json = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[]}"#;
+        assert_eq!(poll(json), PrPoll::NoChecks);
+    }
 
     #[derive(Default)]
     struct Probe {

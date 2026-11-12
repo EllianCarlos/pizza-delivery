@@ -2,6 +2,8 @@ mod access;
 mod agent;
 mod assets;
 mod client;
+mod conciliate;
+mod conciliate_lock;
 mod config;
 mod git;
 mod handler;
@@ -12,6 +14,7 @@ mod notify;
 mod process;
 mod push;
 mod remote;
+mod routing_check;
 mod sandbox;
 mod server;
 mod sqlite_store;
@@ -150,7 +153,18 @@ impl From<PriorityArg> for Priority {
 }
 
 #[derive(Subcommand)]
+enum RoutingAction {
+    /// Validate the routing file and print the resolved agent/model chain per stage
+    Check,
+}
+
+#[derive(Subcommand)]
 enum Command {
+    /// Inspect agent routing without the daemon
+    Routing {
+        #[command(subcommand)]
+        action: RoutingAction,
+    },
     /// List jobs, or show one job's timeline (id prefix or @last)
     Status {
         job: Option<String>,
@@ -204,6 +218,15 @@ enum Command {
         /// Path substring (repeatable)
         #[arg(long)]
         path: Vec<String>,
+    },
+    /// Merge main into clean open pizza PR branches and report conflicts
+    Conciliate {
+        /// Repo checkout to conciliate (default: the current directory)
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Print the plan only; change nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Cancel a job, terminate its running stage and keep its worktree
     Cancel { job: String },
@@ -542,6 +565,16 @@ fn install_service() -> ProcessExitCode {
     }
 }
 
+fn run_conciliate(config: &Config, repo: Option<PathBuf>, dry_run: bool) -> ProcessExitCode {
+    match conciliate::execute(config, repo, dry_run) {
+        Ok(()) => exit(ExitCode::Success),
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            exit(ExitCode::General)
+        }
+    }
+}
+
 fn run(cli: Cli) -> ProcessExitCode {
     match cli.command {
         Some(Command::InstallService) => return install_service(),
@@ -583,9 +616,27 @@ fn run(cli: Cli) -> ProcessExitCode {
                 exit(ExitCode::General)
             }
         },
+        Some(Command::Conciliate { repo, dry_run }) => run_conciliate(&config, repo, dry_run),
         Some(Command::McpBroker { .. } | Command::InstallService | Command::Completions { .. }) => {
             exit(ExitCode::General)
         }
+        Some(Command::Routing {
+            action: RoutingAction::Check,
+        }) => match config.load_routing() {
+            Ok(c) => {
+                let (text, ok) = routing_check::run(&c);
+                print!("{text}");
+                exit(if ok {
+                    ExitCode::Success
+                } else {
+                    ExitCode::General
+                })
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                exit(ExitCode::General)
+            }
+        },
         #[cfg(feature = "tui")]
         Some(Command::Tui) => run_tui(&config),
         Some(Command::Stop) => present(

@@ -25,6 +25,15 @@ test("replying posts targets and text as json and returns the follow-up job", as
   expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ targets: ["E1"], text: "use v2" });
 });
 
+test("job details come from the single bundled detail endpoint", async () => {
+  const calls: Call[] = [];
+  const body = { job: { id: "J1" }, plan: { stages: [] }, stages: [], feedback: [], events: [], artifacts: [] };
+  const api = createApi(fakeFetch([{ status: 200, body }], calls), { storage: null });
+  const full = await api.jobFull("j1");
+  expect(calls.map((c) => c.url)).toEqual(["/api/jobs/j1/detail"]);
+  expect(full.artifacts).toEqual([]);
+});
+
 test("submit carries options only when given", async () => {
   const calls: Call[] = [];
   const reply = { status: 200, body: { id: "J3", short_id: "j3" } };

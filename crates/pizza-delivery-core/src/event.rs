@@ -114,6 +114,14 @@ pub enum EventPayload {
         pushed_ref: Option<String>,
         pr_url: Option<String>,
     },
+    PrMerged {
+        pr_url: String,
+    },
+    PrNotMerged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr_url: Option<String>,
+        reason: String,
+    },
     EgressBlocked {
         host: String,
     },
@@ -226,13 +234,23 @@ pub enum EventPayload {
         count: u32,
         reasons: std::collections::BTreeMap<String, u32>,
     },
+    Conciliated {
+        repo: String,
+        pr: u64,
+        branch: String,
+        action: String,
+        detail: String,
+    },
 }
 
 pub const SYSTEM_JOB: &str = "system";
 
 impl EventPayload {
     pub fn is_system(&self) -> bool {
-        matches!(self, EventPayload::AuthRejected { .. })
+        matches!(
+            self,
+            EventPayload::AuthRejected { .. } | EventPayload::Conciliated { .. }
+        )
     }
 
     pub fn kind(&self) -> &'static str {
@@ -251,6 +269,8 @@ impl EventPayload {
             EventPayload::AgentFellBack { .. } => "agent-fell-back",
             EventPayload::JobParked { .. } => "job-parked",
             EventPayload::SandboxAudit { .. } => "sandbox-audit",
+            EventPayload::PrMerged { .. } => "pr-merged",
+            EventPayload::PrNotMerged { .. } => "pr-not-merged",
             EventPayload::EgressBlocked { .. } => "egress-blocked",
             EventPayload::ArtifactRecorded { .. } => "artifact-recorded",
             EventPayload::HandoffWritten { .. } => "handoff-written",
@@ -276,6 +296,7 @@ impl EventPayload {
             EventPayload::WriteBack { .. } => "write-back",
             EventPayload::RemoteAction { .. } => "remote-action",
             EventPayload::AuthRejected { .. } => "auth-rejected",
+            EventPayload::Conciliated { .. } => "conciliated",
         }
     }
 }
