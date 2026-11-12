@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicI64;
 use std::sync::Arc;
 
 use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
-use pizza_delivery_core::event::Event;
+use pizza_delivery_core::event::{Event, FollowUp};
 use pizza_delivery_core::gate::GateThresholds;
 use pizza_delivery_core::job::JobState;
 use pizza_delivery_core::{NewJob, Priority};
@@ -44,9 +44,31 @@ struct FakeGit {
     pushes: Mutex<Vec<(String, String)>>,
     prs: Mutex<Vec<(String, String, Vec<String>)>>,
     push_fails: AtomicBool,
+    blocked: Mutex<Option<String>>,
+    readiness_fails: AtomicBool,
+    merge_fails: AtomicBool,
+    ready_checks: Mutex<Vec<String>>,
+    merges: Mutex<Vec<String>>,
 }
 
 impl Git for FakeGit {
+    fn merge_readiness(&self, _worktree: &Path, pr_url: &str) -> Result<MergeReadiness> {
+        acquire(&self.ready_checks, "ready_checks")?.push(pr_url.to_owned());
+        if self.readiness_fails.load(Ordering::SeqCst) {
+            return Err(anyhow!("gh unavailable"));
+        }
+        Ok(match acquire(&self.blocked, "blocked")?.clone() {
+            Some(reason) => MergeReadiness::Blocked(reason),
+            None => MergeReadiness::Ready,
+        })
+    }
+    fn merge_pr(&self, _worktree: &Path, pr_url: &str) -> Result<()> {
+        if self.merge_fails.load(Ordering::SeqCst) {
+            return Err(anyhow!("merge rejected"));
+        }
+        acquire(&self.merges, "merges")?.push(pr_url.to_owned());
+        Ok(())
+    }
     fn changed_files(&self, _repo: &Path, _worktree: &Path) -> Result<Vec<String>> {
         Ok(acquire(&self.files, "files")?.clone())
     }
@@ -99,6 +121,7 @@ impl Git for FakeGit {
 #[derive(Default)]
 struct Script {
     handoff: Option<&'static str>,
+    review: Option<&'static str>,
     stdout: &'static str,
     stderr: &'static str,
     exit_code: i32,
@@ -127,6 +150,9 @@ impl Agent for FakeAgent {
                 .with_file_name(format!("prompt-{}.txt", self.tag)),
             &inv.prompt,
         )?;
+        if let Some(text) = script.review {
+            std::fs::write(inv.handoff_path.with_file_name("review.md"), text)?;
+        }
         if let Some(text) = script.handoff {
             std::fs::write(&inv.handoff_path, text)?;
         }
@@ -157,6 +183,14 @@ impl Rig {
     }
 
     fn with_chain(agents: Vec<(&str, AdapterKind, Vec<Script>)>, owner: &str) -> Result<Self> {
+        Self::build(agents, owner, None)
+    }
+
+    fn build(
+        agents: Vec<(&str, AdapterKind, Vec<Script>)>,
+        owner: &str,
+        follow_up: Option<FollowUp>,
+    ) -> Result<Self> {
         let egress = Arc::new(Mutex::new(None));
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let dir = tempfile::TempDir::new()?;
@@ -167,7 +201,7 @@ impl Rig {
             prompt: "do it".into(),
             repo: Some("/src/my repo".into()),
             priority: Priority::Normal,
-            follow_up: None,
+            follow_up,
             options: None,
             submitted_at_ms: 0,
         })?;
@@ -187,6 +221,7 @@ impl Rig {
                 require_triage: false,
                 mcp: None,
                 memory: None,
+                auto_merge: true,
                 trust: TrustConfig {
                     default_hosts: vec!["api.anthropic.com".to_owned()],
                     ..TrustConfig::default()
@@ -283,6 +318,24 @@ fn good() -> Script {
     }
 }
 
+fn good_review() -> Script {
+    Script {
+        handoff: Some(HANDOFF),
+        review: Some("## Findings\n\n- [non-blocking] nit\n"),
+        stdout: OK_RESULT,
+        ..Script::default()
+    }
+}
+
+fn blocking_review() -> Script {
+    Script {
+        handoff: Some(HANDOFF),
+        review: Some("## Findings\n\n- [blocking] broken\n"),
+        stdout: OK_RESULT,
+        ..Script::default()
+    }
+}
+
 fn bad_handoff() -> Script {
     Script {
         handoff: Some("not a handoff"),
@@ -345,6 +398,7 @@ fn plan_of(rig: &Rig, names: &[&str]) -> Result<()> {
 }
 
 mod memorize;
+mod merge;
 mod pipeline;
 mod quota;
 mod resilience;

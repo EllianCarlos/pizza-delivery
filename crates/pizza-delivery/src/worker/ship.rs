@@ -91,6 +91,91 @@ impl Worker<'_> {
         self.record_file(job, None, "report", &relative)
     }
 
+    /// Merges the shipped PR when every condition holds; otherwise returns
+    /// the reason it was left open. Never fails the job.
+    fn merge_outcome(
+        &self,
+        events: &[Event],
+        policy: &DiffPolicy,
+        worktree: &Path,
+        url: &str,
+    ) -> std::result::Result<(), String> {
+        if !self.config.auto_merge {
+            return Err("auto-merge is disabled".to_owned());
+        }
+        if policy.is_sensitive() {
+            return Err(format!(
+                "diff policy: infrastructure files changed ({}); left as a labelled draft",
+                policy.sensitive.join(", ")
+            ));
+        }
+        self.review_passed(events)?;
+        self.parent_merged(events)?;
+        match self.git.merge_readiness(worktree, url) {
+            Ok(MergeReadiness::Ready) => {}
+            Ok(MergeReadiness::Blocked(reason)) => return Err(reason),
+            Err(e) => return Err(format!("could not check merge readiness: {e:#}")),
+        }
+        self.git
+            .merge_pr(worktree, url)
+            .map_err(|e| format!("merge failed: {e:#}"))
+    }
+
+    fn review_passed(&self, events: &[Event]) -> std::result::Result<(), String> {
+        if !current_plan(events).iter().any(|s| s.name == "review") {
+            return Err("the plan has no review stage".to_owned());
+        }
+        let report = events.iter().rev().find_map(|e| match &e.payload {
+            EventPayload::ArtifactRecorded { kind, path, .. } if kind == "review-report" => {
+                Some(path.clone())
+            }
+            _ => None,
+        });
+        let Some(text) = report.and_then(|path| self.read_data(&path)) else {
+            return Err("no review report was recorded".to_owned());
+        };
+        match review::parse_report(&text) {
+            Ok(findings) if review::blocking(&findings).is_empty() => Ok(()),
+            Ok(_) => Err("the final review still has blocking findings".to_owned()),
+            Err(e) => Err(format!("the review report is invalid: {e}")),
+        }
+    }
+
+    /// Stacked PRs merge in stack order: a follow-up job's PR carries its
+    /// parent's commits, so the parent's PR must be merged first.
+    fn parent_merged(&self, events: &[Event]) -> std::result::Result<(), String> {
+        let parent = events.iter().find_map(|e| match &e.payload {
+            EventPayload::JobSubmitted {
+                follow_up: Some(f), ..
+            } => Some(f.parent.clone()),
+            _ => None,
+        });
+        let Some(parent) = parent else {
+            return Ok(());
+        };
+        let parent_events = self
+            .with_store(|s| s.read_timeline(&parent))
+            .map_err(|e| format!("could not read parent job {parent}: {e:#}"))?;
+        let has_pr = parent_events.iter().any(|e| {
+            matches!(
+                e.payload,
+                EventPayload::SandboxAudit {
+                    pr_url: Some(_),
+                    ..
+                }
+            )
+        });
+        let merged = parent_events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::PrMerged { .. }));
+        if has_pr && !merged {
+            return Err(format!(
+                "the parent job {parent}'s PR is not merged yet; stacked PRs merge parent first"
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn ship(
         &self,
         job: &JobId,
@@ -181,7 +266,19 @@ impl Worker<'_> {
             &policy.labels(),
         ) {
             Ok(url) => {
-                audit(Some(pushed), Some(url))?;
+                audit(Some(pushed), Some(url.clone()))?;
+                let outcome = self.merge_outcome(events, &policy, &worktree, &url);
+                self.append(
+                    job,
+                    None,
+                    match outcome {
+                        Ok(()) => EventPayload::PrMerged { pr_url: url },
+                        Err(reason) => EventPayload::PrNotMerged {
+                            pr_url: Some(url),
+                            reason,
+                        },
+                    },
+                )?;
                 Ok(Ok(()))
             }
             Err(e) => {

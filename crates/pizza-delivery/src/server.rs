@@ -146,6 +146,7 @@ fn worker_config(config: &Config) -> Result<WorkerConfig> {
         gate: config.gate,
         budget_defaults: config.budget_defaults,
         require_triage: true,
+        auto_merge: config.auto_merge,
         mcp: config.mcp_catalog.exists().then(|| McpSetup {
             broker: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pizza-delivery")),
             catalog: config.mcp_catalog.clone(),

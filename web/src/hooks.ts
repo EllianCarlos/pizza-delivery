@@ -58,6 +58,8 @@ const KINDS = [
   "agent-fell-back",
   "quota-signal",
   "sandbox-audit",
+  "pr-merged",
+  "pr-not-merged",
   "egress-blocked",
   "artifact-recorded",
   "handoff-written",

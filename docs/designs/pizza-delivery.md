@@ -4,7 +4,7 @@ Hand-off spec for implementing `pizza-delivery` in its own repository (`EllianCa
 
 ## Purpose
 
-`pizza-delivery "<prompt>"` enqueues a job. A local daemon runs parallel workers that triage the job, enrich it from memory (engram and mnemon), route each stage to a local agent CLI by rules and quota, and run self-grill, `to-spec`, `implement-spec`, `code-review`, then open a draft pull request. Agents never ask the human questions. Assumptions, unanswered questions and risks land in a feedback queue. The human replies, and each reply spawns exactly one follow-up job.
+`pizza-delivery "<prompt>"` enqueues a job. A local daemon runs parallel workers that triage the job, enrich it from memory (engram and mnemon), route each stage to a local agent CLI by rules and quota, and run self-grill, `to-spec`, `implement-spec`, `code-review`, then open a pull request and merge it when the auto-merge conditions hold. Agents never ask the human questions. Assumptions, unanswered questions and risks land in a feedback queue. The human replies, and each reply spawns exactly one follow-up job.
 
 ### Non-goals
 
@@ -41,7 +41,7 @@ Hand-off spec for implementing `pizza-delivery` in its own repository (`EllianCa
 | spec | `to-spec`, then a ticket task graph | spec path and ticket list | spec has required sections; tickets form a valid acyclic graph |
 | implement | `implement-spec` (with `tdd` inside) | branch state and test results | tests pass; commits exist on `pizza/<job-id>` |
 | review | `code-review` (standards and spec axes) | review report with finding count | report written and findings classified |
-| ship | none; daemon-run | PR link | branch pushed and draft PR opened, body rendered from the handoffs |
+| ship | none; daemon-run | PR link | branch pushed and draft PR opened (body rendered from the handoffs), then auto-merged when allowed (see Auto-merge) |
 | memorize | cheap agent, daemon-appended after ship | memory write-back list | write-backs reconciled; never blocks |
 
 ### Triage (stage zero)
@@ -89,8 +89,9 @@ Hand-off spec for implementing `pizza-delivery` in its own repository (`EllianCa
 - **Pluggable `Sandbox` trait** in the core (none, bubblewrap, systemd-run scope, container), selectable per profile. Hard requirement: no sandbox may prevent the pipeline from using the tools it needs (git, gh, nix, devenv, cargo, agent CLIs, engram, mnemon, MCP servers, model-API network). Each profile passes a tool-compatibility smoke check before use. No sudo is needed or granted.
 - **Permissions**: agents run under the owner's existing agent permission rules. "No merge" is enforced by deny rules plus branch protection on target repos.
 - **Egress allowlist** is a sandbox profile property, extended per stage when an MCP server is activated. Blocked requests are ledgered.
-- **Diff policy**: changes to CI workflows, git hooks, `.envrc`, devenv or flake files and install scripts push as a labelled draft PR with a high-severity risk feedback entry. Prompt-injection hardening is deprioritized because only the owner can submit jobs.
+- **Diff policy**: changes to CI workflows, git hooks, `.envrc`, devenv or flake files and install scripts push as a labelled draft PR with a high-severity risk feedback entry, and are never auto-merged. Prompt-injection hardening is deprioritized because only the owner can submit jobs.
 - **Per-repo trust config** (allowed hosts, protected paths, push remote, resource limits) lives in the daemon's own config, never in the target repo.
+- **Auto-merge**: after the ship step opens the PR, the daemon merges it (`gh pr ready`, then `gh pr merge --merge`; merge commit only) when the plan had a review stage whose final report has no blocking findings, the diff policy is clean, CI checks pass and the mergeable state is clean, and (for a follow-up job, whose PR stacks on its parent's branch) the parent job's PR is already merged. Pending checks are polled for up to ten minutes; a PR with no checks at all is merged after a 60 second grace. Otherwise the PR stays open and a `pr-not-merged` ledger event records why; a merge appends `pr-merged`. Neither outcome fails the job. `PIZZA_DELIVERY_AUTO_MERGE=off` disables merging (default on).
 - **Audit**: per agent invocation the ledger records sandbox profile hash, mounts, egress allowlist, blocked requests, MCP activations, diff-policy result, pushed ref and PR URL.
 
 ## Dynamic MCP

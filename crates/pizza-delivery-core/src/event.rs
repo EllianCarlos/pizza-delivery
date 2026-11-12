@@ -114,6 +114,14 @@ pub enum EventPayload {
         pushed_ref: Option<String>,
         pr_url: Option<String>,
     },
+    PrMerged {
+        pr_url: String,
+    },
+    PrNotMerged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr_url: Option<String>,
+        reason: String,
+    },
     EgressBlocked {
         host: String,
     },
@@ -251,6 +259,8 @@ impl EventPayload {
             EventPayload::AgentFellBack { .. } => "agent-fell-back",
             EventPayload::JobParked { .. } => "job-parked",
             EventPayload::SandboxAudit { .. } => "sandbox-audit",
+            EventPayload::PrMerged { .. } => "pr-merged",
+            EventPayload::PrNotMerged { .. } => "pr-not-merged",
             EventPayload::EgressBlocked { .. } => "egress-blocked",
             EventPayload::ArtifactRecorded { .. } => "artifact-recorded",
             EventPayload::HandoffWritten { .. } => "handoff-written",
