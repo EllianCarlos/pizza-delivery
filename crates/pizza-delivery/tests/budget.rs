@@ -3,12 +3,11 @@ mod harness;
 use harness::{Harness, TestResult, VALID_HANDOFF_AGENT};
 
 fn agent_reporting(tokens: u64) -> String {
-    VALID_HANDOFF_AGENT.replace(
-        r#"{"type":"result","is_error":false}"#,
-        &format!(
-            r#"{{"type":"result","is_error":false,"usage":{{"input_tokens":{tokens},"output_tokens":0}}}}"#
-        ),
-    )
+    let plain = r#"echo '{"type":"result","is_error":false}'"#;
+    let reporting = format!(
+        r#"case "$PIZZA_DELIVERY_HANDOFF" in *-implement/*) echo '{{"type":"result","is_error":false,"usage":{{"input_tokens":{tokens},"output_tokens":0}}}}';; *) {plain};; esac"#
+    );
+    VALID_HANDOFF_AGENT.replace(plain, &reporting)
 }
 
 fn of_kind(h: &Harness, id: &str, kind: &str) -> TestResult<Vec<serde_json::Value>> {
@@ -47,7 +46,10 @@ fn a_cold_start_job_is_estimated_from_defaults_and_the_actual_is_recorded_beside
 
     assert_eq!(implement_estimate_tokens(&h, &id)?, 1_000_000);
     let recorded = of_kind(&h, &id, "stage-budget-recorded")?;
-    let payload = recorded.first().ok_or("no recorded actuals")?;
+    let payload = recorded
+        .iter()
+        .find(|p| p["stage"] == "implement")
+        .ok_or("no recorded actuals")?;
     assert_eq!(payload["tier"], "large");
     assert_eq!(payload["estimate_tokens"], 1_000_000);
     assert_eq!(payload["actual_tokens"], 1234);
@@ -104,5 +106,24 @@ fn actual_usage_within_the_cap_does_not_park_the_job() -> TestResult {
 
     assert_eq!(job["state"], "completed");
     assert!(!has_high_budget_feedback(&h, &id)?);
+    Ok(())
+}
+
+#[test]
+fn configured_tier_defaults_replace_the_built_in_cold_start_estimates() -> TestResult {
+    let h = Harness::with_agent(&agent_reporting(10))?
+        .with_env("PIZZA_DELIVERY_ESTIMATE_LARGE_TOKENS", "777")
+        .with_env("PIZZA_DELIVERY_ESTIMATE_LARGE_WALL_MS", "55");
+    let id = h.submit_in_repo("do the thing")?;
+    h.wait_for_end(&id)?;
+
+    assert_eq!(implement_estimate_tokens(&h, &id)?, 777);
+    let estimated = of_kind(&h, &id, "budget-estimated")?;
+    let wall = estimated
+        .first()
+        .and_then(|p| p["stages"].as_array())
+        .and_then(|s| s.iter().find(|s| s["stage"] == "implement"))
+        .map(|s| s["wall_ms"].clone());
+    assert_eq!(wall, Some(serde_json::json!(55)));
     Ok(())
 }

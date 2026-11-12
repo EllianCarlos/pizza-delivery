@@ -5,4 +5,4 @@ blocked_by: []
 
 # TUI new-job form with collapsed Additional Parameters
 
-Add a `tui` subcommand with a UI-independent form state, pure `update` reducer and `to_request` mapping (omit `options` when closed or empty). Check `cargo build --offline` with ratatui and crossterm (both are in the local cargo cache); if they cannot be built, implement the line-based fallback over the same state machine and record it. Send through `client::send`. Tests: reducer/focus/editing, `to_request` parity with the CLI mapping, and `TestBackend` rendering of the closed and open states.
+Turn the `n` new-job mode of the core `tui::Model` into a form (`NewJobForm`): prompt, collapsed "> Additional Parameters" row, and the five options when open. `Command::Submit` carries `options` (none when closed or empty). Tests: focus order and typing in the reducer, `options` mapping, `TestBackend` frames for the closed and open states.

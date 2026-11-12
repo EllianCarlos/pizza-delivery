@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::event::{Actor, Event, EventPayload};
+use crate::event::{Actor, Event, EventPayload, FollowUp};
 use crate::id::JobId;
 use crate::job::Job;
 use crate::schedule::{Caps, Priority};
@@ -13,6 +13,7 @@ pub struct NewJob {
     pub prompt: String,
     pub repo: Option<String>,
     pub priority: Priority,
+    pub follow_up: Option<FollowUp>,
     pub options: Option<TriageOptions>,
     pub submitted_at_ms: i64,
 }
@@ -67,6 +68,9 @@ pub trait Store: Send {
     fn enqueue_job(&mut self, job: NewJob) -> Result<Job, StoreError>;
     fn list_jobs(&self) -> Result<Vec<Job>, StoreError>;
     fn read_timeline(&self, job: &JobId) -> Result<Vec<Event>, StoreError>;
+    fn read_timeline_cursored(&self, job: &JobId) -> Result<Vec<(u64, Event)>, StoreError>;
+    fn head(&self) -> Result<u64, StoreError>;
+    fn events_since(&self, after: u64, limit: usize) -> Result<Vec<(u64, Event)>, StoreError>;
     fn quota_events(&self) -> Result<Vec<Event>, StoreError>;
     fn append_event(&mut self, event: NewEvent) -> Result<Event, StoreError>;
     fn claim_stage(&mut self, request: ClaimRequest) -> Result<Option<Claimed>, StoreError>;

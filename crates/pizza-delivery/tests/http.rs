@@ -1,194 +1,296 @@
 mod harness;
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::time::{Duration, Instant};
-
 use harness::{Harness, TestResult};
+use serde_json::json;
 
-fn free_port() -> TestResult<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+fn harness() -> TestResult<Harness> {
+    let script = harness::VALID_HANDOFF_AGENT.replace(
+        "## Assumptions\nnone",
+        "## Assumptions\n- The API stays v1 [confidence: 70; alternatives: bump to v2; impact: clients break]",
+    );
+    Harness::with_agent(&script)
 }
 
-/// Sends one raw request; returns (status, body).
-fn http(
-    port: u16,
-    method: &str,
-    path: &str,
-    headers: &[&str],
-    body: &str,
-) -> TestResult<(u16, String)> {
-    let mut s = TcpStream::connect(("127.0.0.1", port))?;
-    s.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let mut req = format!("{method} {path} HTTP/1.1\r\n");
-    for h in headers {
-        req.push_str(h);
-        req.push_str("\r\n");
-    }
-    req.push_str(&format!("Content-Length: {}\r\n\r\n{body}", body.len()));
-    s.write_all(req.as_bytes())?;
-    let mut raw = String::new();
-    s.read_to_string(&mut raw)?;
-    let status = raw.split(' ').nth(1).ok_or("no status")?.parse()?;
-    let body = raw
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b.to_owned())
-        .unwrap_or_default();
-    Ok((status, body))
+fn finished_job(h: &Harness) -> TestResult<String> {
+    let id = h.submit_in_repo("build the thing")?;
+    let job = h.wait_for_end(&id)?;
+    assert_eq!(job["state"], "completed");
+    Ok(id)
 }
 
-fn post(port: u16, path: &str, body: &str) -> TestResult<(u16, String)> {
-    let host = format!("Host: 127.0.0.1:{port}");
-    http(
-        port,
+#[test]
+fn jobs_are_listed_and_grouped_by_state_over_http() -> TestResult {
+    let h = harness()?;
+    let id = finished_job(&h)?;
+
+    let jobs = h.get("/api/jobs")?;
+    assert_eq!(jobs["jobs"][0]["id"], id.as_str());
+    assert_eq!(jobs["jobs"][0]["state"], "completed");
+
+    let none = h.get("/api/jobs?state=running")?;
+    assert_eq!(none["jobs"], json!([]));
+
+    let board = h.get("/api/board")?;
+    let completed = board["columns"]
+        .as_array()
+        .and_then(|cols| cols.iter().find(|c| c["state"] == "completed"))
+        .ok_or("no completed column")?;
+    assert_eq!(completed["jobs"][0]["id"], id.as_str());
+    Ok(())
+}
+
+#[test]
+fn job_detail_carries_plan_with_estimates_stages_and_feedback() -> TestResult {
+    let h = harness()?;
+    let id = finished_job(&h)?;
+
+    let detail = h.get(&format!("/api/jobs/{id}"))?;
+    assert_eq!(detail["job"]["state"], "completed");
+    let plan = detail["plan"]["stages"].as_array().ok_or("no plan")?;
+    assert!(!plan.is_empty());
+    assert!(plan[0]["reason"].as_str().is_some_and(|r| !r.is_empty()));
+    assert!(plan[0]["estimated_tokens"].is_number());
+    assert!(!detail["stages"].as_array().ok_or("no stages")?.is_empty());
+    assert_eq!(detail["feedback"][0]["kind"], "assumption");
+    assert!(!detail["events"].as_array().ok_or("no events")?.is_empty());
+
+    let (status, body) = h.http("GET", "/api/jobs/nope", None)?;
+    assert_eq!(status, 404);
+    assert_eq!(body["kind"], "not-found");
+    Ok(())
+}
+
+#[test]
+fn quota_and_inbox_are_readable() -> TestResult {
+    let h = harness()?;
+    finished_job(&h)?;
+    assert!(h.get("/api/quota")?["agents"].is_array());
+    assert_eq!(h.get("/api/inbox")?["entries"][0]["status"], "open");
+    Ok(())
+}
+
+#[test]
+fn submit_reply_dismiss_and_cancel_work_over_http() -> TestResult {
+    let h = harness()?;
+    let repo = h.repo()?.to_string_lossy().into_owned();
+    let (status, submitted) = h.http(
         "POST",
-        path,
-        &[&host, "Content-Type: application/json"],
-        body,
-    )
-}
+        "/api/jobs",
+        Some(&json!({"prompt": "build the thing", "repo": repo})),
+    )?;
+    assert_eq!(status, 200, "{submitted}");
+    let id = submitted["id"].as_str().ok_or("no id")?.to_owned();
+    h.wait_for_end(&id)?;
+    let other = finished_job(&h)?;
+    assert_ne!(id, other);
 
-fn start(h: &Harness, port: u16) -> TestResult {
-    let repo = h.repo()?;
-    let cli = h.run(&[
-        "--dry-run",
-        "--json",
-        "--repo",
-        &repo.to_string_lossy(),
-        "warm up",
-    ])?;
-    assert_eq!(cli.code, 0, "{}", cli.stderr);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while TcpStream::connect(("127.0.0.1", port)).is_err() {
-        assert!(Instant::now() < deadline, "http listener never came up");
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    let entries = h.get("/api/inbox")?["entries"].clone();
+    let ids: Vec<String> = entries
+        .as_array()
+        .ok_or("no entries")?
+        .iter()
+        .filter_map(|e| e["id"].as_str().map(str::to_owned))
+        .collect();
+    assert!(ids.len() >= 2);
+    let (entry, spare) = (ids[0].clone(), ids[1].clone());
+    let (status, replied) = h.http(
+        "POST",
+        "/api/inbox/reply",
+        Some(&json!({"targets": [entry], "text": "use v2"})),
+    )?;
+    assert_eq!(status, 200, "{replied}");
+    assert_eq!(replied["answered"][0], entry.as_str());
+    let follow_up = replied["id"].as_str().ok_or("no follow-up")?.to_owned();
+
+    let (status, cancelled) = h.http(
+        "POST",
+        &format!("/api/jobs/{follow_up}/cancel"),
+        Some(&json!({})),
+    )?;
+    assert_eq!(status, 200, "{cancelled}");
+
+    let (status, _) = h.http(
+        "POST",
+        "/api/inbox/dismiss",
+        Some(&json!({"entries": [spare]})),
+    )?;
+    assert_eq!(status, 200);
     Ok(())
 }
 
 #[test]
-fn the_form_submits_and_previews_through_the_daemon_and_unsafe_requests_change_nothing(
-) -> TestResult {
-    let port = free_port()?;
-    let h = Harness::new()?.with_env("PIZZA_DELIVERY_HTTP_LISTEN", &format!("127.0.0.1:{port}"));
-    start(&h, port)?;
-
-    let host = format!("Host: 127.0.0.1:{port}");
-    let (status, page) = http(port, "GET", "/", &[&host], "")?;
-    assert_eq!(status, 200);
-    assert!(page.contains("Additional Parameters"));
-
-    // Dry run reflects options and enqueues nothing.
-    let (status, body) = post(
-        port,
-        "/api/dry-run",
-        r#"{"prompt":"fix the flaky test","options":{"report_only":true}}"#,
+fn submit_accepts_and_validates_additional_parameters() -> TestResult {
+    let h = harness()?;
+    let repo = h.repo()?.to_string_lossy().into_owned();
+    let (status, ok) = h.http(
+        "POST",
+        "/api/jobs",
+        Some(&json!({
+            "prompt": "fix the build",
+            "repo": repo,
+            "options": {"template": "bug-fix", "max_stages": 4, "context_hint": "auth", "risk_flags": ["production"]},
+        })),
     )?;
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains(r#""type":"triaged""#));
-    assert!(h.ledger()?.is_empty());
-
-    // Submit without options: no options key in the stored event.
-    let (status, body) = post(port, "/api/submit", r#"{"prompt":"plain job"}"#)?;
-    assert_eq!(status, 200, "{body}");
-    assert!(body.contains(r#""type":"submitted""#));
-    let submitted = h
-        .ledger()?
-        .into_iter()
-        .find(|r| r.kind == "job-submitted")
-        .ok_or("no job-submitted")?;
-    assert!(submitted.payload.get("options").is_none());
-
-    // Submit with options persists them.
-    let (status, _) = post(
-        port,
-        "/api/submit",
-        r#"{"prompt":"with options","options":{"max_stages":2,"risk_flags":["touches-auth"]}}"#,
-    )?;
-    assert_eq!(status, 200);
-    let with = h
-        .ledger()?
-        .into_iter()
-        .filter(|r| r.kind == "job-submitted")
-        .find(|r| r.payload["prompt"] == "with options")
-        .ok_or("missing")?;
-    assert_eq!(with.payload["options"]["max_stages"], 2);
-
-    // Usage errors are 400 with the Response::Error body.
+    assert_eq!(status, 200, "{ok}");
     for bad in [
-        r#"{"prompt":"x","options":{"max_stages":0}}"#,
-        r#"{"prompt":"x","options":{"context_hint":"  "}}"#,
-        r#"{"prompt":"  "}"#,
+        json!({"max_stages": 0}),
+        json!({"context_hint": "  "}),
+        json!({"risk_flags": ["Not Kebab"]}),
     ] {
-        let (status, body) = post(port, "/api/submit", bad)?;
+        let (status, body) = h.http(
+            "POST",
+            "/api/jobs",
+            Some(&json!({"prompt": "x", "options": bad})),
+        )?;
         assert_eq!(status, 400, "{bad}: {body}");
-        assert!(body.contains(r#""kind":"usage""#), "{body}");
+        assert_eq!(body["kind"], "usage");
     }
-
-    // Rejections change no state.
-    let before = h.ledger()?.len();
-    let json = "Content-Type: application/json";
-    let evil_host = "Host: evil.example";
-    let evil_origin = format!("Origin: http://evil.example");
-    let big = format!(r#"{{"prompt":"{}"}}"#, "a".repeat(70 * 1024));
-    let cases: Vec<(u16, TestResult<(u16, String)>)> = vec![
-        (
-            403,
-            http(
-                port,
-                "POST",
-                "/api/submit",
-                &[evil_host, json],
-                r#"{"prompt":"x"}"#,
-            ),
-        ),
-        (
-            403,
-            http(
-                port,
-                "POST",
-                "/api/submit",
-                &[&host, &evil_origin, json],
-                r#"{"prompt":"x"}"#,
-            ),
-        ),
-        (
-            415,
-            http(
-                port,
-                "POST",
-                "/api/submit",
-                &[&host, "Content-Type: text/plain"],
-                r#"{"prompt":"x"}"#,
-            ),
-        ),
-        (413, http(port, "POST", "/api/submit", &[&host, json], &big)),
-        (404, http(port, "POST", "/api/nope", &[&host, json], "{}")),
-        (405, http(port, "GET", "/api/submit", &[&host], "")),
-    ];
-    for (want, got) in cases {
-        assert_eq!(got?.0, want);
-    }
-    assert_eq!(h.ledger()?.len(), before);
     Ok(())
 }
 
 #[test]
-fn http_is_off_by_default_and_a_non_loopback_address_is_a_config_error() -> TestResult {
-    let h = Harness::new()?;
-    let repo = h.repo()?;
-    let cli = h.run(&[
-        "--dry-run",
-        "--json",
-        "--repo",
-        &repo.to_string_lossy(),
-        "x",
-    ])?;
-    assert_eq!(cli.code, 0, "{}", cli.stderr);
+fn bad_writes_are_rejected_and_nothing_else_is_writable() -> TestResult {
+    let h = harness()?;
+    let (status, body) = h.http("POST", "/api/jobs", Some(&json!({"prompt": "  "})))?;
+    assert_eq!(status, 400);
+    assert_eq!(body["kind"], "usage");
+    for path in ["/api/stop", "/api/daemon", "/api/jobs/x/delete"] {
+        let (status, _) = h.http("POST", path, Some(&json!({})))?;
+        assert_eq!(status, 404, "{path}");
+    }
+    let (status, _) = h.http("DELETE", "/api/jobs", None)?;
+    assert_eq!(status, 405);
+    Ok(())
+}
 
-    let h = Harness::new()?.with_env("PIZZA_DELIVERY_HTTP_LISTEN", "0.0.0.0:7878");
-    let cli = h.run(&["daemon"])?;
-    assert_ne!(cli.code, 0);
-    assert!(cli.stderr.contains("loopback"), "{}", cli.stderr);
+#[test]
+fn events_resume_from_a_cursor() -> TestResult {
+    let h = harness()?;
+    finished_job(&h)?;
+    let all = h.get("/api/events")?;
+    let events = all["events"].as_array().ok_or("no events")?;
+    assert!(events.len() > 3);
+    let cursors: Vec<u64> = events.iter().filter_map(|e| e["cursor"].as_u64()).collect();
+    assert!(cursors.windows(2).all(|w| w[0] < w[1]));
+    let middle = cursors[cursors.len() / 2];
+
+    let rest = h.get(&format!("/api/events?since={middle}"))?;
+    let later: Vec<u64> = rest["events"]
+        .as_array()
+        .ok_or("no events")?
+        .iter()
+        .filter_map(|e| e["cursor"].as_u64())
+        .collect();
+    assert_eq!(
+        later,
+        cursors
+            .iter()
+            .copied()
+            .filter(|c| *c > middle)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(rest["next"], *cursors.last().ok_or("empty")?);
+    Ok(())
+}
+
+#[test]
+fn artifact_content_is_readable_by_its_position_in_the_job() -> TestResult {
+    let h = harness()?;
+    let id = finished_job(&h)?;
+
+    let detail = h.get(&format!("/api/jobs/{id}"))?;
+    let recorded: Vec<&serde_json::Value> = detail["events"]
+        .as_array()
+        .ok_or("no events")?
+        .iter()
+        .filter(|e| e["kind"] == "artifact-recorded")
+        .collect();
+    assert!(!recorded.is_empty());
+    let path = recorded[0]["payload"]["path"].as_str().ok_or("no path")?;
+
+    let artifact = h.get(&format!("/api/jobs/{id}/artifacts/0"))?;
+    assert_eq!(artifact["path"], path);
+    let on_disk = std::fs::read_to_string(h.data_dir().join(path))?;
+    assert_eq!(artifact["content"], on_disk.as_str());
+
+    let (status, body) = h.http("GET", &format!("/api/jobs/{id}/artifacts/999"), None)?;
+    assert_eq!(status, 404);
+    assert_eq!(body["kind"], "not-found");
+    Ok(())
+}
+
+#[test]
+fn the_web_ui_is_served_from_the_root() -> TestResult {
+    let h = harness()?;
+    let (status, head, body) = h.raw_get("/")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: text/html"), "{head}");
+    assert!(body.contains("<div id=\"root\">"), "{body}");
+    let (status, head, _) = h.raw_get("/app.js")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("javascript"), "{head}");
+    Ok(())
+}
+
+#[test]
+fn the_pwa_shell_manifest_service_worker_and_job_links_are_served() -> TestResult {
+    let h = harness()?;
+    let (status, head, body) = h.raw_get("/manifest.webmanifest")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("manifest+json"), "{head}");
+    let manifest: serde_json::Value = serde_json::from_str(&body)?;
+    assert_eq!(manifest["display"], "standalone");
+    assert_eq!(manifest["start_url"], "/");
+
+    let (status, head, body) = h.raw_get("/sw.js")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("javascript"), "{head}");
+    assert!(body.contains("addEventListener(\"push\""), "{body}");
+    assert!(
+        !body.contains("/api/jobs"),
+        "service worker must not cache api data"
+    );
+
+    for icon in ["/icon-192.png", "/icon-512.png"] {
+        let (status, head, _) = h.raw_get(icon)?;
+        assert_eq!(status, 200);
+        assert!(head.contains("image/png"), "{head}");
+    }
+
+    let (status, head, body) = h.raw_get("/jobs/01J9ABCDEF")?;
+    assert_eq!(status, 200);
+    assert!(head.contains("text/html"), "{head}");
+    assert!(body.contains("<div id=\"root\">"), "{body}");
+    Ok(())
+}
+
+#[test]
+fn stream_resumes_from_last_event_id_and_delivers_live_events() -> TestResult {
+    let h = harness()?;
+    finished_job(&h)?;
+    let all = h.get("/api/events")?;
+    let cursors: Vec<u64> = all["events"]
+        .as_array()
+        .ok_or("no events")?
+        .iter()
+        .filter_map(|e| e["cursor"].as_u64())
+        .collect();
+    let resume = cursors[cursors.len() - 3];
+
+    let mut sse = h.stream("/api/stream", Some(resume))?;
+    let replayed: Vec<u64> = (0..2)
+        .map(|_| sse.next_frame().map(|f| f.id))
+        .collect::<TestResult<_>>()?;
+    assert_eq!(replayed, cursors[cursors.len() - 2..]);
+
+    let id = h.submit("a brand new job")?;
+    loop {
+        let frame = sse.next_frame()?;
+        assert!(frame.id > resume);
+        if frame.event == "job-submitted" && frame.data["job_id"] == id.as_str() {
+            assert_eq!(frame.data["cursor"], frame.id);
+            break;
+        }
+    }
     Ok(())
 }

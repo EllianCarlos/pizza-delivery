@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use pizza_delivery_core::budget::{estimate_overrun, estimate_plan, samples, Defaults, Sample};
 use pizza_delivery_core::context::{assemble_context, Context, Section, CONTEXT_CAP_BYTES};
 use pizza_delivery_core::event::{Actor, EventPayload};
@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::agent::{Agent, Invocation};
 use crate::handler::Env;
+use crate::lock::acquire;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const TIE_BREAK_TIMEOUT: Duration = Duration::from_secs(120);
@@ -90,6 +91,7 @@ pub struct Triager<'a> {
     pub deps: Deps<'a>,
     pub agent: &'a str,
     pub budget_cap_tokens: u64,
+    pub budget_defaults: Defaults,
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -98,10 +100,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 impl Triager<'_> {
     fn with_store<T>(&self, f: impl FnOnce(&mut dyn Store) -> Result<T, StoreError>) -> Result<T> {
-        let mut guard = self
-            .store
-            .lock()
-            .map_err(|_| anyhow!("store lock poisoned"))?;
+        let mut guard = acquire(self.store, "store")?;
         Ok(f(guard.as_mut())?)
     }
 
@@ -160,6 +159,9 @@ impl Triager<'_> {
                     severity: f.severity.clone(),
                     text: f.text.clone(),
                     confidence: f.confidence,
+                    alternatives: f.alternatives.clone(),
+                    impact: f.impact.clone(),
+                    evidence: f.evidence.clone(),
                 },
             )?;
         }
@@ -197,7 +199,7 @@ impl Triager<'_> {
             &triage.plan,
             self.agent,
             &self.history()?,
-            &Defaults::standard(),
+            &self.budget_defaults,
         );
         if let Some(f) = estimate_overrun(&estimates, self.budget_cap_tokens) {
             self.append(
@@ -207,6 +209,9 @@ impl Triager<'_> {
                     severity: f.severity,
                     text: f.text,
                     confidence: f.confidence,
+                    alternatives: f.alternatives,
+                    impact: f.impact,
+                    evidence: f.evidence,
                 },
             )?;
         }
@@ -347,6 +352,7 @@ impl TieBreaker for AgentTieBreaker<'_> {
             grace: self.grace,
             sandbox: SandboxProfile::default(),
             egress_log: self.cwd.join("tie-break-egress.log"),
+            mcp_config: None,
         };
         let output = self.agent.run(&invocation, &mut |_| {}).ok()?;
         if output.timed_out {
@@ -441,6 +447,7 @@ mod tests {
 
     use super::*;
     use crate::sqlite_store::SqliteStore;
+    use anyhow::anyhow;
     use pizza_delivery_core::budget::DEFAULT_CAP_TOKENS;
     use pizza_delivery_core::{NewJob, Priority};
 
@@ -507,6 +514,7 @@ mod tests {
                 prompt: prompt.into(),
                 repo: repo.map(str::to_owned),
                 priority: Priority::Normal,
+                follow_up: None,
                 options: None,
                 submitted_at_ms: 0,
             })?;
@@ -534,12 +542,13 @@ mod tests {
                 },
                 agent: "claude",
                 budget_cap_tokens: DEFAULT_CAP_TOKENS,
+                budget_defaults: Defaults::standard(),
             };
             triager.tick()
         }
 
         fn events(&self) -> Result<Vec<pizza_delivery_core::Event>> {
-            let guard = self.store.lock().map_err(|_| anyhow!("poisoned"))?;
+            let guard = acquire(&self.store, "store")?;
             Ok(guard.read_timeline(&JobId::new("J1"))?)
         }
 
@@ -548,7 +557,7 @@ mod tests {
         }
 
         fn job(&self) -> Result<Job> {
-            let guard = self.store.lock().map_err(|_| anyhow!("poisoned"))?;
+            let guard = acquire(&self.store, "store")?;
             guard
                 .list_jobs()?
                 .into_iter()

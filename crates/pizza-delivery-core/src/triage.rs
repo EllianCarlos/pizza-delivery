@@ -197,6 +197,7 @@ pub enum Template {
     FullFeature,
     BugFix,
     Investigate,
+    Report,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,6 +305,13 @@ impl TriageOptions {
     }
 }
 
+const REPORT_WORDS: [&str; 5] = [
+    "report only",
+    "report-only",
+    "just a report",
+    "no pull request",
+    "without a pr",
+];
 const INVESTIGATE_WORDS: [&str; 7] = [
     "investigate",
     "research",
@@ -346,7 +354,9 @@ fn has_any(haystack: &str, words: &[&str]) -> bool {
 
 pub fn classify(prompt: &str) -> Template {
     let lower = prompt.to_lowercase();
-    if has_any(&lower, &INVESTIGATE_WORDS) {
+    if has_any(&lower, &REPORT_WORDS) {
+        Template::Report
+    } else if has_any(&lower, &INVESTIGATE_WORDS) {
         Template::Investigate
     } else if has_any(&lower, &BUG_WORDS) {
         Template::BugFix
@@ -367,6 +377,7 @@ pub fn template_name(template: Template) -> &'static str {
         Template::FullFeature => "full-feature",
         Template::BugFix => "bug-fix",
         Template::Investigate => "investigate",
+        Template::Report => "report",
     }
 }
 
@@ -393,6 +404,7 @@ pub fn plan_for(template: Template) -> Vec<PlannedStage> {
             ship,
         ],
         Template::BugFix => vec![grill, implement, review, ship],
+        Template::Report => vec![stage("investigate", "gather findings into a report")],
         Template::Investigate => vec![
             stage("investigate", "gather findings before deciding anything"),
             stage("grill", "decide whether a pull request is needed"),
@@ -431,6 +443,7 @@ fn restate(prompt: &str, repo: &Resolution, template: Template, hint: Option<&st
             Template::FullFeature => "build a new capability from spec to pull request",
             Template::BugFix => "diagnose and fix a defect, then ship the fix",
             Template::Investigate => "investigate first, then decide whether a change is needed",
+            Template::Report => "investigate and end with a report, no pull request",
         }
     )
 }
@@ -512,6 +525,27 @@ pub struct Feedback {
     pub severity: String,
     pub text: String,
     pub confidence: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+impl Feedback {
+    /// Feedback with no gate metadata; hard stops use this and always reach the inbox.
+    pub fn new(kind: &str, severity: &str, text: String, confidence: Option<u8>) -> Self {
+        Self {
+            kind: kind.to_owned(),
+            severity: severity.to_owned(),
+            text,
+            confidence,
+            alternatives: Vec::new(),
+            impact: None,
+            evidence: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -545,26 +579,25 @@ pub fn conclude_with(
     match resolution {
         None => Outcome {
             triage: None,
-            feedback: vec![Feedback {
-                kind: "needs-human".to_owned(),
-                severity: "high".to_owned(),
-                text: "no repository matched the prompt; pass --repo or name the project"
-                    .to_owned(),
-                confidence: None,
-            }],
+            feedback: vec![Feedback::new(
+                "needs-human",
+                "high",
+                "no repository matched the prompt; pass --repo or name the project".to_owned(),
+                None,
+            )],
         },
         Some(resolution) => {
             let mut feedback = if resolution.is_low() {
-                vec![Feedback {
-                    kind: "assumption".to_owned(),
-                    severity: "medium".to_owned(),
-                    text: format!(
+                vec![Feedback::new(
+                    "assumption",
+                    "medium",
+                    format!(
                         "assumed the repository is {} (best of {} candidates)",
                         resolution.path,
                         resolution.alternatives.len() + 1
                     ),
-                    confidence: Some(resolution.confidence),
-                }]
+                    Some(resolution.confidence),
+                )]
             } else {
                 vec![]
             };
@@ -580,6 +613,9 @@ pub fn conclude_with(
                             template_name(heuristic)
                         ),
                         confidence: None,
+                        alternatives: Vec::new(),
+                        impact: None,
+                        evidence: None,
                     });
                 }
             }
@@ -840,6 +876,15 @@ mod tests {
             actor: crate::event::Actor::Daemon,
             payload,
         }
+    }
+
+    #[test]
+    fn report_only_prompts_get_a_plan_without_a_ship_stage() {
+        assert_eq!(
+            classify("investigate the flaky test, report only"),
+            Template::Report
+        );
+        assert_eq!(names(&plan_for(Template::Report)), vec!["investigate"]);
     }
 
     #[test]

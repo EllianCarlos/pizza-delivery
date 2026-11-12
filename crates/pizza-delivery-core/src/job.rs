@@ -5,8 +5,9 @@ use crate::id::JobId;
 use crate::schedule::Priority;
 use crate::triage::TriageOptions;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum JobState {
     Queued,
     Running,
@@ -51,7 +52,7 @@ fn next_state(current: JobState, payload: &EventPayload) -> JobState {
     match payload {
         EventPayload::JobCancelled {} => JobState::Cancelled,
         EventPayload::StageClaimed { .. } => JobState::Running,
-        EventPayload::StageRetried { .. } => JobState::Queued,
+        EventPayload::StageRetried { .. } | EventPayload::StageSucceeded {} => JobState::Queued,
         EventPayload::JobParked { .. } => JobState::WaitingForQuota,
         EventPayload::JobCompleted {} => JobState::Completed,
         EventPayload::JobFailed { .. } => JobState::Failed,
@@ -75,6 +76,7 @@ pub fn apply(state: Option<Job>, event: &Event) -> Option<Job> {
                 repo,
                 priority,
                 options,
+                ..
             },
             None,
         ) => Some(Job {
@@ -118,6 +120,7 @@ mod tests {
                 prompt: "do it".into(),
                 repo: Some("/r".into()),
                 priority: Priority::High,
+                follow_up: None,
                 options: None,
             },
         }

@@ -1,0 +1,39 @@
+class PizzaDelivery < Formula
+  desc "Autonomous prompt queue that ends at a draft PR"
+  homepage "https://github.com/EllianCarlos/pizza-delivery"
+  version "@VERSION@"
+  license any_of: ["MIT", "Apache-2.0"]
+
+  on_macos do
+    on_arm do
+      url "@BASE@/pizza-delivery-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA_AARCH64_DARWIN@"
+    end
+    on_intel do
+      url "@BASE@/pizza-delivery-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA_X86_64_DARWIN@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "@BASE@/pizza-delivery-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_AARCH64_LINUX@"
+    end
+    on_intel do
+      url "@BASE@/pizza-delivery-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_X86_64_LINUX@"
+    end
+  end
+
+  def install
+    bin.install "pizza-delivery"
+    bash_completion.install "completions/pizza-delivery.bash" => "pizza-delivery"
+    zsh_completion.install "completions/pizza-delivery.zsh" => "_pizza-delivery"
+    fish_completion.install "completions/pizza-delivery.fish"
+  end
+
+  test do
+    assert_match "pizza-delivery", shell_output("#{bin}/pizza-delivery --version")
+  end
+end

@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and package everything without publishing
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+
+jobs:
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Build web assets
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked -p pizza-delivery --target ${{ matrix.target }}
+      - name: Package archive with completions and checksum
+        run: |
+          name=pizza-delivery-${{ matrix.target }}
+          bin=target/${{ matrix.target }}/release/pizza-delivery
+          mkdir -p "$name/completions"
+          cp "$bin" LICENSE-MIT LICENSE-APACHE README.md "$name/"
+          for shell in bash zsh fish; do
+            "$bin" completions "$shell" > "$name/completions/pizza-delivery.$shell"
+          done
+          tar czf "$name.tar.gz" "$name"
+          if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"; else shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            pizza-delivery-${{ matrix.target }}.tar.gz
+            pizza-delivery-${{ matrix.target }}.tar.gz.sha256
+
+  crates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Build web assets
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+      - name: Vendor web assets into the binary crate
+        run: scripts/vendor-web.sh
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish core crate, then binary crate
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          flag=""
+          if [ "$DRY_RUN" = "true" ]; then flag="--dry-run"; fi
+          cargo publish -p pizza-delivery-core --locked $flag
+          if [ "$DRY_RUN" = "true" ]; then
+            cargo package -p pizza-delivery --locked --no-verify
+          else
+            sleep 30
+            cargo publish -p pizza-delivery --locked --allow-dirty
+          fi
+
+  release:
+    needs: [binaries, crates]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+      - name: Combined checksums
+        working-directory: dist
+        run: cat *.sha256 > SHA256SUMS
+      - name: Installer script
+        run: cp scripts/install.sh dist/pizza-delivery-installer.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Publish GitHub release
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+
+  homebrew:
+    needs: release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+      - name: Update Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sha() { cut -d' ' -f1 "dist/pizza-delivery-$1.tar.gz.sha256"; }
+          base="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}"
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/EllianCarlos/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          sed -e "s|@VERSION@|$version|g" \
+              -e "s|@BASE@|$base|g" \
+              -e "s|@SHA_X86_64_DARWIN@|$(sha x86_64-apple-darwin)|" \
+              -e "s|@SHA_AARCH64_DARWIN@|$(sha aarch64-apple-darwin)|" \
+              -e "s|@SHA_X86_64_LINUX@|$(sha x86_64-unknown-linux-gnu)|" \
+              -e "s|@SHA_AARCH64_LINUX@|$(sha aarch64-unknown-linux-gnu)|" \
+              packaging/homebrew/pizza-delivery.rb.in > tap/Formula/pizza-delivery.rb
+          cd tap
+          git config user.name "release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git add Formula/pizza-delivery.rb
+          git commit -m "pizza-delivery $version"
+          git push

@@ -23,7 +23,7 @@ Wire changes:
 
 CLI: a flag group labelled "Additional Parameters" in `--help` (clap `help_heading`): `--template <t>`, `--report-only`, `--max-stages <n>`, `--context <text>`, repeated `--risk <flag>`. None are required. `--dry-run` shows the effect of the options.
 
-UI contract (built in spec `01M76XPGZ80FV9SVKHGHYYDMKN`): a web or TUI form shows a collapsed "> Additional Parameters" expander under the prompt field, listing these same five fields in this order. Collapsed means the request carries no `options` key.
+UI contract (built in spec `01M76XPGZ80FV9SVKHGHYYDMKN`): the web Submit modal and the TUI new-job form shows a collapsed "> Additional Parameters" expander under the prompt field, listing these same five fields in this order. Collapsed means the request carries no `options` key.
 
 ## Acceptance criteria
 

@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::context::SourceUse;
 use crate::event::Event;
 use crate::exit::ExitCode;
+use crate::filter::{ArtifactFilter, ArtifactItem, EventFilter, InboxFilter};
 use crate::id::JobId;
+use crate::inbox::InboxEntry;
 use crate::job::JobState;
 use crate::quota::QuotaView;
 use crate::schedule::Priority;
@@ -36,10 +38,49 @@ pub enum Request {
         job: Option<String>,
     },
     Quota,
+    Inbox {
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        filter: InboxFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    Events {
+        #[serde(default)]
+        filter: EventFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    Artifacts {
+        #[serde(default)]
+        filter: ArtifactFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    InboxShow {
+        entry: String,
+    },
+    Dismiss {
+        entries: Vec<String>,
+    },
+    Reply {
+        targets: Vec<String>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<Priority>,
+    },
     Stop,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct JobView {
     pub id: JobId,
     pub short_id: String,
@@ -48,8 +89,9 @@ pub struct JobView {
     pub submitted_at_ms: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "kebab-case")]
+#[ts(export)]
 pub enum ErrorKind {
     NotFound,
     Ambiguous,
@@ -57,7 +99,8 @@ pub enum ErrorKind {
     Internal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct ApiError {
     pub kind: ErrorKind,
     pub message: String,
@@ -101,6 +144,26 @@ pub enum Response {
         id: JobId,
         short_id: String,
     },
+    EventItems {
+        items: Vec<Event>,
+    },
+    ArtifactItems {
+        items: Vec<ArtifactItem>,
+    },
+    Inbox {
+        entries: Vec<InboxEntry>,
+    },
+    InboxEntry {
+        entry: InboxEntry,
+    },
+    Dismissed {
+        entries: Vec<String>,
+    },
+    Replied {
+        id: JobId,
+        short_id: String,
+        answered: Vec<String>,
+    },
     Stopped,
     Error {
         error: ApiError,
@@ -132,6 +195,35 @@ mod tests {
         let text = serde_json::to_string(&req).unwrap_or_default();
         assert_eq!(text, r#"{"op":"status","job":"@last"}"#);
         assert_eq!(serde_json::from_str::<Request>(&text).ok(), Some(req));
+    }
+
+    #[test]
+    fn filter_requests_and_responses_round_trip_as_tagged_json() {
+        let req = Request::Events {
+            filter: EventFilter {
+                kinds: vec!["stage-failed".into()],
+                ..Default::default()
+            },
+            query: Some("boom".into()),
+            limit: Some(5),
+        };
+        let text = serde_json::to_string(&req).unwrap_or_default();
+        assert!(text.starts_with(r#"{"op":"events","filter":{"#), "{text}");
+        assert_eq!(serde_json::from_str::<Request>(&text).ok(), Some(req));
+        let bare: Result<Request, _> = serde_json::from_str(r#"{"op":"inbox"}"#);
+        assert_eq!(
+            bare.ok(),
+            Some(Request::Inbox {
+                all: false,
+                filter: InboxFilter::default(),
+                query: None,
+                limit: None
+            })
+        );
+        let resp = Response::ArtifactItems { items: vec![] };
+        let text = serde_json::to_string(&resp).unwrap_or_default();
+        assert_eq!(text, r#"{"type":"artifact-items","items":[]}"#);
+        assert_eq!(serde_json::from_str::<Response>(&text).ok(), Some(resp));
     }
 
     #[test]
