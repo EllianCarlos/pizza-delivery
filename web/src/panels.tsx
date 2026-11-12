@@ -27,6 +27,7 @@ import {
   jobSummary,
   stageRows,
   toolCallsOf,
+  labelArtifact,
   visibleEvents,
 } from "./model";
 import { StateBadge } from "./views";
@@ -150,10 +151,12 @@ export function ArtifactList({
   detail: JobDetailView & { artifacts?: Artifact[] };
   api: Api;
 }) {
-  const artifacts = useMemo(
-    () => detail.artifacts ?? artifactsOf(detail.events),
-    [detail.artifacts, detail.events],
-  );
+  const artifacts = useMemo(() => {
+    const all = detail.artifacts ?? artifactsOf(detail.events);
+    return all
+      .map((a) => ({ ...a, ...labelArtifact(a.path) }))
+      .sort((x, y) => x.order - y.order || x.index - y.index);
+  }, [detail.artifacts, detail.events]);
   const [open, setOpen] = useState<number | null>(null);
   const [content, setContent] = useState<string>("");
   useEffect(() => {
@@ -162,29 +165,64 @@ export function ArtifactList({
   }, [detail.job.id]);
   useEffect(() => {
     if (open === null) return;
+    setContent("");
     api
       .artifact(detail.job.short_id, open)
       .then((a) => setContent(a.content))
       .catch((e: Error) => setContent(e.message));
   }, [open, detail.job.short_id, api]);
+  const shown = artifacts.find((a) => a.index === open);
   return (
     <SpaceBetween size="s">
       <Table
         variant="embedded"
-        header={<Header variant="h3">Artifacts</Header>}
+        header={<Header variant="h3" counter={`(${artifacts.length})`}>Artifacts</Header>}
         items={artifacts}
         trackBy="index"
         empty={<Box>No artifacts</Box>}
+        wrapLines={false}
+        selectionType="single"
+        selectedItems={shown ? [shown] : []}
+        onSelectionChange={({ detail: d }) => setOpen(d.selectedItems[0]?.index ?? null)}
+        onRowClick={({ detail: d }) => setOpen(d.item.index)}
+        ariaLabels={{ itemSelectionLabel: (_, a) => a.path, selectionGroupLabel: "Artifacts" }}
         columnDefinitions={[
-          { id: "kind", header: "Kind", cell: (a) => a.kind },
-          { id: "path", header: "Path", cell: (a) => a.path },
-          { id: "sha", header: "sha256", cell: (a) => a.sha256.slice(0, 12) },
-          { id: "open", header: "", cell: (a) => <Button variant="inline-link" onClick={() => setOpen(a.index)}>View</Button> },
+          { id: "stage", header: "Stage", cell: (a) => a.stage || "-", width: 110 },
+          {
+            id: "file",
+            header: "File",
+            cell: (a) => (
+              <span title={a.path}>
+                <Button variant="inline-link" onClick={() => setOpen(a.index)}>
+                  {a.file}
+                </Button>
+              </span>
+            ),
+          },
+          { id: "kind", header: "Kind", cell: (a) => a.kind, width: 160 },
+          {
+            id: "sha",
+            header: "sha256",
+            cell: (a) => <Box variant="code" fontSize="body-s">{a.sha256.slice(0, 8)}</Box>,
+            width: 110,
+          },
         ]}
       />
-      {open !== null && (
-        <Container header={<Header variant="h3">{artifacts[open]?.path}</Header>}>
-          <pre style={{ whiteSpace: "pre-wrap", margin: 0 }}>{content}</pre>
+      {shown && (
+        <Container
+          header={
+            <Header
+              variant="h3"
+              description={shown.path}
+              actions={<Button variant="icon" iconName="close" ariaLabel="Close artifact" onClick={() => setOpen(null)} />}
+            >
+              {shown.stage ? `${shown.stage} · ${shown.file}` : shown.file}
+            </Header>
+          }
+        >
+          <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0, maxHeight: "60vh", overflow: "auto" }}>
+            {content || "Loading…"}
+          </pre>
         </Container>
       )}
     </SpaceBetween>
