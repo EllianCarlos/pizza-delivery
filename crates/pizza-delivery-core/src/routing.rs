@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::quota::QuotaSnapshot;
+use crate::triage::Template;
 
 pub const DEFAULT_THRESHOLD_PERMILLE: u32 = 900;
 pub const DEFAULT_BACKOFF_MS: i64 = 3_600_000;
@@ -87,6 +88,63 @@ pub struct Rule {
     pub chain: Vec<Candidate>,
 }
 
+/// One row of the owner's model decision table (`[[models]]` in
+/// routing.toml). Every condition is optional; an unset condition matches
+/// anything. The first row whose conditions all hold picks the model.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRule {
+    /// Stage name, e.g. "review".
+    #[serde(default)]
+    pub stage: Option<String>,
+    /// Template triage chose: full-feature, bug-fix, investigate or report.
+    #[serde(default)]
+    pub template: Option<Template>,
+    /// true matches jobs with any risk flag, false jobs with none.
+    #[serde(default)]
+    pub risky: Option<bool>,
+    /// Matches jobs carrying this exact risk flag.
+    #[serde(default)]
+    pub risk_flag: Option<String>,
+    /// Repository name or path suffix, as in [[rules]].
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Agent the row applies to (a name under [agents]); default "claude".
+    #[serde(default)]
+    pub agent: Option<String>,
+    pub model: String,
+}
+
+/// What the model decider looks at for one stage of one job.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModelInputs<'a> {
+    pub stage: &'a str,
+    pub template: Option<Template>,
+    pub risk_flags: &'a [String],
+    pub repo: Option<&'a str>,
+    /// The submitter's `model` option, which beats every rule.
+    pub job_model: Option<&'a str>,
+}
+
+impl ModelRule {
+    fn matches(&self, agent: &str, inputs: &ModelInputs<'_>) -> bool {
+        self.agent.as_deref().unwrap_or("claude") == agent
+            && self.stage.as_deref().map_or(true, |s| s == inputs.stage)
+            && self.template.map_or(true, |t| Some(t) == inputs.template)
+            && self
+                .risky
+                .map_or(true, |r| r == !inputs.risk_flags.is_empty())
+            && self
+                .risk_flag
+                .as_deref()
+                .map_or(true, |f| inputs.risk_flags.iter().any(|x| x == f))
+            && self
+                .repo
+                .as_deref()
+                .map_or(true, |p| inputs.repo.is_some_and(|r| repo_matches(p, r)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -98,12 +156,15 @@ struct RawConfig {
     agents: BTreeMap<String, AgentDef>,
     #[serde(default)]
     rules: Vec<Rule>,
+    #[serde(default)]
+    models: Vec<ModelRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingConfig {
     pub agents: BTreeMap<String, AgentDef>,
     pub rules: Vec<Rule>,
+    pub models: Vec<ModelRule>,
     pub threshold_permille: u32,
     pub default_backoff_ms: i64,
 }
@@ -116,6 +177,8 @@ pub enum ConfigError {
     Threshold(String),
     #[error("rules[{rule}].chain is empty")]
     EmptyChain { rule: usize },
+    #[error("models[{row}].agent names agent '{agent}' which is not defined under [agents]")]
+    UnknownModelAgent { row: usize, agent: String },
     #[error("rules[{rule}].chain[{index}].agent names agent '{agent}' which is not defined under [agents]")]
     UnknownAgent {
         rule: usize,
@@ -152,6 +215,7 @@ impl RoutingConfig {
                     model: None,
                 }],
             }],
+            models: vec![],
             threshold_permille: DEFAULT_THRESHOLD_PERMILLE,
             default_backoff_ms: DEFAULT_BACKOFF_MS,
         }
@@ -178,9 +242,11 @@ impl RoutingConfig {
         let agents: BTreeMap<String, AgentDef> =
             self.agents.into_iter().chain(raw.agents).collect();
         let rules: Vec<Rule> = raw.rules.into_iter().chain(self.rules).collect();
+        let models: Vec<ModelRule> = raw.models.into_iter().chain(self.models).collect();
         let merged = Self {
             agents,
             rules,
+            models,
             threshold_permille,
             default_backoff_ms,
         };
@@ -188,6 +254,12 @@ impl RoutingConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if let Some((row, agent)) = self.models.iter().enumerate().find_map(|(row, m)| {
+            let agent = m.agent.as_deref().unwrap_or("claude");
+            (!self.agents.contains_key(agent)).then(|| (row, agent.to_owned()))
+        }) {
+            return Err(ConfigError::UnknownModelAgent { row, agent });
+        }
         self.rules.iter().enumerate().try_for_each(|(rule, r)| {
             if r.chain.is_empty() {
                 return Err(ConfigError::EmptyChain { rule });
@@ -311,6 +383,61 @@ pub fn route(
         candidates,
         skipped,
     })
+}
+
+/// The model Claude runs a stage on when neither the job nor the routing rule
+/// names one. Without this the CLI falls back to the owner's own default,
+/// which can be Opus. Opus is never chosen here: it needs an explicit pick.
+pub fn default_claude_model(stage: &str) -> &'static str {
+    match stage {
+        "triage" | "memorize" => "haiku",
+        _ => "sonnet",
+    }
+}
+
+/// Fills in the model each candidate runs on: the rules rung of the model
+/// decider. Precedence, highest first:
+/// 1. the job's own `model` option (Claude candidates only, since model
+///    names are per-provider);
+/// 2. a model the [[rules]] chain names for that candidate;
+/// 3. the first matching row of the owner's [[models]] table;
+/// 4. for Claude, the stage default (never Opus). Other agents stay unset,
+///    so their CLI picks its own default.
+pub fn resolve_models(config: &RoutingConfig, routed: Routed, inputs: &ModelInputs<'_>) -> Routed {
+    let is_claude = |c: &Candidate| {
+        config
+            .agents
+            .get(&c.agent)
+            .is_some_and(|a| a.adapter == AdapterKind::Claude)
+    };
+    let resolve = |c: Candidate| {
+        let claude = is_claude(&c);
+        let model = inputs
+            .job_model
+            .filter(|_| claude)
+            .map(str::to_owned)
+            .or(c.model)
+            .or_else(|| {
+                config
+                    .models
+                    .iter()
+                    .find(|m| m.matches(&c.agent, inputs))
+                    .map(|m| m.model.clone())
+            })
+            .or_else(|| claude.then(|| default_claude_model(inputs.stage).to_owned()));
+        Candidate {
+            agent: c.agent,
+            model,
+        }
+    };
+    Routed {
+        candidates: routed.candidates.into_iter().map(resolve).collect(),
+        skipped: routed
+            .skipped
+            .into_iter()
+            .map(|(c, s)| (resolve(c), s))
+            .collect(),
+    }
 }
 
 /// Stages the daemon routes, in pipeline order, plus the two cheap ones.
@@ -835,5 +962,152 @@ chain = [{ agent = "hermes" }]
         );
         assert!(model_known(&["x/y".to_owned()], "x/y#fast"));
         assert!(!model_known(&["x/y".to_owned()], "x/z"));
+    }
+
+    #[test]
+    fn claude_never_runs_without_a_model_and_the_job_model_wins() {
+        let builtin = RoutingConfig::builtin("claude");
+        let routed = |stage: &str, job: Option<&str>| {
+            let required = stage_capabilities(stage);
+            let r = route(
+                &builtin,
+                &RouteRequest {
+                    stage,
+                    tier: "standard",
+                    repo: None,
+                    required: &required,
+                },
+                &fold_quota(&[]),
+                0,
+            )
+            .map(|r| {
+                resolve_models(
+                    &builtin,
+                    r,
+                    &ModelInputs {
+                        stage,
+                        job_model: job,
+                        ..ModelInputs::default()
+                    },
+                )
+            });
+            r.ok()
+                .and_then(|r| r.candidates.first().and_then(|c| c.model.clone()))
+        };
+        assert_eq!(routed("implement", None).as_deref(), Some("sonnet"));
+        assert_eq!(routed("review", None).as_deref(), Some("sonnet"));
+        assert_eq!(routed("triage", None).as_deref(), Some("haiku"));
+        assert_eq!(routed("implement", Some("haiku")).as_deref(), Some("haiku"));
+        for stage in CHECKED_STAGES {
+            assert!(!default_claude_model(stage).contains("opus"), "{stage}");
+        }
+    }
+
+    #[test]
+    fn non_claude_candidates_keep_their_own_model() {
+        let config = config();
+        let required = stage_capabilities("triage");
+        let routed = route(
+            &config,
+            &RouteRequest {
+                stage: "triage",
+                tier: "standard",
+                repo: None,
+                required: &required,
+            },
+            &fold_quota(&[]),
+            0,
+        )
+        .map(|r| {
+            resolve_models(
+                &config,
+                r,
+                &ModelInputs {
+                    stage: "triage",
+                    job_model: Some("sonnet"),
+                    ..ModelInputs::default()
+                },
+            )
+        });
+        let models: Vec<_> = routed
+            .map(|r| r.candidates.into_iter().map(|c| (c.agent, c.model)).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            models,
+            vec![
+                ("agy".to_owned(), Some("gemini-flash".to_owned())),
+                ("opencode".to_owned(), Some("deepseek/chat".to_owned())),
+                ("claude".to_owned(), Some("sonnet".to_owned())),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_owner_model_table_picks_by_stage_template_and_risk() {
+        let owner = r#"
+[[models]]
+stage = "review"
+risky = false
+model = "haiku"
+
+[[models]]
+template = "investigate"
+model = "haiku"
+
+[[models]]
+risk_flag = "production"
+model = "claude-opus-5-5"
+"#;
+        let config = RoutingConfig::builtin("claude")
+            .with_owner(owner)
+            .unwrap_or_else(|_| RoutingConfig::builtin("broken"));
+        assert_eq!(config.models.len(), 3);
+        let pick = |stage: &str, template: Option<Template>, flags: &[String]| {
+            let required = stage_capabilities(stage);
+            route(
+                &config,
+                &RouteRequest {
+                    stage,
+                    tier: "standard",
+                    repo: None,
+                    required: &required,
+                },
+                &fold_quota(&[]),
+                0,
+            )
+            .ok()
+            .map(|r| {
+                resolve_models(
+                    &config,
+                    r,
+                    &ModelInputs {
+                        stage,
+                        template,
+                        risk_flags: flags,
+                        ..ModelInputs::default()
+                    },
+                )
+            })
+            .and_then(|r| r.candidates.first().and_then(|c| c.model.clone()))
+        };
+        let prod = vec!["production".to_owned()];
+        assert_eq!(pick("review", None, &[]).as_deref(), Some("haiku"));
+        assert_eq!(pick("review", None, &prod).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(pick("implement", Some(Template::Investigate), &[]).as_deref(), Some("haiku"));
+        assert_eq!(pick("implement", Some(Template::BugFix), &[]).as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn a_model_row_for_an_undefined_agent_is_a_config_error() {
+        let err = RoutingConfig::builtin("claude")
+            .with_owner("[[models]]\nagent = \"nope\"\nmodel = \"x\"\n")
+            .err();
+        assert_eq!(
+            err,
+            Some(ConfigError::UnknownModelAgent {
+                row: 0,
+                agent: "nope".to_owned()
+            })
+        );
     }
 }

@@ -7,6 +7,7 @@ export interface TriageOptions {
   max_stages?: number;
   context_hint?: string;
   risk_flags?: string[];
+  model?: string;
 }
 
 export interface OptionFields {
@@ -16,6 +17,7 @@ export interface OptionFields {
   maxStages: string;
   contextHint: string;
   riskFlags: string;
+  model: string;
 }
 
 export const emptyOptionFields: OptionFields = {
@@ -25,6 +27,7 @@ export const emptyOptionFields: OptionFields = {
   maxStages: "",
   contextHint: "",
   riskFlags: "",
+  model: "",
 };
 
 /**
@@ -50,5 +53,7 @@ export function buildOptions(f: OptionFields): TriageOptions | undefined {
     .map((x) => x.trim())
     .filter((x) => x !== "");
   if (flags.length > 0) options.risk_flags = flags;
+  const model = f.model.trim();
+  if (model !== "") options.model = model;
   return Object.keys(options).length > 0 ? options : undefined;
 }

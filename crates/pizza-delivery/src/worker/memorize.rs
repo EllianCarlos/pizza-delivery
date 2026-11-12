@@ -191,6 +191,17 @@ impl Worker<'_> {
             &quota,
             self.env.now_ms(),
         )
+        .map(|r| {
+            pizza_delivery_core::routing::resolve_models(
+                self.routing,
+                r,
+                &pizza_delivery_core::routing::ModelInputs {
+                    stage: "memorize",
+                    repo: record.repo.as_deref(),
+                    ..Default::default()
+                },
+            )
+        })
         .map_err(|e| anyhow!("routing: {e}"))?;
         let egress_log = dir.join("egress-requests.log");
         let sandbox = self.config.trust.profile_for(

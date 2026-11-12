@@ -35,6 +35,19 @@ It expects `git`, `bun`, `cargo`, `curl`, `systemctl` and `ss` on PATH (for exam
 
 Which agent runs a stage comes from a TOML routing file (`PIZZA_DELIVERY_ROUTING`, else `~/.config/pizza-delivery/routing.toml`; absent means claude only). Each `[[rules]]` entry matches on `stage`, `tier`, `repo` and `requires`, and gives an ordered `chain` of `{ agent, model }`; agents are declared under `[agents.<name>]` with an `adapter` (`claude`, `opencode`, `hermes`, `agy`) and a `command`. `quota_threshold` (0 to 1, default 0.9) skips an agent proactively once its utilization reaches it.
 
+Which model a stage runs on is decided in this order: the job's own `model` option (`--model`, or Model in the web and TUI forms; Claude only), then a model named in the `[[rules]]` chain, then the first matching row of the `[[models]]` table, then the built-in default (`haiku` for triage and memorize, `sonnet` for everything else). Claude is never started without `--model`, so the CLI's own default (which may be Opus) never applies by accident. Each `[[models]]` row may set `stage`, `template` (`full-feature`, `bug-fix`, `investigate`, `report`), `risky` (true or false), `risk_flag`, `repo` and `agent` (default `claude`), plus the `model` it picks; unset conditions match anything:
+
+```toml
+[[models]]
+stage = "review"
+risky = false
+model = "haiku"
+
+[[models]]
+risk_flag = "production"
+model = "opus"
+```
+
 The skill-driven stages (grill, spec, implement, fix, review) run on `claude`, `opencode` and `agy`: the daemon renders each stage template into one self-contained prompt, so any CLI that takes a prompt argument can follow it without installed skills. Subagents stay claude-only (other agents work tickets sequentially), and `hermes` is still limited to the cheap stages because its prompt handling is unverified.
 
 `pizza-delivery routing check` loads the file the way the daemon does and prints the resolved chain per stage and the quota threshold. It exits non-zero for a bad file (naming the file and field, for example `rules[1].chain[0].agent`) or a skill stage with no skills-capable candidate. It also warns, without failing, about models that `opencode models` or `agy models` do not list. The daemon refuses to start on the same errors.

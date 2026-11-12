@@ -16,6 +16,7 @@ test("filled fields become typed, trimmed options", () => {
       maxStages: " 3 ",
       contextHint: "  auth path ",
       riskFlags: "production, secrets,, ",
+      model: " haiku ",
     }),
   ).toEqual({
     template: "bug-fix",
@@ -23,6 +24,7 @@ test("filled fields become typed, trimmed options", () => {
     max_stages: 3,
     context_hint: "auth path",
     risk_flags: ["production", "secrets"],
+    model: "haiku",
   });
 });
 

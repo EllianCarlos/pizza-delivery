@@ -211,6 +211,7 @@ fn draw_new_job(frame: &mut Frame, form: &NewJobForm, caps: Caps, area: Rect) {
                 at(FormField::RiskFlags),
                 &g,
             ),
+            form_row("  Model", &form.model, at(FormField::Model), &g),
         ]);
     }
     if let Some(preview) = &form.preview {

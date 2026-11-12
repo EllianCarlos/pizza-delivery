@@ -63,7 +63,30 @@ impl Worker<'_> {
             &quota,
             now,
         ) {
-            Ok(routed) => routed,
+            Ok(routed) => {
+                let timeline = self.with_store(|s| s.read_timeline(&job.id))?;
+                let triage = timeline.iter().rev().find_map(|e| match &e.payload {
+                    EventPayload::TriageCompleted { triage } => Some(triage),
+                    _ => None,
+                });
+                let options = job.options.as_ref();
+                pizza_delivery_core::routing::resolve_models(
+                    self.routing,
+                    routed,
+                    &pizza_delivery_core::routing::ModelInputs {
+                        stage: &claimed.name,
+                        template: triage
+                            .map(|t| t.template)
+                            .or_else(|| options.and_then(|o| o.template)),
+                        risk_flags: triage
+                            .map(|t| t.risk_flags.as_slice())
+                            .or_else(|| options.map(|o| o.risk_flags.as_slice()))
+                            .unwrap_or(&[]),
+                        repo: job.repo.as_deref(),
+                        job_model: options.and_then(|o| o.model.as_deref()),
+                    },
+                )
+            }
             Err(e) => return Ok(Verdict::Fail(format!("routing: {e}"))),
         };
         let mut waits: Vec<i64> = routed
@@ -349,9 +372,11 @@ impl Worker<'_> {
         }
         self.append(&job.id, stage, EventPayload::AgentFinished { usage })?;
         let until = self.record_quota(claimed, candidate, &classified)?;
-        if let Some(reason) =
-            self.record_budget(claimed, &candidate.agent, actual_tokens, wall_ms)?
-        {
+        let overrun = self.record_budget(claimed, &candidate.agent, actual_tokens, wall_ms)?;
+        // A budget overrun stops further spending, but never throws away a
+        // stage that already finished: a successful output is still accepted,
+        // and settling decides whether more stages may start.
+        if let Some(reason) = overrun.filter(|_| classified.failure.is_some()) {
             return Ok(Attempt::Settled(Verdict::NeedsHuman(reason)));
         }
         Ok(match classified.failure {

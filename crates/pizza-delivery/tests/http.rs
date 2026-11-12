@@ -226,7 +226,7 @@ fn submit_accepts_and_validates_additional_parameters() -> TestResult {
         Some(&json!({
             "prompt": "fix the build",
             "repo": repo,
-            "options": {"template": "bug-fix", "max_stages": 4, "context_hint": "auth", "risk_flags": ["production"]},
+            "options": {"template": "bug-fix", "max_stages": 4, "context_hint": "auth", "risk_flags": ["production"], "model": "haiku"},
         })),
     )?;
     assert_eq!(status, 200, "{ok}");
@@ -234,6 +234,7 @@ fn submit_accepts_and_validates_additional_parameters() -> TestResult {
         json!({"max_stages": 0}),
         json!({"context_hint": "  "}),
         json!({"risk_flags": ["Not Kebab"]}),
+        json!({"model": "claude sonnet"}),
     ] {
         let (status, body) = h.http(
             "POST",
