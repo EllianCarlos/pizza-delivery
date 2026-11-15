@@ -23,7 +23,7 @@ fn a_stage_runs_to_success_with_a_valid_handoff() -> TestResult {
     assert_eq!(job["state"], "completed");
     let stages = job["stages"].as_array().ok_or("no stages")?;
     let names: Vec<_> = stages.iter().filter_map(|s| s["name"].as_str()).collect();
-    assert_eq!(names, vec!["grill", "spec", "implement", "review"]);
+    assert_eq!(names, vec!["disambiguate", "spec", "implement", "review"]);
     assert!(stages
         .iter()
         .all(|s| s["state"] == "succeeded" && s["attempt"] == 1));
@@ -119,7 +119,6 @@ fn artifacts_are_indexed_in_the_ledger_with_hashes_of_the_files_on_disk() -> Tes
             "context",
             "raw-output",
             "handoff",
-            "grill-transcript",
             "raw-output",
             "handoff",
             "spec",

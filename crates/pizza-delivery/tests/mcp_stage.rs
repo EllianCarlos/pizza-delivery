@@ -29,7 +29,7 @@ fn agent(session: &str) -> String {
         r#"#!/bin/sh
 dir=$(dirname "$PIZZA_DELIVERY_HANDOFF")
 STAGE=$(basename "$dir" | sed 's/^[0-9]*-//')
-if [ "$STAGE" = grill ]; then
+if [ "$STAGE" = disambiguate ]; then
   case "$*" in *--mcp-config*) ;; *) exit 9;; esac
   cfg="$dir/mcp.json"
   cmd=$(sed 's/.*"command":"\([^"]*\)".*/\1/' "$cfg")

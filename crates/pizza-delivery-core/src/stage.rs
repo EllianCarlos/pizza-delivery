@@ -7,7 +7,7 @@ use crate::usage::Usage;
 pub const STAGE_NAME: &str = "implement";
 
 pub const PIPELINE_STAGES: [&str; 7] = [
-    "grill",
+    "disambiguate",
     "spec",
     "investigate",
     "act",
@@ -407,14 +407,14 @@ mod tests {
     fn a_triaged_job_runs_its_plan_in_order_skipping_stages_without_a_template() {
         let mut events = vec![
             submitted(),
-            triaged(&["grill", "implement", "review", "ship"]),
+            triaged(&["disambiguate", "implement", "review", "ship"]),
         ];
         let first = next_claim(&events, 0);
         assert_eq!(
             first.map(|p| (p.n, p.name, p.existing_stage_id)),
-            Some((1, "grill".to_owned(), None))
+            Some((1, "disambiguate".to_owned(), None))
         );
-        events.extend([planned_n(3, "S1", 1, "grill"), succeeded(4, "S1")]);
+        events.extend([planned_n(3, "S1", 1, "disambiguate"), succeeded(4, "S1")]);
         assert_eq!(
             next_claim(&events, 0).map(|p| (p.n, p.name, p.attempt)),
             Some((2, "implement".to_owned(), 1))

@@ -750,7 +750,7 @@ mod tests {
         use pizza_delivery_core::budget::{SizeTier, StageEstimate};
         use pizza_delivery_core::triage::{PlannedStage, Resolution, Template, Triage};
         let job = "01JAAAAAAAAAAAAAAAAAAAAAAA";
-        let plan: Vec<PlannedStage> = ["grill", "spec", "implement", "review"]
+        let plan: Vec<PlannedStage> = ["disambiguate", "spec", "implement", "review"]
             .iter()
             .map(|n| PlannedStage {
                 name: (*n).into(),
@@ -796,7 +796,7 @@ mod tests {
                     120,
                     EventPayload::BudgetEstimated {
                         stages: vec![
-                            estimate("grill", 100),
+                            estimate("disambiguate", 100),
                             estimate("spec", 100),
                             estimate("implement", 600),
                             estimate("review", 200),
@@ -810,7 +810,7 @@ mod tests {
                 "s1",
                 EventPayload::StagePlanned {
                     n: 1,
-                    name: "grill".into(),
+                    name: "disambiguate".into(),
                 },
             ),
             staged(
@@ -848,7 +848,7 @@ mod tests {
         let lines = frame(&m, ASCII, 80, 24);
         assert!(lines[0].contains("[Pipeline]"));
         let bar = format!(
-            "G{}S{}I{}R{}",
+            "D{}S{}I{}R{}",
             "#".repeat(5),
             "+".repeat(5),
             ".".repeat(41),

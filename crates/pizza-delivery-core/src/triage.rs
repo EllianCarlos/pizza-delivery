@@ -495,9 +495,9 @@ pub fn template_name(template: Template) -> &'static str {
 }
 
 pub fn plan_for(template: Template) -> Vec<PlannedStage> {
-    let grill = stage(
-        "grill",
-        "settle open questions from context before building",
+    let disambiguate = stage(
+        "disambiguate",
+        "resolve the repository and record assumptions from context before building",
     );
     let implement = stage("implement", "make the change in the job worktree");
     let review = stage(
@@ -507,7 +507,7 @@ pub fn plan_for(template: Template) -> Vec<PlannedStage> {
     let ship = stage("ship", "push the branch and open the draft pull request");
     match template {
         Template::FullFeature => vec![
-            grill,
+            disambiguate,
             stage(
                 "spec",
                 "write the spec and task tickets the implementation follows",
@@ -516,12 +516,15 @@ pub fn plan_for(template: Template) -> Vec<PlannedStage> {
             review,
             ship,
         ],
-        Template::BugFix => vec![grill, implement, review, ship],
+        Template::BugFix => vec![disambiguate, implement, review, ship],
         Template::Report => vec![stage("investigate", "gather findings into a report")],
         Template::Action => vec![stage("act", "carry out the requested action")],
         Template::Investigate => vec![
             stage("investigate", "gather findings before deciding anything"),
-            stage("grill", "decide whether a pull request is needed"),
+            stage(
+                "disambiguate",
+                "record assumptions on whether a pull request is needed",
+            ),
             stage("implement", "make the change if the decision calls for one"),
             review,
             ship,
@@ -950,14 +953,17 @@ mod tests {
         let feature = plan_for(classify("add a dark mode toggle"));
         assert_eq!(
             names(&feature),
-            vec!["grill", "spec", "implement", "review", "ship"]
+            vec!["disambiguate", "spec", "implement", "review", "ship"]
         );
         let bug = plan_for(classify("fix the crash when the queue is empty"));
-        assert_eq!(names(&bug), vec!["grill", "implement", "review", "ship"]);
+        assert_eq!(
+            names(&bug),
+            vec!["disambiguate", "implement", "review", "ship"]
+        );
         let investigate = plan_for(classify("investigate why builds are slow and decide"));
         assert_eq!(
             names(&investigate),
-            vec!["investigate", "grill", "implement", "review", "ship"]
+            vec!["investigate", "disambiguate", "implement", "review", "ship"]
         );
         assert!(feature.iter().all(|s| !s.reason.is_empty()));
         assert!(investigate.iter().all(|s| !s.reason.is_empty()));
@@ -996,7 +1002,7 @@ mod tests {
         let amended = amend_plan(&plan, "implement", vec![stage("fix")], 5);
         assert_eq!(
             amended.as_ref().map(|p| names(p)),
-            Ok(vec!["grill", "implement", "fix", "review", "ship"])
+            Ok(vec!["disambiguate", "implement", "fix", "review", "ship"])
         );
         assert_eq!(
             amend_plan(&plan, "implement", vec![stage("a"), stage("b")], 5),
@@ -1054,7 +1060,7 @@ mod tests {
         ];
         assert_eq!(
             names(&current_plan(&events)),
-            vec!["grill", "implement", "fix", "review", "ship"]
+            vec!["disambiguate", "implement", "fix", "review", "ship"]
         );
         assert!(current_plan(&[]).is_empty());
     }
@@ -1190,7 +1196,7 @@ mod tests {
             ..opts()
         };
         let t = triage_with("build a thing", explicit("/r"), Some(&o));
-        assert_eq!(names(&t.plan), vec!["grill", "spec"]);
+        assert_eq!(names(&t.plan), vec!["disambiguate", "spec"]);
         let one = TriageOptions {
             max_stages: Some(1),
             ..opts()

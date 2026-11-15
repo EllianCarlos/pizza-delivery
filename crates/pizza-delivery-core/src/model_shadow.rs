@@ -17,7 +17,7 @@ use crate::triage::Triage;
 /// SOP used when the owner has not written one.
 pub const DEFAULT_SOP: &str = "\
 Pick the cheapest model that can finish each stage.
-1. Default to sonnet for grill, spec, implement, fix and review.
+1. Default to sonnet for disambiguate, spec, implement, fix and review.
 2. Use haiku when the job is one file, adds no new behaviour and has no risk flags.
 3. Never pick opus unless the job has risk flags.
 4. If unsure between two models, pick the cheaper one.";
@@ -338,14 +338,16 @@ mod tests {
             decider: "d".into(),
             arm: "live".into(),
             why: String::new(),
-            picks: parse_picks(r#"{"grill": "haiku", "implement": "opus", "review": "Sonnet"}"#),
+            picks: parse_picks(
+                r#"{"disambiguate": "haiku", "implement": "opus", "review": "Sonnet"}"#,
+            ),
         };
-        assert_eq!(d.live_model("grill"), Some("haiku"));
+        assert_eq!(d.live_model("disambiguate"), Some("haiku"));
         assert_eq!(d.live_model("review"), Some("sonnet"));
         assert_eq!(d.live_model("implement"), None);
         assert_eq!(d.live_model("spec"), None);
         d.arm = "shadow".into();
-        assert_eq!(d.live_model("grill"), None);
+        assert_eq!(d.live_model("disambiguate"), None);
     }
 
     #[test]

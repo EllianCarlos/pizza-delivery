@@ -43,7 +43,7 @@ fn check_prints_the_resolved_chain_per_stage_and_the_quota_threshold() -> TestRe
         "{triage}"
     );
     assert!(
-        cli.stdout.lines().any(|l| l.starts_with("grill")),
+        cli.stdout.lines().any(|l| l.starts_with("disambiguate")),
         "{}",
         cli.stdout
     );

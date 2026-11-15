@@ -25,6 +25,22 @@ impl Worker<'_> {
         std::fs::read_to_string(self.config.data_dir.join(relative)).ok()
     }
 
+    /// Assumptions recorded by the handoffs of every other stage of the job.
+    pub(super) fn earlier_assumptions(&self, events: &[Event], stage_id: &str) -> Vec<String> {
+        let handoffs: Vec<String> = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::HandoffWritten { path }
+                    if e.stage_id.as_deref() != Some(stage_id) =>
+                {
+                    self.read_data(path)
+                }
+                _ => None,
+            })
+            .collect();
+        inherited_assumptions(handoffs.iter().map(String::as_str))
+    }
+
     pub(super) fn render_prompt(
         &self,
         claimed: &Claimed,
@@ -47,6 +63,7 @@ impl Worker<'_> {
             }
             _ => None,
         });
+        let inherited = self.earlier_assumptions(&events, &claimed.stage_id);
         let artifact_dir = self.config.data_dir.join(&run.relative);
         Ok(render(
             &self.templates(),
@@ -59,6 +76,7 @@ impl Worker<'_> {
                 spec_dir: &spec_dir(&claimed.job.id),
                 previous_handoff: previous.as_deref(),
                 review_report: report.as_deref(),
+                inherited_assumptions: &inherited,
                 auto_at: self.config.gate.auto_at,
             },
         ))

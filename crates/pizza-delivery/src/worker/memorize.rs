@@ -236,6 +236,7 @@ impl Worker<'_> {
                 sandbox: sandbox.clone(),
                 egress_log: egress_log.clone(),
                 mcp_config: None,
+                max_cost_usd: None,
             };
             if agent.run(&invocation, &mut |_| {}).is_ok() {
                 ran = true;

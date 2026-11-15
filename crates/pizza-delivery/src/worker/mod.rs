@@ -8,10 +8,10 @@ use pizza_delivery_core::budget::{
     actual_overrun, estimate_for, estimate_stage, tier_for, Defaults, SizeTier,
 };
 use pizza_delivery_core::classify::{classify, Classified, Failure, RawRun};
+use pizza_delivery_core::disambiguate;
 use pizza_delivery_core::event::{Actor, Event, EventPayload};
-use pizza_delivery_core::feedback::parse_feedback;
+use pizza_delivery_core::feedback::{drop_repeats, inherited_assumptions, parse_feedback};
 use pizza_delivery_core::gate::{gate, GateDecision, GateItem, GateThresholds, Impact};
-use pizza_delivery_core::grill;
 use pizza_delivery_core::handoff::validate;
 use pizza_delivery_core::memorize::{
     contradiction_risk, decide, engram_content, engram_topic_key, job_tag, mnemon_content,
@@ -471,7 +471,8 @@ impl Worker<'_> {
         let verdict = match verdict {
             Verdict::Retry(cause, reason) => {
                 let chain = self.chain_len(job, stage, &events);
-                if pizza_delivery_core::resilience::may_retry_on_chain(
+                if pizza_delivery_core::resilience::may_retry_stage(
+                    stage,
                     cause,
                     &retry_history(&events, stage),
                     chain,

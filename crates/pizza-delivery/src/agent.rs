@@ -22,6 +22,8 @@ pub struct Invocation {
     pub sandbox: SandboxProfile,
     pub egress_log: PathBuf,
     pub mcp_config: Option<PathBuf>,
+    /// Spend cap in USD, for adapters whose CLI can enforce one.
+    pub max_cost_usd: Option<String>,
 }
 
 pub struct AgentOutput {
@@ -112,6 +114,12 @@ impl Agent for CliAgent {
                 program: self.command.to_string_lossy().into_owned(),
                 args: [
                     argv(self.kind, &inv.prompt, inv.model.as_deref()),
+                    match (self.kind, &inv.max_cost_usd) {
+                        (AdapterKind::Claude, Some(usd)) => {
+                            vec!["--max-budget-usd".to_owned(), usd.clone()]
+                        }
+                        _ => Vec::new(),
+                    },
                     match (self.kind, &inv.mcp_config) {
                         (AdapterKind::Claude, Some(path)) => {
                             vec![

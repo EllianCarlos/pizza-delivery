@@ -1404,10 +1404,10 @@ mod tests {
     fn the_preview_result_shows_in_the_form_until_the_prompt_changes() {
         let mut model = Model::new();
         press(&mut model, &[Key::Char('n'), Key::Char('a')]);
-        model.show_preview("plan: grill, spec".into());
+        model.show_preview("plan: disambiguate, spec".into());
         assert_eq!(
             form_of(&model).preview.as_deref(),
-            Some("plan: grill, spec")
+            Some("plan: disambiguate, spec")
         );
         press(&mut model, &[Key::Char('b')]);
         assert_eq!(form_of(&model).preview, None);
@@ -1416,8 +1416,8 @@ mod tests {
     #[test]
     fn a_preview_arriving_after_the_form_closed_becomes_a_notice() {
         let mut model = Model::new();
-        model.show_preview("plan: grill".into());
-        assert_eq!(model.notice(), Some("plan: grill"));
+        model.show_preview("plan: disambiguate".into());
+        assert_eq!(model.notice(), Some("plan: disambiguate"));
     }
 
     #[test]

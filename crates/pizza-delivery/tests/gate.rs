@@ -3,6 +3,15 @@ mod harness;
 use harness::{Harness, TestResult, VALID_HANDOFF_AGENT};
 
 fn agent_with(assumptions: &str, questions: &str) -> String {
+    // The disambiguate stage rejects open questions, so it keeps a clean handoff.
+    let clean_disambiguate = if questions == "none" {
+        String::new()
+    } else {
+        format!(
+            "if [ \"$STAGE\" = disambiguate ]; then\n{}echo '{{\"type\":\"result\",\"is_error\":false}}'\nexit 0\nfi\n",
+            harness::handoff_writer("disambiguate", "none", "go")
+        )
+    };
     VALID_HANDOFF_AGENT
         .replace(
             "## Assumptions\nnone",
@@ -12,6 +21,7 @@ fn agent_with(assumptions: &str, questions: &str) -> String {
             "## Open questions\nnone",
             &format!("## Open questions\n{questions}"),
         )
+        .replace("esac\n", &format!("esac\n{clean_disambiguate}"))
 }
 
 fn of_kind(h: &Harness, id: &str, kind: &str) -> TestResult<Vec<serde_json::Value>> {
@@ -99,14 +109,19 @@ fn a_stage_whose_handoff_has_no_items_records_no_feedback() -> TestResult {
 }
 
 #[test]
-fn the_prompt_template_is_recorded_as_version_two() -> TestResult {
+fn the_prompt_template_version_is_recorded() -> TestResult {
     let h = Harness::new()?;
     let id = h.submit_in_repo("do the thing")?;
     h.wait_for_end(&id)?;
 
     let invoked = of_kind(&h, &id, "agent-invoked")?;
     assert!(!invoked.is_empty());
-    assert!(invoked.iter().all(|p| p["version"] == 2));
+    assert!(invoked.iter().all(|p| p["version"]
+        == if p["template"] == "disambiguate" {
+            1
+        } else {
+            2
+        }));
     Ok(())
 }
 

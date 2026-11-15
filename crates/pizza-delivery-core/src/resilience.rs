@@ -74,6 +74,31 @@ pub fn may_retry_on_chain(cause: RetryCause, history: &[RetryCause], chain_len: 
     may_retry(cause, history)
 }
 
+/// The retry rule for a named stage. The disambiguate stage is cheap and
+/// capped, so a bad handoff is retried once with the same agent rather than
+/// escalating down the chain.
+pub fn may_retry_stage(
+    stage: &str,
+    cause: RetryCause,
+    history: &[RetryCause],
+    chain_len: usize,
+) -> bool {
+    if stage == crate::disambiguate::STAGE {
+        may_retry(cause, history)
+    } else {
+        may_retry_on_chain(cause, history, chain_len)
+    }
+}
+
+/// How many chain candidates a retried stage skips before it starts.
+pub fn start_offset(stage: &str, history: &[RetryCause]) -> usize {
+    if stage == crate::disambiguate::STAGE {
+        0
+    } else {
+        escalation(history)
+    }
+}
+
 pub fn may_retry(cause: RetryCause, history: &[RetryCause]) -> bool {
     history.len() < TOTAL_RETRY_CAP
         && history.iter().filter(|c| **c == cause).count() < cause.limit()
@@ -117,6 +142,7 @@ pub enum Tier {
 
 pub fn base_timeout(stage: &str) -> Duration {
     let minutes = match stage {
+        "disambiguate" => return Duration::from_secs(crate::disambiguate::TIMEOUT_SECS),
         "triage" => 5,
         "implement" | "fix" => 60,
         _ => 20,
@@ -126,6 +152,9 @@ pub fn base_timeout(stage: &str) -> Duration {
 
 pub fn stage_timeout(stage: &str, tier: Tier) -> Duration {
     let base = base_timeout(stage);
+    if stage == crate::disambiguate::STAGE {
+        return base;
+    }
     match tier {
         Tier::Small => base / 2,
         Tier::Medium => base,
@@ -247,6 +276,39 @@ mod tests {
         );
         assert_eq!(classify_failure("HTTP 429 rate limit"), RetryCause::Quota);
         assert_eq!(classify_failure("connection reset"), RetryCause::Transient);
+    }
+
+    #[test]
+    fn disambiguate_is_capped_at_a_minute_whatever_the_tier() {
+        for tier in [Tier::Small, Tier::Medium, Tier::Large] {
+            assert_eq!(stage_timeout("disambiguate", tier), Duration::from_secs(60));
+        }
+    }
+
+    #[test]
+    fn disambiguate_retries_a_bad_handoff_once_with_the_same_agent() {
+        let none: [RetryCause; 0] = [];
+        let once = [RetryCause::InvalidHandoff];
+        assert!(may_retry_stage(
+            "disambiguate",
+            RetryCause::InvalidHandoff,
+            &none,
+            3
+        ));
+        assert!(!may_retry_stage(
+            "disambiguate",
+            RetryCause::InvalidHandoff,
+            &once,
+            3
+        ));
+        assert!(may_retry_stage(
+            "spec",
+            RetryCause::InvalidHandoff,
+            &once,
+            3
+        ));
+        assert_eq!(start_offset("disambiguate", &once), 0);
+        assert_eq!(start_offset("spec", &once), 1);
     }
 
     #[test]
