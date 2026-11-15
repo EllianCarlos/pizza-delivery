@@ -113,6 +113,14 @@ impl Worker<'_> {
         self.parent_merged(events)?;
         match self.git.merge_readiness(worktree, url) {
             Ok(MergeReadiness::Ready) => {}
+            Ok(MergeReadiness::ReadyWithoutChecks) if local_model_wrote_code(events) => {
+                return Err(
+                    "a local model wrote the code and the repository has no CI checks; \
+                     left open for a human"
+                        .to_owned(),
+                )
+            }
+            Ok(MergeReadiness::ReadyWithoutChecks) => {}
             Ok(MergeReadiness::Blocked(reason)) => return Err(reason),
             Err(e) => return Err(format!("could not check merge readiness: {e:#}")),
         }
@@ -287,4 +295,24 @@ impl Worker<'_> {
             }
         }
     }
+}
+
+/// Whether an implement or fix stage ran on a local (Ollama) model, whose
+/// work should not merge on review alone.
+fn local_model_wrote_code(events: &[Event]) -> bool {
+    let coding: Vec<String> = pizza_delivery_core::fold_stages(events)
+        .into_iter()
+        .filter(|s| s.name == "implement" || s.name == "fix")
+        .map(|s| s.id)
+        .collect();
+    events.iter().any(|e| match &e.payload {
+        EventPayload::AgentFinished { usage } => {
+            e.stage_id.as_ref().is_some_and(|id| coding.contains(id))
+                && usage
+                    .model
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("ollama/"))
+        }
+        _ => false,
+    })
 }

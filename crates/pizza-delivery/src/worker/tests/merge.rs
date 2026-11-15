@@ -223,3 +223,39 @@ fn a_follow_up_merges_once_its_parents_pr_is_merged() -> Result<()> {
     );
     Ok(())
 }
+
+const LOCAL_IMPLEMENT: &str = r#"
+[[rules]]
+stage = "implement"
+chain = [{ agent = "claude", model = "ollama/qwen-test" }]
+"#;
+
+#[test]
+fn local_model_work_in_a_repo_without_ci_is_left_open() -> Result<()> {
+    let rig = Rig::with_chain(
+        vec![("claude", AdapterKind::Claude, vec![good(), good_review()])],
+        LOCAL_IMPLEMENT,
+    )?;
+    rig.git.no_checks.store(true, Ordering::SeqCst);
+
+    run_reviewed(&rig)?;
+
+    assert_eq!(rig.job_state()?, JobState::Completed);
+    assert!(acquire(&rig.git.merges, "merges")?.is_empty());
+    assert!(not_merged_reason(&rig)?.contains("no CI checks"));
+    Ok(())
+}
+
+#[test]
+fn cloud_model_work_in_a_repo_without_ci_still_merges() -> Result<()> {
+    let rig = reviewed_rig()?;
+    rig.git.no_checks.store(true, Ordering::SeqCst);
+
+    run_reviewed(&rig)?;
+
+    assert_eq!(
+        *acquire(&rig.git.merges, "merges")?,
+        vec![PR_URL.to_owned()]
+    );
+    Ok(())
+}

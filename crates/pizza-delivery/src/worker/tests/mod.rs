@@ -49,6 +49,7 @@ struct FakeGit {
     merge_fails: AtomicBool,
     ready_checks: Mutex<Vec<String>>,
     merges: Mutex<Vec<String>>,
+    no_checks: AtomicBool,
 }
 
 impl Git for FakeGit {
@@ -59,6 +60,7 @@ impl Git for FakeGit {
         }
         Ok(match acquire(&self.blocked, "blocked")?.clone() {
             Some(reason) => MergeReadiness::Blocked(reason),
+            None if self.no_checks.load(Ordering::SeqCst) => MergeReadiness::ReadyWithoutChecks,
             None => MergeReadiness::Ready,
         })
     }

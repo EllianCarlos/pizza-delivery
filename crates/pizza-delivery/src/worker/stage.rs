@@ -104,11 +104,16 @@ impl Worker<'_> {
             .collect();
         let mut note = stored_note(&dir, claimed.attempt);
         let mut last_error: Option<String> = None;
-        let history = pizza_delivery_core::resilience::retry_history(
-            &self.with_store(|s| s.read_timeline(&job.id))?,
-            &claimed.stage_id,
-        );
-        let start = pizza_delivery_core::resilience::escalation(&history)
+        let events = self.with_store(|s| s.read_timeline(&job.id))?;
+        let history = pizza_delivery_core::resilience::retry_history(&events, &claimed.stage_id);
+        // Each fix round after the first starts one agent further down the
+        // chain too: review rejected the previous round's work.
+        let earlier_rounds = if claimed.name == "fix" {
+            pizza_delivery_core::fix_rounds(&events).saturating_sub(1) as usize
+        } else {
+            0
+        };
+        let start = (pizza_delivery_core::resilience::escalation(&history) + earlier_rounds)
             .min(routed.candidates.len().saturating_sub(1));
         for (position, candidate) in routed.candidates.iter().enumerate().skip(start) {
             match self.try_candidate(claimed, &run, position, candidate, note.as_deref())? {
