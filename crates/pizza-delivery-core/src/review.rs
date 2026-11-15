@@ -25,33 +25,39 @@ pub fn parse_report(text: &str) -> Result<Vec<Finding>, ReviewError> {
         .iter()
         .find(|(title, _)| title == "findings")
         .ok_or(ReviewError::MissingFindings)?;
-    body.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .filter(|l| {
-            !matches!(
-                l.trim_end_matches('.').to_lowercase().as_str(),
-                "none" | "- none"
-            )
-        })
-        .map(|line| {
-            let bullet = line.strip_prefix("- ").unwrap_or(line);
-            let lower = bullet.to_lowercase();
-            if let Some(rest) = lower.strip_prefix("[non-blocking]") {
-                Ok(Finding {
-                    blocking: false,
-                    text: bullet[bullet.len() - rest.len()..].trim().to_owned(),
-                })
-            } else if let Some(rest) = lower.strip_prefix("[blocking]") {
-                Ok(Finding {
-                    blocking: true,
-                    text: bullet[bullet.len() - rest.len()..].trim().to_owned(),
-                })
-            } else {
-                Err(ReviewError::Unclassified(bullet.to_owned()))
+    let mut findings: Vec<Finding> = Vec::new();
+    for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if matches!(
+            line.trim_end_matches('.').to_lowercase().as_str(),
+            "none" | "- none" | "* none"
+        ) {
+            continue;
+        }
+        let Some(bullet) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) else {
+            // Prose under Findings is commentary on the previous finding, or
+            // on the review as a whole; only bullets are findings.
+            if let Some(last) = findings.last_mut() {
+                last.text.push(' ');
+                last.text.push_str(line);
             }
-        })
-        .collect()
+            continue;
+        };
+        let lower = bullet.to_lowercase();
+        if let Some(rest) = lower.strip_prefix("[non-blocking]") {
+            findings.push(Finding {
+                blocking: false,
+                text: bullet[bullet.len() - rest.len()..].trim().to_owned(),
+            });
+        } else if let Some(rest) = lower.strip_prefix("[blocking]") {
+            findings.push(Finding {
+                blocking: true,
+                text: bullet[bullet.len() - rest.len()..].trim().to_owned(),
+            });
+        } else {
+            return Err(ReviewError::Unclassified(bullet.to_owned()));
+        }
+    }
+    Ok(findings)
 }
 
 pub fn blocking(findings: &[Finding]) -> Vec<&Finding> {
@@ -113,6 +119,19 @@ mod tests {
                 finding(false, "rename helper")
             ])
         );
+    }
+
+    #[test]
+    fn star_bullets_and_trailing_prose_are_accepted() {
+        let report = "## Findings\n* [blocking] fmt fails\n  on two files\n- [non-blocking] nit\n\nThe rest matches the spec.\n\n## Summary\nok\n";
+        assert_eq!(
+            parse_report(report),
+            Ok(vec![
+                finding(true, "fmt fails on two files"),
+                finding(false, "nit The rest matches the spec.")
+            ])
+        );
+        assert_eq!(parse_report("## Findings\nAll good.\n"), Ok(vec![]));
     }
 
     #[test]

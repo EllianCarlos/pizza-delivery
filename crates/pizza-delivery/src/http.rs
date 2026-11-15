@@ -691,8 +691,42 @@ fn artifact(api: &Api, reference: &str, index: &str) -> Reply {
             "path": path,
             "content": String::from_utf8_lossy(&bytes),
         })),
-        Err(e) => bad(ErrorKind::NotFound, format!("artifact unreadable: {e}")),
+        Err(e) => match removed_worktree_file(&api.data_dir, &path) {
+            Some(content) => ok(&serde_json::json!({
+                "path": path,
+                "content": content,
+                "note": "removed from the worktree; showing the last committed version",
+            })),
+            None => bad(ErrorKind::NotFound, format!("artifact unreadable: {e}")),
+        },
     }
+}
+
+/// The last committed content of a repo file recorded as an artifact under
+/// `worktrees/<repo>/<job>/...` that a later stage deleted (a job that
+/// removes spec docs removes its own specs too).
+pub(crate) fn removed_worktree_file(data_dir: &std::path::Path, path: &str) -> Option<String> {
+    let mut parts = path.splitn(4, '/');
+    let (root, repo, job, rel) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if root != "worktrees" {
+        return None;
+    }
+    let worktree = data_dir.join(root).join(repo).join(job);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(&worktree)
+            .args(args)
+            .output()
+            .ok()?;
+        out.status.success().then_some(out.stdout)
+    };
+    let deleted_in = git(&["log", "-1", "--format=%H", "--diff-filter=D", "--", rel])?;
+    let commit = String::from_utf8_lossy(&deleted_in).trim().to_owned();
+    if commit.is_empty() {
+        return None;
+    }
+    let content = git(&["show", &format!("{commit}^:{rel}")])?;
+    Some(String::from_utf8_lossy(&content).into_owned())
 }
 
 fn events(api: &Api, req: &Req) -> Reply {

@@ -291,7 +291,17 @@ impl Git for SystemGit {
         if !self.is_dirty(worktree)? {
             return Ok(None);
         }
-        run(worktree, &["add", "-A"])?;
+        // Agent harness state (crash locks, session claims) is never work.
+        let mut add = vec!["add", "-A", "--", "."];
+        let excludes: Vec<String> = HARNESS_STATE
+            .iter()
+            .map(|dir| format!(":(exclude){dir}"))
+            .collect();
+        add.extend(excludes.iter().map(String::as_str));
+        run(worktree, &add)?;
+        if run(worktree, &["diff", "--cached", "--name-only"])?.is_empty() {
+            return Ok(None);
+        }
         run(
             worktree,
             &[
@@ -335,6 +345,27 @@ impl Git for SystemGit {
     }
 
     fn push(&self, worktree: &Path, remote: &str, branch: &str) -> Result<String> {
+        // Only commits the remote lacks: state already on a PR branch must
+        // not block later jobs from pushing their own work.
+        let pending = run(
+            worktree,
+            &[
+                "log",
+                "--name-only",
+                "--format=",
+                "HEAD",
+                "--not",
+                &format!("--remotes={remote}"),
+            ],
+        )?;
+        let files: Vec<String> = pending.lines().map(str::to_owned).collect();
+        let state = harness_state_files(&files);
+        if !state.is_empty() {
+            return Err(anyhow!(
+                "refusing to push agent harness state: {}",
+                state.join(", ")
+            ));
+        }
         run(worktree, &["push", "--set-upstream", remote, branch])?;
         Ok(format!("{remote}/{branch}"))
     }
@@ -347,6 +378,12 @@ impl Git for SystemGit {
         labels: &[&str],
     ) -> Result<String> {
         let mut args = vec!["pr", "create", "--draft", "--title", title, "--body", body];
+        // A job on an existing PR pushes its own local branch to the PR's
+        // branch under another name; gh only finds the remote branch by name.
+        let head = push_target(worktree);
+        if let Some(head) = head.as_deref() {
+            args.extend(["--head", head]);
+        }
         for label in labels {
             let _ = gh(worktree, &["label", "create", label, "--force"]);
             args.extend(["--label", label]);
@@ -469,6 +506,30 @@ impl Git for SystemGit {
         gh(worktree, &["pr", "merge", pr_url, "--merge"])?;
         Ok(())
     }
+}
+
+/// Directories agent harnesses write into the worktree; never committed or shipped.
+pub const HARNESS_STATE: &[&str] = &[".opencode"];
+
+/// The changed files that are harness state and must not be pushed.
+pub fn harness_state_files(files: &[String]) -> Vec<&str> {
+    files
+        .iter()
+        .map(String::as_str)
+        .filter(|f| {
+            HARNESS_STATE
+                .iter()
+                .any(|dir| f == dir || f.starts_with(&format!("{dir}/")))
+        })
+        .collect()
+}
+
+/// The remote branch the worktree's branch pushes to, from its upstream.
+fn push_target(worktree: &Path) -> Option<String> {
+    let upstream = run(worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]).ok()?;
+    upstream
+        .split_once('/')
+        .map(|(_, branch)| branch.to_owned())
 }
 
 /// The URL of the PR that `gh pr create` refused to duplicate, if that is why it failed.
@@ -757,5 +818,118 @@ mod tests {
             vec!["flake.nix"]
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wip_tests {
+    use super::*;
+
+    type TestResult = Result<()>;
+
+    fn repo() -> Result<tempfile::TempDir> {
+        let dir = tempfile::tempdir()?;
+        let d = dir.path();
+        run(d, &["init", "-q", "-b", "main"])?;
+        run(d, &["config", "user.email", "t@t"])?;
+        run(d, &["config", "user.name", "t"])?;
+        std::fs::write(d.join("a.txt"), "a")?;
+        run(d, &["add", "."])?;
+        run(d, &["commit", "-q", "-m", "init"])?;
+        Ok(dir)
+    }
+
+    #[test]
+    fn wip_commit_leaves_harness_state_out() -> TestResult {
+        let dir = repo()?;
+        let d = dir.path();
+        std::fs::create_dir_all(d.join(".opencode/goals"))?;
+        std::fs::write(d.join(".opencode/goals/state.json"), "{}")?;
+        std::fs::write(d.join("b.txt"), "b")?;
+        assert!(SystemGit.commit_wip(d, "wip")?.is_some());
+        assert_eq!(
+            run(d, &["show", "--name-only", "--format=", "HEAD"])?,
+            "b.txt"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wip_commit_of_only_harness_state_commits_nothing() -> TestResult {
+        let dir = repo()?;
+        let d = dir.path();
+        std::fs::create_dir_all(d.join(".opencode"))?;
+        std::fs::write(d.join(".opencode/x"), "x")?;
+        assert_eq!(SystemGit.commit_wip(d, "wip")?, None);
+        assert_eq!(run(d, &["rev-list", "--count", "HEAD"])?, "1");
+        Ok(())
+    }
+
+    #[test]
+    fn push_target_is_the_upstream_branch_name_not_the_local_one() -> TestResult {
+        let dir = repo()?;
+        let d = dir.path();
+        run(d, &["checkout", "-q", "-b", "pizza/job"])?;
+        run(d, &["remote", "add", "origin", "/nowhere"])?;
+        run(d, &["update-ref", "refs/remotes/origin/pizza/pr", "HEAD"])?;
+        run(d, &["config", "branch.pizza/job.remote", "origin"])?;
+        run(
+            d,
+            &["config", "branch.pizza/job.merge", "refs/heads/pizza/pr"],
+        )?;
+        assert_eq!(push_target(d).as_deref(), Some("pizza/pr"));
+        Ok(())
+    }
+
+    #[test]
+    fn push_refuses_unpushed_harness_state_but_not_already_pushed() -> TestResult {
+        let dir = repo()?;
+        let d = dir.path();
+        let bare = tempfile::tempdir()?;
+        run(bare.path(), &["init", "-q", "--bare", "-b", "main"])?;
+        let url = bare.path().to_string_lossy().into_owned();
+        run(d, &["remote", "add", "origin", &url])?;
+        std::fs::create_dir_all(d.join(".opencode"))?;
+        std::fs::write(d.join(".opencode/x"), "x")?;
+        run(d, &["add", "-f", "."])?;
+        run(d, &["commit", "-q", "-m", "state"])?;
+        assert!(SystemGit.push(d, "origin", "main").is_err());
+        // Once the remote has it (an earlier mistake), new work still ships.
+        run(d, &["push", "-q", "origin", "main"])?;
+        std::fs::write(d.join("c.txt"), "c")?;
+        run(d, &["add", "c.txt"])?;
+        run(d, &["commit", "-q", "-m", "work"])?;
+        assert_eq!(SystemGit.push(d, "origin", "main")?, "origin/main");
+        Ok(())
+    }
+
+    #[test]
+    fn removed_spec_artifacts_stay_readable() -> TestResult {
+        let data = tempfile::tempdir()?;
+        let wt = data.path().join("worktrees/repo/job");
+        std::fs::create_dir_all(&wt)?;
+        run(&wt, &["init", "-q", "-b", "main"])?;
+        run(&wt, &["config", "user.email", "t@t"])?;
+        run(&wt, &["config", "user.name", "t"])?;
+        std::fs::create_dir_all(wt.join("docs"))?;
+        std::fs::write(wt.join("docs/spec.md"), "spec body")?;
+        run(&wt, &["add", "."])?;
+        run(&wt, &["commit", "-q", "-m", "add"])?;
+        run(&wt, &["rm", "-q", "docs/spec.md"])?;
+        run(&wt, &["commit", "-q", "-m", "rm"])?;
+        let got =
+            crate::http::removed_worktree_file(data.path(), "worktrees/repo/job/docs/spec.md");
+        assert_eq!(got.as_deref(), Some("spec body"));
+        Ok(())
+    }
+
+    #[test]
+    fn harness_state_files_are_detected() {
+        let files = vec![
+            "src/a.rs".to_owned(),
+            ".opencode/goals/state.json".to_owned(),
+            ".opencodeish/x".to_owned(),
+        ];
+        assert_eq!(harness_state_files(&files), [".opencode/goals/state.json"]);
     }
 }
