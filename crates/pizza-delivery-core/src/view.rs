@@ -85,6 +85,88 @@ pub struct JobDetailView {
     pub stages: Vec<StageView>,
     pub feedback: Vec<InboxEntry>,
     pub events: Vec<EventView>,
+    pub pull_requests: Vec<PullRequestView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum PrState {
+    Open,
+    Merged,
+    NotMerged,
+}
+
+/// One pull request a job opened, folded from the ledger and unique by URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PullRequestView {
+    pub url: String,
+    pub state: PrState,
+    /// Why it was not merged; only set while `state` is `not-merged`.
+    pub reason: Option<String>,
+    pub branch: Option<String>,
+    /// Whether CI was ever red on it (a fix round may have cleared it since).
+    pub ci_red: bool,
+}
+
+/// The pull requests of one job in the order they first appeared. The latest
+/// event about a URL decides its state; a red CI sticks once seen.
+pub fn pull_requests(events: &[Event]) -> Vec<PullRequestView> {
+    let mut prs: Vec<PullRequestView> = Vec::new();
+    let mut last: Option<usize> = None;
+    let slot = |prs: &mut Vec<PullRequestView>, url: &str| -> usize {
+        let at = prs.iter().position(|p| p.url == url).unwrap_or_else(|| {
+            prs.push(PullRequestView {
+                url: url.to_owned(),
+                state: PrState::Open,
+                reason: None,
+                branch: None,
+                ci_red: false,
+            });
+            prs.len() - 1
+        });
+        at
+    };
+    for event in events {
+        match &event.payload {
+            EventPayload::SandboxAudit {
+                pr_url: Some(url),
+                pushed_ref,
+                ..
+            } => {
+                let at = slot(&mut prs, url);
+                if pushed_ref.is_some() {
+                    prs[at].branch = pushed_ref.clone();
+                }
+                last = Some(at);
+            }
+            EventPayload::PrMerged { pr_url } => {
+                let at = slot(&mut prs, pr_url);
+                prs[at].state = PrState::Merged;
+                prs[at].reason = None;
+                last = Some(at);
+            }
+            EventPayload::PrNotMerged {
+                pr_url: Some(url),
+                reason,
+            } => {
+                let at = slot(&mut prs, url);
+                prs[at].state = PrState::NotMerged;
+                prs[at].reason = Some(reason.clone());
+                prs[at].ci_red |= reason.starts_with("checks failing");
+                last = Some(at);
+            }
+            // The CI fix round records its failure report right after the PR.
+            EventPayload::ArtifactRecorded { kind, .. } if kind == "ci-failure" => {
+                if let Some(at) = last {
+                    prs[at].ci_red = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    prs
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -240,6 +322,7 @@ pub fn job_detail(job: JobView, events: &[(u64, Event)], inbox: &[InboxEntry]) -
         plan: plan_view(&plain),
         stages: fold_stages(&plain),
         events: events.iter().map(|(c, e)| event_view(*c, e)).collect(),
+        pull_requests: pull_requests(&plain),
         job,
     }
 }
@@ -271,6 +354,24 @@ pub fn job_full(job: JobView, events: &[(u64, Event)], inbox: &[InboxEntry]) -> 
 
 pub fn quota_panel(agents: Vec<QuotaView>, now_ms: i64) -> QuotaPanelView {
     QuotaPanelView { agents, now_ms }
+}
+
+impl PullRequestView {
+    /// The state as one phrase: `open`, `merged`, or `not merged: <reason>`,
+    /// followed by `, CI was red` when it was.
+    pub fn summary(&self) -> String {
+        let state = match (&self.state, &self.reason) {
+            (PrState::Open, _) => "open".to_owned(),
+            (PrState::Merged, _) => "merged".to_owned(),
+            (PrState::NotMerged, Some(reason)) => format!("not merged: {reason}"),
+            (PrState::NotMerged, None) => "not merged".to_owned(),
+        };
+        if self.ci_red {
+            format!("{state}, CI was red")
+        } else {
+            state
+        }
+    }
 }
 
 #[cfg(test)]
@@ -478,5 +579,70 @@ mod tests {
         let json = serde_json::to_value(&full).unwrap_or_default();
         assert!(json["job"].is_object() && json["stages"].is_array());
         assert_eq!(json["artifacts"][1]["kind"], "spec");
+    }
+
+    fn audit(url: Option<&str>, branch: Option<&str>) -> EventPayload {
+        EventPayload::SandboxAudit {
+            profile_hash: String::new(),
+            mounts: vec![],
+            egress_allowlist: vec![],
+            blocked_requests: vec![],
+            mcp_activations: vec![],
+            diff_policy_result: None,
+            pushed_ref: branch.map(Into::into),
+            pr_url: url.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn pull_requests_dedupe_by_url_and_follow_the_latest_state() {
+        let payloads = [
+            audit(Some("https://x/pull/1"), Some("pd/j1")),
+            EventPayload::PrNotMerged {
+                pr_url: Some("https://x/pull/1".into()),
+                reason: "checks failing: build".into(),
+            },
+            EventPayload::ArtifactRecorded {
+                kind: "ci-failure".into(),
+                path: "p".into(),
+                sha256: "ab".into(),
+            },
+            audit(Some("https://x/pull/1"), Some("pd/j1")),
+            EventPayload::PrMerged {
+                pr_url: "https://x/pull/1".into(),
+            },
+            audit(Some("https://x/pull/2"), Some("pd/j1-b")),
+            EventPayload::PrNotMerged {
+                pr_url: Some("https://x/pull/2".into()),
+                reason: "policy forbids merging".into(),
+            },
+            audit(None, Some("pd/none")),
+        ];
+        let events: Vec<Event> = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| event(i as u64 + 1, p))
+            .collect();
+        let prs = pull_requests(&events);
+        assert_eq!(prs.len(), 2);
+        assert_eq!(prs[0].url, "https://x/pull/1");
+        assert_eq!(prs[0].state, PrState::Merged);
+        assert_eq!(prs[0].reason, None);
+        assert_eq!(prs[0].branch.as_deref(), Some("pd/j1"));
+        assert!(prs[0].ci_red);
+        assert_eq!(prs[1].state, PrState::NotMerged);
+        assert_eq!(prs[1].reason.as_deref(), Some("policy forbids merging"));
+        assert!(!prs[1].ci_red);
+    }
+
+    #[test]
+    fn a_pull_request_with_no_outcome_yet_is_open() {
+        let events = [event(1, audit(Some("https://x/pull/3"), None))];
+        let prs = pull_requests(&events);
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].state, PrState::Open);
+        assert!(pull_requests(&[]).is_empty());
+        let detail = job_detail(job("j1", JobState::Running), &[(1, events[0].clone())], &[]);
+        assert_eq!(detail.pull_requests, prs);
     }
 }

@@ -457,3 +457,56 @@ fn stream_resumes_from_last_event_id_and_delivers_live_events() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn job_detail_lists_the_pull_requests_the_ledger_recorded() -> TestResult {
+    let h = harness()?;
+    let id = finished_job(&h)?;
+    // The harness's fake `gh` already opened one pull request for the job.
+    let shipped = h.get(&format!("/api/jobs/{id}"))?["pull_requests"].clone();
+    assert_eq!(shipped.as_array().map(Vec::len), Some(1));
+    assert_eq!(shipped[0]["url"], "https://github.com/o/r/pull/1");
+    assert!(shipped[0]["branch"].is_string());
+
+    let conn = h.raw_db()?;
+    let seed = |n: u32, kind: &str, payload: serde_json::Value| -> TestResult {
+        conn.execute(
+            "INSERT INTO events (id, job_id, stage_id, seq, ts_ms, actor, kind, payload)
+             SELECT ?1, ?2, NULL, COALESCE(MAX(seq), 0) + 1, 1, 'daemon', ?3, ?4
+             FROM events WHERE job_id = ?2",
+            rusqlite::params![format!("PRSEED{n}"), id, kind, payload.to_string()],
+        )?;
+        Ok(())
+    };
+    let audit = |url: &str| {
+        json!({
+            "profile_hash": "h", "mounts": [], "egress_allowlist": [],
+            "blocked_requests": [], "mcp_activations": [],
+            "diff_policy_result": null,
+            "pushed_ref": "origin/pizza/x", "pr_url": url,
+        })
+    };
+    let url = "https://github.com/o/r/pull/7";
+    seed(1, "sandbox-audit", audit(url))?;
+    seed(
+        2,
+        "pr-not-merged",
+        json!({"pr_url": url, "reason": "checks failing: build"}),
+    )?;
+    seed(3, "sandbox-audit", audit(url))?;
+    seed(4, "pr-merged", json!({"pr_url": url}))?;
+
+    for path in [format!("/api/jobs/{id}"), format!("/api/jobs/{id}/detail")] {
+        let detail = h.get(&path)?;
+        let prs = detail["pull_requests"]
+            .as_array()
+            .ok_or("no pull_requests")?;
+        assert_eq!(prs.len(), 2, "{path}");
+        assert_eq!(prs[0]["url"], "https://github.com/o/r/pull/1");
+        assert_eq!(prs[1]["url"], url);
+        assert_eq!(prs[1]["state"], "merged");
+        assert_eq!(prs[1]["branch"], "origin/pizza/x");
+        assert_eq!(prs[1]["ci_red"], true);
+    }
+    Ok(())
+}

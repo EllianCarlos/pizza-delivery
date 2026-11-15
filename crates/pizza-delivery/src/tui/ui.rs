@@ -505,6 +505,19 @@ fn draw_detail(frame: &mut Frame, model: &Model, caps: Caps, area: Rect) {
             &g,
         )));
     }
+    // Full URLs, never clipped, so they can be selected and copied.
+    for pr in &detail.pull_requests {
+        lines.push(Line::raw(format!("PR {}", pr.url)));
+        let branch = pr
+            .branch
+            .as_deref()
+            .map_or(String::new(), |b| format!(" [{b}]"));
+        lines.push(Line::raw(fit(
+            &format!("    {}{branch}", pr.summary()),
+            inner,
+            &g,
+        )));
+    }
     for entry in detail
         .feedback
         .iter()
@@ -864,6 +877,31 @@ mod tests {
         let detail_title = lines.iter().position(|l| l.starts_with("+Detail 01JA"));
         assert!(detail_title.is_some(), "{lines:#?}");
         assert!(lines.iter().any(|l| l.contains("! high question")));
+    }
+
+    #[test]
+    fn detail_shows_the_full_pull_request_url_and_its_state() {
+        let url = "https://github.com/org/repo/pull/12345";
+        let mut m = model(&[
+            submitted(1, "01JAAAAAAAAAAAAAAAAAAAAAAA", "fix the flaky build", 100),
+            (
+                2,
+                ev(
+                    2,
+                    "01JAAAAAAAAAAAAAAAAAAAAAAA",
+                    2,
+                    0,
+                    EventPayload::PrMerged { pr_url: url.into() },
+                ),
+            ),
+        ]);
+        m.handle_key(Key::Enter);
+        let lines = frame(&m, ASCII, 120, 24);
+        assert!(
+            lines.iter().any(|l| l.contains(&format!("PR {url}"))),
+            "{lines:#?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("merged")));
     }
 
     #[test]

@@ -4,6 +4,8 @@ import type { JobView } from "./generated/JobView";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { StageView } from "./generated/StageView";
 import {
+  prLinkOf,
+  prStateText,
   artifactsOf,
   eventFamilies,
   eventFamily,
@@ -105,6 +107,7 @@ test("a lane has one segment per planned stage in plan order, with run state whe
       { id: "S2", n: 2, name: "implement", state: "running", attempt: 1, usage: null },
     ],
     feedback: [],
+    pull_requests: [],
     events: [],
   } satisfies JobDetailView;
   expect(segmentsOf(detail)).toEqual([
@@ -140,6 +143,7 @@ const detailOf = (stages: StageView[], events: EventView[]): JobDetailView => ({
   plan: { stages: [] },
   stages,
   feedback: [],
+  pull_requests: [],
   events,
 });
 
@@ -272,4 +276,19 @@ test("problems list each failure, retry and fallback with its reason and stage",
     ["grill", "stage-failed", "worktree: boom"],
     ["-", "job-failed", "worktree: boom"],
   ]);
+});
+
+test("a jobs list row links the latest pull request, none when there is none", () => {
+  const pr = (url: string) => ({ url, state: "open" as const, reason: null, branch: null, ci_red: false });
+  expect(prLinkOf(undefined)).toBeNull();
+  expect(prLinkOf({ pull_requests: [] })).toBeNull();
+  expect(prLinkOf({ pull_requests: [pr("https://x/pull/1"), pr("https://x/pull/2")] })).toBe("https://x/pull/2");
+});
+
+test("pull request state reads as one phrase", () => {
+  const base = { url: "u", branch: null, ci_red: false };
+  expect(prStateText({ ...base, state: "merged", reason: null })).toBe("merged");
+  expect(prStateText({ ...base, state: "not-merged", reason: "policy", ci_red: true })).toBe(
+    "not merged: policy, CI was red",
+  );
 });

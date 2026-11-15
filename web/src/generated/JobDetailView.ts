@@ -3,6 +3,7 @@ import type { EventView } from "./EventView";
 import type { InboxEntry } from "./InboxEntry";
 import type { JobView } from "./JobView";
 import type { PlanView } from "./PlanView";
+import type { PullRequestView } from "./PullRequestView";
 import type { StageView } from "./StageView";
 
-export type JobDetailView = { job: JobView, plan: PlanView, stages: Array<StageView>, feedback: Array<InboxEntry>, events: Array<EventView>, };
+export type JobDetailView = { job: JobView, plan: PlanView, stages: Array<StageView>, feedback: Array<InboxEntry>, events: Array<EventView>, pull_requests: Array<PullRequestView>, };

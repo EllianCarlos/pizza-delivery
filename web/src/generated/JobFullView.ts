@@ -4,9 +4,10 @@ import type { EventView } from "./EventView";
 import type { InboxEntry } from "./InboxEntry";
 import type { JobView } from "./JobView";
 import type { PlanView } from "./PlanView";
+import type { PullRequestView } from "./PullRequestView";
 import type { StageView } from "./StageView";
 
 /**
  * Everything the job page needs in one response: the job detail plus its artifact list.
  */
-export type JobFullView = { artifacts: Array<ArtifactView>, job: JobView, plan: PlanView, stages: Array<StageView>, feedback: Array<InboxEntry>, events: Array<EventView>, };
+export type JobFullView = { artifacts: Array<ArtifactView>, job: JobView, plan: PlanView, stages: Array<StageView>, feedback: Array<InboxEntry>, events: Array<EventView>, pull_requests: Array<PullRequestView>, };

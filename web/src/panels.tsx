@@ -5,6 +5,7 @@ import Button from "@cloudscape-design/components/button";
 import Container from "@cloudscape-design/components/container";
 import Header from "@cloudscape-design/components/header";
 import Multiselect from "@cloudscape-design/components/multiselect";
+import Link from "@cloudscape-design/components/link";
 import Input from "@cloudscape-design/components/input";
 import Select from "@cloudscape-design/components/select";
 import SpaceBetween from "@cloudscape-design/components/space-between";
@@ -25,6 +26,7 @@ import {
   formatDuration,
   formatTokens,
   jobSummary,
+  prStateText,
   problemsOf,
   stageRows,
   toolCallsOf,
@@ -85,6 +87,28 @@ export function DetailPanel({
         {" | "}
         <b>Models</b> {summary.models.length > 0 ? summary.models.join(", ") : "-"}
       </Box>
+      {detail.pull_requests.length > 0 && (
+        <Table
+          variant="embedded"
+          header={<Header variant="h3">Pull requests</Header>}
+          items={detail.pull_requests}
+          trackBy="url"
+          columnDefinitions={[
+            {
+              id: "url",
+              header: "Pull request",
+              cell: (pr) => (
+                <Link href={pr.url} external>
+                  {pr.url}
+                </Link>
+              ),
+            },
+            { id: "state", header: "State", cell: (pr) => prStateText(pr) },
+            { id: "branch", header: "Branch", cell: (pr) => pr.branch ?? "-" },
+            { id: "ci", header: "CI", cell: (pr) => (pr.ci_red ? "was red" : "ok") },
+          ]}
+        />
+      )}
       {stuck && lastProblem && (
         <Alert type="error" header={`Stopped at ${lastProblem.stage}: ${lastProblem.kind}`}>
           {lastProblem.reason}
