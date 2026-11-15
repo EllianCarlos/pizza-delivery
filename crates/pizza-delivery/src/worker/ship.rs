@@ -57,18 +57,18 @@ impl Worker<'_> {
         &self,
         job: &JobId,
         events: &[Event],
-    ) -> Result<std::result::Result<(), String>> {
+    ) -> Result<std::result::Result<Delivery, String>> {
         let triaged = events
             .iter()
             .any(|e| matches!(e.payload, EventPayload::TriageCompleted { .. }));
         if !triaged {
-            return Ok(Ok(()));
+            return Ok(Ok(Delivery::Done));
         }
         if current_plan(events).iter().any(|s| s.name == "ship") {
             self.ship(job, events)
         } else {
             self.report(job, events)?;
-            Ok(Ok(()))
+            Ok(Ok(Delivery::Done))
         }
     }
 
@@ -99,6 +99,7 @@ impl Worker<'_> {
         policy: &DiffPolicy,
         worktree: &Path,
         url: &str,
+        readiness: Result<MergeReadiness>,
     ) -> std::result::Result<(), String> {
         if !self.config.auto_merge {
             return Err("auto-merge is disabled".to_owned());
@@ -111,7 +112,7 @@ impl Worker<'_> {
         }
         self.review_passed(events)?;
         self.parent_merged(events)?;
-        match self.git.merge_readiness(worktree, url) {
+        match readiness {
             Ok(MergeReadiness::Ready) => {}
             Ok(MergeReadiness::ReadyWithoutChecks) if local_model_wrote_code(events) => {
                 return Err(
@@ -188,7 +189,7 @@ impl Worker<'_> {
         &self,
         job: &JobId,
         events: &[Event],
-    ) -> Result<std::result::Result<(), String>> {
+    ) -> Result<std::result::Result<Delivery, String>> {
         let Some(found) = self.find_job(job)? else {
             return Ok(Err("ship: job vanished".to_owned()));
         };
@@ -275,19 +276,36 @@ impl Worker<'_> {
         ) {
             Ok(url) => {
                 audit(Some(pushed), Some(url.clone()))?;
-                let outcome = self.merge_outcome(events, &policy, &worktree, &url);
+                // Always wait for every automatic check, whether or not the
+                // PR is eligible to merge: a red CI must not look like a
+                // finished job.
+                let readiness = self.git.merge_readiness(&worktree, &url);
+                let failing = match &readiness {
+                    Ok(MergeReadiness::Blocked(reason)) if reason.starts_with("checks failing") => {
+                        Some(reason.clone())
+                    }
+                    _ => None,
+                };
+                let outcome = self.merge_outcome(events, &policy, &worktree, &url, readiness);
                 self.append(
                     job,
                     None,
                     match outcome {
-                        Ok(()) => EventPayload::PrMerged { pr_url: url },
+                        Ok(()) => EventPayload::PrMerged {
+                            pr_url: url.clone(),
+                        },
                         Err(reason) => EventPayload::PrNotMerged {
-                            pr_url: Some(url),
+                            pr_url: Some(url.clone()),
                             reason,
                         },
                     },
                 )?;
-                Ok(Ok(()))
+                Ok(Ok(match failing {
+                    Some(reason) => Delivery::NeedsHuman(format!(
+                        "CI is red on {url} ({reason}); the PR is open, fix it or the checks"
+                    )),
+                    None => Delivery::Done,
+                }))
             }
             Err(e) => {
                 audit(Some(pushed), None)?;
@@ -295,6 +313,13 @@ impl Worker<'_> {
             }
         }
     }
+}
+
+/// How a job's delivery ended.
+pub(super) enum Delivery {
+    Done,
+    /// Shipped, but a human has to act (for example a red CI).
+    NeedsHuman(String),
 }
 
 /// Whether an implement or fix stage ran on a local (Ollama) model, whose
