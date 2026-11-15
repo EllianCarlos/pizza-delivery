@@ -60,7 +60,13 @@ pub fn argv(kind: AdapterKind, prompt: &str, model: Option<&str>) -> Vec<String>
         ]
         .concat(),
         AdapterKind::Agy => [
-            strings(&["-p", prompt, "--output-format", "json"]),
+            strings(&[
+                "-p",
+                prompt,
+                "--output-format",
+                "json",
+                "--dangerously-skip-permissions",
+            ]),
             model_flag("--model"),
         ]
         .concat(),
@@ -245,7 +251,13 @@ mod tests {
         );
         assert_eq!(
             argv(AdapterKind::Agy, "hi", None),
-            ["-p", "hi", "--output-format", "json"]
+            [
+                "-p",
+                "hi",
+                "--output-format",
+                "json",
+                "--dangerously-skip-permissions"
+            ]
         );
     }
 }
