@@ -197,7 +197,7 @@ impl Worker<'_> {
             return Ok(Err("ship: job has no repository".to_owned()));
         };
         let worktree = self.worktree_of(&repo, job);
-        let branch = format!("pizza/{job}");
+        let (branch, _) = self.work_branch(&repo, job, &found.prompt);
         let committed = match self.git.is_dirty(&worktree) {
             Ok(true) => self
                 .git

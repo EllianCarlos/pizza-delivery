@@ -22,12 +22,14 @@ impl Worker<'_> {
         };
         let worktree = self.worktree_of(&repo, &job.id);
         let base = self.parent_branch(&job.id)?;
-        if let Err(e) = self.git.ensure_worktree(
-            &repo,
-            &worktree,
-            &format!("pizza/{}", job.id),
-            base.as_deref(),
-        ) {
+        let (branch, on_pr) = self.work_branch(&repo, &job.id, &job.prompt);
+        let made = if on_pr {
+            self.git.ensure_pr_worktree(&repo, &worktree, &branch)
+        } else {
+            self.git
+                .ensure_worktree(&repo, &worktree, &branch, base.as_deref())
+        };
+        if let Err(e) = made {
             return Ok(Verdict::Fail(format!("worktree: {e:#}")));
         }
         let relative = stage_dir(&job.id, claimed.n, &claimed.name);

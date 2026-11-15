@@ -284,3 +284,31 @@ fn checks_are_awaited_even_when_the_pr_is_not_eligible_to_merge() -> Result<()> 
     assert!(acquire(&rig.git.merges, "merges")?.is_empty());
     Ok(())
 }
+
+#[test]
+fn a_job_linking_an_open_pr_works_on_and_pushes_to_that_prs_branch() -> Result<()> {
+    let rig = reviewed_rig()?;
+    *acquire(&rig.git.pr_head, "pr_head")? = Some("feature/x".to_owned());
+    *acquire(&rig.git.files, "files")? = vec!["src/a.rs".to_owned()];
+
+    run_reviewed(&rig)?;
+
+    let worktrees = acquire(&rig.git.pr_worktrees, "pr_worktrees")?.clone();
+    assert!(!worktrees.is_empty() && worktrees.iter().all(|b| b == "feature/x"));
+    let pushes = acquire(&rig.git.pushes, "pushes")?.clone();
+    assert_eq!(pushes, [("origin".to_owned(), "feature/x".to_owned())]);
+    Ok(())
+}
+
+#[test]
+fn a_job_without_a_linked_open_pr_gets_its_own_branch() -> Result<()> {
+    let rig = reviewed_rig()?;
+    *acquire(&rig.git.files, "files")? = vec!["src/a.rs".to_owned()];
+
+    run_reviewed(&rig)?;
+
+    assert!(acquire(&rig.git.pr_worktrees, "pr_worktrees")?.is_empty());
+    let pushes = acquire(&rig.git.pushes, "pushes")?.clone();
+    assert_eq!(pushes, [("origin".to_owned(), "pizza/J1".to_owned())]);
+    Ok(())
+}
