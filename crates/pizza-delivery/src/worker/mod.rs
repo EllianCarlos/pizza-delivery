@@ -468,7 +468,12 @@ impl Worker<'_> {
                 let events = self.with_store(|s| s.read_timeline(job))?;
                 if pipeline_done(&events) {
                     match self.deliver(job, &events)? {
-                        Ok(()) => self.append(job, None, EventPayload::JobCompleted {})?,
+                        Ok(ship::Delivery::Done) => {
+                            self.append(job, None, EventPayload::JobCompleted {})?;
+                        }
+                        Ok(ship::Delivery::NeedsHuman(reason)) => {
+                            self.append(job, None, EventPayload::JobNeedsHuman { reason })?;
+                        }
                         Err(reason) => {
                             self.append(job, None, EventPayload::JobFailed { reason })?;
                         }

@@ -135,7 +135,7 @@ fn classify_pr_view(json: &str) -> Result<PrPoll> {
 }
 
 const READINESS_POLL: std::time::Duration = std::time::Duration::from_secs(15);
-const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1200);
 /// A PR with no checks at all is only treated as check-free once CI has had
 /// this long to register its runs.
 const NO_CHECKS_GRACE: std::time::Duration = std::time::Duration::from_secs(60);

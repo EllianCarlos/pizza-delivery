@@ -64,7 +64,7 @@ fn infrastructure_changes_stay_a_draft_and_are_not_merged() -> Result<()> {
     run_reviewed(&rig)?;
 
     assert!(acquire(&rig.git.merges, "merges")?.is_empty());
-    assert!(acquire(&rig.git.ready_checks, "ready_checks")?.is_empty());
+    assert_eq!(acquire(&rig.git.ready_checks, "ready_checks")?.len(), 1);
     assert!(not_merged_reason(&rig)?.contains(".github/workflows/ci.yml"));
     assert_eq!(rig.job_state()?, JobState::Completed);
     Ok(())
@@ -79,7 +79,7 @@ fn a_pr_that_is_not_ready_is_left_open_with_the_reason_recorded() -> Result<()> 
 
     assert!(acquire(&rig.git.merges, "merges")?.is_empty());
     assert_eq!(not_merged_reason(&rig)?, "checks failing: ci");
-    assert_eq!(rig.job_state()?, JobState::Completed);
+    assert_eq!(rig.job_state()?, JobState::NeedsHuman);
     Ok(())
 }
 
@@ -114,7 +114,7 @@ fn the_auto_merge_switch_turns_merging_off() -> Result<()> {
 
     run_reviewed(&rig)?;
 
-    assert!(acquire(&rig.git.ready_checks, "ready_checks")?.is_empty());
+    assert_eq!(acquire(&rig.git.ready_checks, "ready_checks")?.len(), 1);
     assert!(acquire(&rig.git.merges, "merges")?.is_empty());
     assert!(not_merged_reason(&rig)?.contains("auto-merge is disabled"));
     assert_eq!(acquire(&rig.git.prs, "prs")?.len(), 1);
@@ -257,5 +257,30 @@ fn cloud_model_work_in_a_repo_without_ci_still_merges() -> Result<()> {
         *acquire(&rig.git.merges, "merges")?,
         vec![PR_URL.to_owned()]
     );
+    Ok(())
+}
+
+#[test]
+fn a_red_ci_leaves_the_job_needing_a_human_not_completed() -> Result<()> {
+    let rig = reviewed_rig()?;
+    *acquire(&rig.git.blocked, "blocked")? = Some("checks failing: Build (bun)".to_owned());
+
+    run_reviewed(&rig)?;
+
+    assert_eq!(rig.job_state()?, JobState::NeedsHuman);
+    assert!(acquire(&rig.git.merges, "merges")?.is_empty());
+    assert!(not_merged_reason(&rig)?.contains("checks failing"));
+    Ok(())
+}
+
+#[test]
+fn checks_are_awaited_even_when_the_pr_is_not_eligible_to_merge() -> Result<()> {
+    let rig = reviewed_rig()?;
+    *acquire(&rig.git.files, "files")? = vec!["flake.nix".to_owned()];
+
+    run_reviewed(&rig)?;
+
+    assert_eq!(acquire(&rig.git.ready_checks, "ready_checks")?.len(), 1);
+    assert!(acquire(&rig.git.merges, "merges")?.is_empty());
     Ok(())
 }
