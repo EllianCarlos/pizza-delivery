@@ -241,3 +241,41 @@ export function jobSummary(detail: JobDetailView, nowMs: number): JobSummary {
     models: [...new Set(rows.flatMap((r) => (r.model ? [r.model] : [])))].sort(),
   };
 }
+
+export type Problem = {
+  cursor: number;
+  ts_ms: number;
+  stage: string;
+  kind: string;
+  reason: string;
+};
+
+const PROBLEM_KINDS = new Set([
+  "stage-failed",
+  "stage-retried",
+  "agent-fell-back",
+  "job-parked",
+  "job-failed",
+  "job-needs-human",
+  "pr-not-merged",
+  "egress-blocked",
+]);
+
+/** Where a job went wrong: each failure, retry, fallback and park, with its reason. */
+export function problemsOf(detail: JobDetailView): Problem[] {
+  return detail.events
+    .filter((e) => PROBLEM_KINDS.has(e.kind))
+    .map((e) => {
+      const p = (e.payload ?? {}) as { reason?: unknown; agent?: unknown; host?: unknown };
+      const reason =
+        typeof p.reason === "string" ? p.reason : typeof p.host === "string" ? p.host : "";
+      const agent = typeof p.agent === "string" ? `${p.agent}: ` : "";
+      return {
+        cursor: e.cursor,
+        ts_ms: e.ts_ms,
+        stage: detail.stages.find((s) => s.id === e.stage_id)?.name ?? "-",
+        kind: e.kind,
+        reason: agent + reason,
+      };
+    });
+}

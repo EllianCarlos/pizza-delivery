@@ -64,7 +64,13 @@ impl Git for FakeGit {
     fn pr_branch(&self, _repo: &Path, _pr_url: &str) -> Result<Option<String>> {
         Ok(acquire(&self.pr_head, "pr_head")?.clone())
     }
-    fn ensure_pr_worktree(&self, _repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
+    fn ensure_pr_worktree(
+        &self,
+        _repo: &Path,
+        worktree: &Path,
+        _local: &str,
+        branch: &str,
+    ) -> Result<()> {
         acquire(&self.pr_worktrees, "pr_worktrees")?.push(branch.to_owned());
         Ok(std::fs::create_dir_all(worktree)?)
     }

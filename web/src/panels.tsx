@@ -25,6 +25,7 @@ import {
   formatDuration,
   formatTokens,
   jobSummary,
+  problemsOf,
   stageRows,
   toolCallsOf,
   labelArtifact,
@@ -54,6 +55,9 @@ export function DetailPanel({
   const rows = useMemo(() => stageRows(detail, now), [detail, now]);
   const summary = useMemo(() => jobSummary(detail, now), [detail, now]);
   const toolCalls = useMemo(() => toolCallsOf(detail.events), [detail.events]);
+  const problems = useMemo(() => problemsOf(detail), [detail]);
+  const lastProblem = problems[problems.length - 1];
+  const stuck = detail.job.state === "failed" || detail.job.state === "needs-human";
   return (
     <SpaceBetween size="m">
       <Header
@@ -81,6 +85,11 @@ export function DetailPanel({
         {" | "}
         <b>Models</b> {summary.models.length > 0 ? summary.models.join(", ") : "-"}
       </Box>
+      {stuck && lastProblem && (
+        <Alert type="error" header={`Stopped at ${lastProblem.stage}: ${lastProblem.kind}`}>
+          {lastProblem.reason}
+        </Alert>
+      )}
       <Table
         variant="embedded"
         header={<Header variant="h3">Stages</Header>}
@@ -103,6 +112,20 @@ export function DetailPanel({
           { id: "cost", header: "Cost", cell: (s) => formatCost(s.costMicrousd) },
         ]}
       />
+      {problems.length > 0 && (
+        <Table
+          variant="embedded"
+          header={<Header variant="h3" counter={`(${problems.length})`}>Problems</Header>}
+          items={problems}
+          trackBy="cursor"
+          columnDefinitions={[
+            { id: "time", header: "Time", cell: (p) => new Date(p.ts_ms).toLocaleTimeString() },
+            { id: "stage", header: "Stage", cell: (p) => p.stage },
+            { id: "kind", header: "What", cell: (p) => p.kind },
+            { id: "reason", header: "Reason", cell: (p) => p.reason },
+          ]}
+        />
+      )}
       <Toggle checked={showTools} onChange={({ detail: d }) => setShowTools(d.checked)}>
         Show tool calls
       </Toggle>

@@ -349,7 +349,10 @@ fn a_job_linking_an_open_pr_works_on_and_pushes_to_that_prs_branch() -> Result<(
     let worktrees = acquire(&rig.git.pr_worktrees, "pr_worktrees")?.clone();
     assert!(!worktrees.is_empty() && worktrees.iter().all(|b| b == "feature/x"));
     let pushes = acquire(&rig.git.pushes, "pushes")?.clone();
-    assert_eq!(pushes, [("origin".to_owned(), "feature/x".to_owned())]);
+    assert_eq!(
+        pushes,
+        [("origin".to_owned(), "pizza/J1:feature/x".to_owned())]
+    );
     Ok(())
 }
 

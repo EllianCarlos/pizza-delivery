@@ -24,7 +24,8 @@ impl Worker<'_> {
         let base = self.parent_branch(&job.id)?;
         let (branch, on_pr) = self.work_branch(&repo, &job.id, &job.prompt);
         let made = if on_pr {
-            self.git.ensure_pr_worktree(&repo, &worktree, &branch)
+            self.git
+                .ensure_pr_worktree(&repo, &worktree, &format!("pizza/{}", job.id), &branch)
         } else {
             self.git
                 .ensure_worktree(&repo, &worktree, &branch, base.as_deref())
