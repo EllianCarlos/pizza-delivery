@@ -339,6 +339,11 @@ fn engram_directories(db: &Path) -> Vec<PathBuf> {
 
 impl ProjectIndex for SystemIndex {
     fn remote_slug_of(&self, project: &Project) -> Option<String> {
+        // Job worktrees share their repository's remote; only a real
+        // checkout (a `.git` directory) stands for the repository.
+        if !Path::new(&project.path).join(".git").is_dir() {
+            return None;
+        }
         let out = std::process::Command::new("git")
             .args(["-C", &project.path, "remote", "get-url", "origin"])
             .output()
