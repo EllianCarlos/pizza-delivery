@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { buildOptions, emptyOptionFields } from "./options";
+import { buildOptions, emptyOptionFields, MODEL_SUGGESTIONS } from "./options";
 
 test("collapsed or empty groups send no options", () => {
   expect(buildOptions(emptyOptionFields)).toBeUndefined();
@@ -30,4 +30,13 @@ test("filled fields become typed, trimmed options", () => {
 
 test("a non-numeric count is rejected before sending", () => {
   expect(() => buildOptions({ ...emptyOptionFields, open: true, maxStages: "abc" })).toThrow("whole number");
+});
+
+test("model suggestions are unique, non-empty and accepted by the option builder", () => {
+  const values = MODEL_SUGGESTIONS.map((s) => s.value);
+  expect(new Set(values).size).toBe(values.length);
+  for (const model of values) {
+    expect(model).not.toBe("");
+    expect(buildOptions({ ...emptyOptionFields, open: true, model })).toEqual({ model });
+  }
 });

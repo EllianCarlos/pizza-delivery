@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import Autosuggest from "@cloudscape-design/components/autosuggest";
 import Alert from "@cloudscape-design/components/alert";
 import Box from "@cloudscape-design/components/box";
 import AppLayout from "@cloudscape-design/components/app-layout";
@@ -30,7 +31,7 @@ import {
   topNavItems,
   type Route,
 } from "./model";
-import { buildOptions, emptyOptionFields, type OptionFields } from "./options";
+import { buildOptions, emptyOptionFields, MODEL_SUGGESTIONS, type OptionFields } from "./options";
 import { previewSummary, type TriagePreview } from "./triage";
 import { enablePush, pushSupported } from "./push";
 import { ArtifactBrowser, DetailPanel, EventsPanel, InboxPanel } from "./panels";
@@ -172,7 +173,14 @@ function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onCl
                 <Input value={fields.riskFlags} onChange={({ detail }) => set({ riskFlags: detail.value })} />
               </FormField>
               <FormField label="Model" description="Claude model for every stage, e.g. haiku or sonnet. Empty lets routing choose.">
-                <Input value={fields.model} onChange={({ detail }) => set({ model: detail.value })} />
+                <Autosuggest
+                  value={fields.model}
+                  onChange={({ detail }) => set({ model: detail.value })}
+                  options={MODEL_SUGGESTIONS}
+                  enteredTextLabel={(value) => `Use "${value}"`}
+                  placeholder="haiku, sonnet or a full model id"
+                  empty="No matching suggestion"
+                />
               </FormField>
             </SpaceBetween>
           </ExpandableSection>

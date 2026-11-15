@@ -30,6 +30,13 @@ export const emptyOptionFields: OptionFields = {
   model: "",
 };
 
+/** Claude models offered as suggestions; any other value can still be typed. */
+export const MODEL_SUGGESTIONS: { value: string; description: string }[] = [
+  { value: "haiku", description: "Cheapest; default for triage and memorize" },
+  { value: "sonnet", description: "Default for grill, spec, implement, fix and review" },
+  { value: "opus", description: "Rarely worth it; only for risky or hard jobs" },
+];
+
 /**
  * Form fields to the `options` request key. Undefined when the group is
  * collapsed or every field is empty, so the request is identical to one
