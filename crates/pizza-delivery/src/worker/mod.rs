@@ -33,9 +33,9 @@ use pizza_delivery_core::triage::{
     amend_plan, current_plan, Feedback, PlannedStage, DEFAULT_MAX_STAGES,
 };
 use pizza_delivery_core::{
-    fix_rounds, fold_stages, is_cancelled, may_retry, pipeline_done, render_interruption_note,
-    retry_history, stage_timeout, worktree_removable, Caps, ClaimRequest, Claimed, Interruption,
-    Job, JobId, JobState, NewEvent, RetryCause, Store, StoreError, Tier, WorktreeFacts,
+    fix_rounds, fold_stages, is_cancelled, pipeline_done, render_interruption_note, retry_history,
+    stage_timeout, worktree_removable, Caps, ClaimRequest, Claimed, Interruption, Job, JobId,
+    JobState, NewEvent, RetryCause, Store, StoreError, Tier, WorktreeFacts,
 };
 use sha2::{Digest, Sha256};
 
@@ -407,6 +407,37 @@ impl Worker<'_> {
         Ok(note)
     }
 
+    /// How many candidates the stage's routing chain has, counting the ones
+    /// quota currently skips; 1 when the stage or its route is unknown.
+    fn chain_len(&self, job: &JobId, stage_id: &str, events: &[Event]) -> usize {
+        let Some(name) = fold_stages(events)
+            .into_iter()
+            .find(|s| s.id == stage_id)
+            .map(|s| s.name)
+        else {
+            return 1;
+        };
+        let repo = self.find_job(job).ok().flatten().and_then(|j| j.repo);
+        let Ok(quota) = self
+            .with_store(|s| s.quota_events())
+            .map(|q| fold_quota(&q))
+        else {
+            return 1;
+        };
+        route(
+            self.routing,
+            &RouteRequest {
+                stage: &name,
+                tier: DEFAULT_TIER,
+                repo: repo.as_deref(),
+                required: &stage_capabilities(&name),
+            },
+            &quota,
+            self.env.now_ms(),
+        )
+        .map_or(1, |r| r.candidates.len() + r.skipped.len())
+    }
+
     fn settle(
         &self,
         job: &JobId,
@@ -417,7 +448,12 @@ impl Worker<'_> {
         let events = self.with_store(|s| s.read_timeline(job))?;
         let verdict = match verdict {
             Verdict::Retry(cause, reason) => {
-                if may_retry(cause, &retry_history(&events, stage)) {
+                let chain = self.chain_len(job, stage, &events);
+                if pizza_delivery_core::resilience::may_retry_on_chain(
+                    cause,
+                    &retry_history(&events, stage),
+                    chain,
+                ) {
                     Verdict::Retry(cause, reason)
                 } else {
                     Verdict::Fail(format!("{reason} (retries exhausted)"))
