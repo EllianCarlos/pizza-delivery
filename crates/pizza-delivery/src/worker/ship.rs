@@ -161,10 +161,17 @@ impl Worker<'_> {
         let Some(last) = pizza_delivery_core::pipeline(events).pop() else {
             return Ok(human(""));
         };
-        let added = vec![PlannedStage {
+        let mut added = vec![PlannedStage {
             name: "fix".to_owned(),
             reason: "fix the failing CI checks".to_owned(),
         }];
+        // The fix is new code: it gets reviewed before it can merge.
+        if current_plan(events).iter().any(|s| s.name == "review") {
+            added.push(PlannedStage {
+                name: "review".to_owned(),
+                reason: "re-review after the CI fix".to_owned(),
+            });
+        }
         if amend_plan(
             &current_plan(events),
             &last,

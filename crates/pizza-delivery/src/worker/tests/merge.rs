@@ -290,7 +290,7 @@ fn fix_stages(rig: &Rig) -> Result<usize> {
 
 #[test]
 fn a_red_ci_gets_one_fix_round_with_the_failure_then_needs_a_human() -> Result<()> {
-    let rig = Rig::new(vec![good(), good_review(), good(), good()])?;
+    let rig = Rig::new(vec![good(), good_review(), good(), good_review()])?;
     *acquire(&rig.git.blocked, "blocked")? = Some("checks failing: Build (bun)".to_owned());
     *acquire(&rig.git.ci, "ci")? = Some(red_ci(false));
     plan_of(&rig, &["implement", "review", "ship"])?;
@@ -300,6 +300,11 @@ fn a_red_ci_gets_one_fix_round_with_the_failure_then_needs_a_human() -> Result<(
     }
 
     assert_eq!(fix_stages(&rig)?, 1);
+    let reviews = fold_stages(&rig.timeline()?)
+        .iter()
+        .filter(|s| s.name == "review")
+        .count();
+    assert_eq!(reviews, 2);
     assert!(rig
         .prompts()?
         .iter()

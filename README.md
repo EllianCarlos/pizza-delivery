@@ -61,7 +61,7 @@ Set `PIZZA_DELIVERY_SHADOW_MODEL` (an Ollama model such as `qwen3.5:4b`) to ask 
 ### Red CI fix round
 
 If a PR's checks fail, the job runs one automatic `fix` stage fed with the
-failing check names and the tail of their logs, pushes to the same branch and
+failing check names and the tail of their logs, is re-reviewed, pushes to the same branch and
 waits for CI again. It skips the round (and goes to `needs-human`) when the
 same checks already fail on the base branch, or when the first round did not
 clear them.
