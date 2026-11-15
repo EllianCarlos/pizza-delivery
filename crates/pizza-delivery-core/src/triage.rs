@@ -161,6 +161,38 @@ pub fn match_repo(given: &str, index: &[Project]) -> RepoMatch {
     }
 }
 
+/// `owner/name` (lowercase) of every GitHub repository URL in the prompt, such
+/// as the repository behind a pull request link.
+pub fn github_slugs(prompt: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for word in prompt.split_whitespace() {
+        let Some((_, rest)) = word.split_once("github.com/") else {
+            continue;
+        };
+        let mut parts = rest
+            .split(['/', '?', '#', ')', ',', '>', '"', '\''])
+            .filter(|p| !p.is_empty());
+        if let (Some(owner), Some(name)) = (parts.next(), parts.next()) {
+            let slug = format!("{owner}/{}", name.trim_end_matches(".git")).to_lowercase();
+            if !found.contains(&slug) {
+                found.push(slug);
+            }
+        }
+    }
+    found
+}
+
+/// `owner/name` (lowercase) of a GitHub remote URL, ssh or https.
+pub fn remote_slug(url: &str) -> Option<String> {
+    let rest = url
+        .trim()
+        .split_once("github.com")
+        .map(|(_, r)| r.trim_start_matches([':', '/']))?;
+    let mut parts = rest.split('/').filter(|p| !p.is_empty());
+    let (owner, name) = (parts.next()?, parts.next()?);
+    Some(format!("{owner}/{}", name.trim_end_matches(".git")).to_lowercase())
+}
+
 fn explicit(path: &str) -> Resolution {
     Resolution {
         path: path.to_owned(),
@@ -764,6 +796,26 @@ pub fn current_plan(events: &[Event]) -> Vec<PlannedStage> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn github_urls_in_a_prompt_and_remotes_reduce_to_the_same_slug() {
+        assert_eq!(
+            super::github_slugs(
+                "fix https://github.com/EllianCarlos/elliancarlos.github.io/pull/1 now"
+            ),
+            vec!["elliancarlos/elliancarlos.github.io"]
+        );
+        assert_eq!(
+            super::remote_slug("git@github.com:EllianCarlos/elliancarlos.github.io.git").as_deref(),
+            Some("elliancarlos/elliancarlos.github.io")
+        );
+        assert_eq!(
+            super::remote_slug("https://github.com/o/r.git").as_deref(),
+            Some("o/r")
+        );
+        assert_eq!(super::remote_slug("git@gitlab.com:o/r.git"), None);
+        assert!(super::github_slugs("no links here").is_empty());
+    }
+
     use super::*;
 
     fn project(name: &str) -> Project {
