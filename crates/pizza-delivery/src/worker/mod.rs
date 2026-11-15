@@ -216,6 +216,28 @@ impl Worker<'_> {
             .join(job.as_str())
     }
 
+    /// The branch the job works on: the head of an open PR the prompt links
+    /// (same repository), else a fresh `pizza/<job>` branch.
+    fn work_branch(&self, repo: &Path, job: &JobId, prompt: &str) -> (String, bool) {
+        let own = format!("pizza/{job}");
+        let found = prompt
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '/'))
+            .filter(|w| w.contains("github.com/") && w.contains("/pull/"))
+            .find_map(|url| {
+                let url = if url.starts_with("http") {
+                    url.to_owned()
+                } else {
+                    format!("https://{url}")
+                };
+                self.git.pr_branch(repo, &url).ok().flatten()
+            });
+        match found {
+            Some(branch) => (branch, true),
+            None => (own, false),
+        }
+    }
+
     fn parent_branch(&self, job: &JobId) -> Result<Option<String>> {
         let events = self.with_store(|s| s.read_timeline(job))?;
         Ok(events.iter().find_map(|e| match &e.payload {

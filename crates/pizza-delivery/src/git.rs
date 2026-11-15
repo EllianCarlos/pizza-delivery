@@ -14,6 +14,16 @@ pub trait Git: Send + Sync {
         branch: &str,
         base: Option<&str>,
     ) -> Result<()>;
+    /// The head branch of an open, same-repository pull request, when
+    /// `pr_url` names one; `None` for closed, forked or unreadable PRs.
+    fn pr_branch(&self, _repo: &Path, _pr_url: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// A worktree on the pull request's own branch (fetched if it exists
+    /// only on the remote), so follow-up work lands on that PR.
+    fn ensure_pr_worktree(&self, _repo: &Path, _worktree: &Path, _branch: &str) -> Result<()> {
+        Err(anyhow!("ensure_pr_worktree is not supported"))
+    }
     fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>>;
     fn is_dirty(&self, worktree: &Path) -> Result<bool>;
     fn is_pushed(&self, worktree: &Path) -> Result<bool>;
@@ -201,6 +211,65 @@ impl Git for SystemGit {
         };
         let path = worktree.to_string_lossy();
         run(repo, &["worktree", "add", "-b", branch, &path, &start]).map(|_| ())
+    }
+
+    fn pr_branch(&self, repo: &Path, pr_url: &str) -> Result<Option<String>> {
+        let origin = run(repo, &["remote", "get-url", "origin"])?;
+        let linked = pizza_delivery_core::triage::github_slugs(pr_url);
+        if pizza_delivery_core::triage::remote_slug(&origin).as_ref() != linked.first() {
+            return Ok(None);
+        }
+        let out = gh(
+            repo,
+            &[
+                "pr",
+                "view",
+                pr_url,
+                "--json",
+                "headRefName,isCrossRepository,state",
+                "--jq",
+                r#"select(.state == "OPEN" and (.isCrossRepository | not)) | .headRefName"#,
+            ],
+        )?;
+        Ok(Some(out).filter(|b| !b.is_empty()))
+    }
+
+    fn ensure_pr_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
+        if worktree.join(".git").exists() {
+            return Ok(());
+        }
+        if let Some(parent) = worktree.parent() {
+            std::fs::create_dir_all(parent).context("create worktree parent")?;
+        }
+        let _ = run(repo, &["fetch", "origin", branch]);
+        let path = worktree.to_string_lossy();
+        let local = run(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .is_ok();
+        if local {
+            run(repo, &["worktree", "add", &path, branch])?;
+        } else {
+            run(
+                repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--track",
+                    "-b",
+                    branch,
+                    &path,
+                    &format!("origin/{branch}"),
+                ],
+            )?;
+        }
+        Ok(())
     }
 
     fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>> {
@@ -401,6 +470,14 @@ impl<G: Git> Git for LockedGit<G> {
 
     fn changed_files(&self, repo: &Path, worktree: &Path) -> Result<Vec<String>> {
         self.inner.changed_files(repo, worktree)
+    }
+
+    fn pr_branch(&self, repo: &Path, pr_url: &str) -> Result<Option<String>> {
+        self.inner.pr_branch(repo, pr_url)
+    }
+
+    fn ensure_pr_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
+        self.serialized(repo, |g| g.ensure_pr_worktree(repo, worktree, branch))
     }
 
     fn push(&self, worktree: &Path, remote: &str, branch: &str) -> Result<String> {

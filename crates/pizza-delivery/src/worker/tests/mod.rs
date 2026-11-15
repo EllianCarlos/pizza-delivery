@@ -50,9 +50,18 @@ struct FakeGit {
     ready_checks: Mutex<Vec<String>>,
     merges: Mutex<Vec<String>>,
     no_checks: AtomicBool,
+    pr_head: Mutex<Option<String>>,
+    pr_worktrees: Mutex<Vec<String>>,
 }
 
 impl Git for FakeGit {
+    fn pr_branch(&self, _repo: &Path, _pr_url: &str) -> Result<Option<String>> {
+        Ok(acquire(&self.pr_head, "pr_head")?.clone())
+    }
+    fn ensure_pr_worktree(&self, _repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
+        acquire(&self.pr_worktrees, "pr_worktrees")?.push(branch.to_owned());
+        Ok(std::fs::create_dir_all(worktree)?)
+    }
     fn merge_readiness(&self, _worktree: &Path, pr_url: &str) -> Result<MergeReadiness> {
         acquire(&self.ready_checks, "ready_checks")?.push(pr_url.to_owned());
         if self.readiness_fails.load(Ordering::SeqCst) {
@@ -200,7 +209,7 @@ impl Rig {
         store.enqueue_job(NewJob {
             id: JobId::new("J1"),
             event_id: "E0".into(),
-            prompt: "do it".into(),
+            prompt: "do it, see https://github.com/o/r/pull/7".into(),
             repo: Some("/src/my repo".into()),
             priority: Priority::Normal,
             follow_up,
