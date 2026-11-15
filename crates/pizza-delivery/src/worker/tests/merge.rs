@@ -273,6 +273,54 @@ fn a_red_ci_leaves_the_job_needing_a_human_not_completed() -> Result<()> {
     Ok(())
 }
 
+fn red_ci(base_also_failing: bool) -> crate::git::CiFailure {
+    crate::git::CiFailure {
+        checks: vec!["Build (bun)".to_owned()],
+        base_also_failing,
+        log: "error: boom".to_owned(),
+    }
+}
+
+fn fix_stages(rig: &Rig) -> Result<usize> {
+    Ok(fold_stages(&rig.timeline()?)
+        .iter()
+        .filter(|s| s.name == "fix")
+        .count())
+}
+
+#[test]
+fn a_red_ci_gets_one_fix_round_with_the_failure_then_needs_a_human() -> Result<()> {
+    let rig = Rig::new(vec![good(), good_review(), good(), good()])?;
+    *acquire(&rig.git.blocked, "blocked")? = Some("checks failing: Build (bun)".to_owned());
+    *acquire(&rig.git.ci, "ci")? = Some(red_ci(false));
+    plan_of(&rig, &["implement", "review", "ship"])?;
+
+    for _ in 0..6 {
+        rig.worker().tick()?;
+    }
+
+    assert_eq!(fix_stages(&rig)?, 1);
+    assert!(rig
+        .prompts()?
+        .iter()
+        .any(|p| p.contains("Build (bun)") && p.contains("error: boom")));
+    assert_eq!(rig.job_state()?, JobState::NeedsHuman);
+    Ok(())
+}
+
+#[test]
+fn a_red_ci_that_also_fails_on_the_base_branch_gets_no_fix_round() -> Result<()> {
+    let rig = reviewed_rig()?;
+    *acquire(&rig.git.blocked, "blocked")? = Some("checks failing: Build (bun)".to_owned());
+    *acquire(&rig.git.ci, "ci")? = Some(red_ci(true));
+
+    run_reviewed(&rig)?;
+
+    assert_eq!(fix_stages(&rig)?, 0);
+    assert_eq!(rig.job_state()?, JobState::NeedsHuman);
+    Ok(())
+}
+
 #[test]
 fn checks_are_awaited_even_when_the_pr_is_not_eligible_to_merge() -> Result<()> {
     let rig = reviewed_rig()?;

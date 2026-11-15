@@ -493,6 +493,7 @@ impl Worker<'_> {
                         Ok(ship::Delivery::Done) => {
                             self.append(job, None, EventPayload::JobCompleted {})?;
                         }
+                        Ok(ship::Delivery::Retry) => {}
                         Ok(ship::Delivery::NeedsHuman(reason)) => {
                             self.append(job, None, EventPayload::JobNeedsHuman { reason })?;
                         }

@@ -130,6 +130,76 @@ impl Worker<'_> {
             .map_err(|e| format!("merge failed: {e:#}"))
     }
 
+    /// A red CI gets one automatic fix round, unless the same checks already
+    /// fail on the base branch or a round has been spent.
+    fn red_ci(
+        &self,
+        job: &JobId,
+        worktree: &Path,
+        url: &str,
+        reason: &str,
+        events: &[Event],
+    ) -> Result<Delivery> {
+        let human = |why: &str| {
+            Delivery::NeedsHuman(format!(
+                "CI is red on {url} ({reason}{why}); the PR is open, fix it or the checks"
+            ))
+        };
+        let spent = events.iter().any(|e| {
+            matches!(&e.payload, EventPayload::ArtifactRecorded { kind, .. } if kind == "ci-failure")
+        });
+        if spent {
+            return Ok(human("; one automatic fix round did not clear it"));
+        }
+        let failure = match self.git.ci_failure(worktree, url) {
+            Ok(f) => f,
+            Err(e) => return Ok(human(&format!("; could not read the failure: {e:#}"))),
+        };
+        if failure.base_also_failing {
+            return Ok(human("; the base branch fails the same checks"));
+        }
+        let Some(last) = pizza_delivery_core::pipeline(events).pop() else {
+            return Ok(human(""));
+        };
+        let added = vec![PlannedStage {
+            name: "fix".to_owned(),
+            reason: "fix the failing CI checks".to_owned(),
+        }];
+        if amend_plan(
+            &current_plan(events),
+            &last,
+            added.clone(),
+            DEFAULT_MAX_STAGES,
+        )
+        .is_err()
+        {
+            return Ok(human("; the plan has no room for a fix round"));
+        }
+        let report = format!(
+            "# CI failed\n\nFailing checks: {}\n\nThese checks failed on the pull request. Reproduce them locally, fix the cause and commit. A failure that also exists on the base branch is not yours to fix.\n\n## Log tail\n\n```\n{}\n```\n",
+            failure.checks.join(", "),
+            failure.log
+        );
+        let relative = PathBuf::from("jobs")
+            .join(job.as_str())
+            .join("ci-failure.md");
+        let path = self.config.data_dir.join(&relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, report)?;
+        self.record_file(job, None, "ci-failure", &relative)?;
+        self.append(
+            job,
+            None,
+            EventPayload::PlanAmended {
+                after: last,
+                stages: added,
+            },
+        )?;
+        Ok(Delivery::Retry)
+    }
+
     fn review_passed(&self, events: &[Event]) -> std::result::Result<(), String> {
         if !current_plan(events).iter().any(|s| s.name == "review") {
             return Err("the plan has no review stage".to_owned());
@@ -301,9 +371,7 @@ impl Worker<'_> {
                     },
                 )?;
                 Ok(Ok(match failing {
-                    Some(reason) => Delivery::NeedsHuman(format!(
-                        "CI is red on {url} ({reason}); the PR is open, fix it or the checks"
-                    )),
+                    Some(reason) => self.red_ci(job, &worktree, &url, &reason, events)?,
                     None => Delivery::Done,
                 }))
             }
@@ -320,6 +388,8 @@ pub(super) enum Delivery {
     Done,
     /// Shipped, but a human has to act (for example a red CI).
     NeedsHuman(String),
+    /// The plan was amended with a fix round; deliver again afterwards.
+    Retry,
 }
 
 /// Whether an implement or fix stage ran on a local (Ollama) model, whose

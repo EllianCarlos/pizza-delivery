@@ -58,6 +58,14 @@ A chain moves to its next candidate when an agent is out of quota or hits a prov
 
 Set `PIZZA_DELIVERY_SHADOW_MODEL` (an Ollama model such as `qwen3.5:4b`) to ask a local model, once per job before the first agent stage, which Claude model each stage should use. It follows the SOP in `PIZZA_DELIVERY_TRIAGE_SOP` (default `triage-sop.md` next to the routing file). Ollama is reached at `PIZZA_DELIVERY_SHADOW_URL` (default `http://localhost:11434`). Jobs are split by a hash of their id: `PIZZA_DELIVERY_DECIDER_LIVE_PERCENT` (default 50) of jobs without risk flags run the decider's picks (haiku or sonnet only), the rest are the control group, and jobs with risk flags are always control. The decision is stored as the `model-decider` artifact; at job end a `model-shadow` artifact compares the picks with the models that ran, their cost and the outcome. The decider's pick comes after the job, chain and `[[models]]` choices.
 
+### Red CI fix round
+
+If a PR's checks fail, the job runs one automatic `fix` stage fed with the
+failing check names and the tail of their logs, pushes to the same branch and
+waits for CI again. It skips the round (and goes to `needs-human`) when the
+same checks already fail on the base branch, or when the first round did not
+clear them.
+
 ### Follow-ups on a pull request
 
 When the prompt links an open pull request of the resolved repository (for

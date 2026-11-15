@@ -48,12 +48,28 @@ pub trait Git: Send + Sync {
     fn merge_readiness(&self, _worktree: &Path, _pr_url: &str) -> Result<MergeReadiness> {
         Err(anyhow!("merge_readiness is not supported"))
     }
+    /// What failed in the pull request's CI, for a fix round.
+    fn ci_failure(&self, _worktree: &Path, _pr_url: &str) -> Result<CiFailure> {
+        Err(anyhow!("ci_failure is not supported"))
+    }
     /// Marks the pull request ready for review and merges it with a merge
     /// commit.
     fn merge_pr(&self, _worktree: &Path, _pr_url: &str) -> Result<()> {
         Err(anyhow!("merge_pr is not supported"))
     }
 }
+
+/// The failing checks of a pull request and the tail of their logs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CiFailure {
+    pub checks: Vec<String>,
+    /// Every failing check also fails on the base branch, so a fix on the
+    /// PR cannot help.
+    pub base_also_failing: bool,
+    pub log: String,
+}
+
+const CI_LOG_CHARS: usize = 6000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeReadiness {
@@ -380,6 +396,75 @@ impl Git for SystemGit {
         }
     }
 
+    fn ci_failure(&self, worktree: &Path, pr_url: &str) -> Result<CiFailure> {
+        let checks = gh(
+            worktree,
+            &[
+                "pr",
+                "checks",
+                pr_url,
+                "--json",
+                "name,bucket",
+                "--jq",
+                r#".[] | select(.bucket == "fail") | .name"#,
+            ],
+        )?;
+        let checks: Vec<String> = checks.lines().map(str::to_owned).collect();
+        let base = gh(
+            worktree,
+            &[
+                "pr",
+                "view",
+                pr_url,
+                "--json",
+                "baseRefName",
+                "--jq",
+                ".baseRefName",
+            ],
+        )?;
+        let on_base = gh(
+            worktree,
+            &[
+                "api",
+                &format!("repos/{{owner}}/{{repo}}/commits/{base}/check-runs"),
+                "--jq",
+                r#".check_runs[] | select(.conclusion == "failure") | .name"#,
+            ],
+        )
+        .unwrap_or_default();
+        let base_failing: Vec<&str> = on_base.lines().collect();
+        let base_also_failing =
+            !checks.is_empty() && checks.iter().all(|c| base_failing.contains(&c.as_str()));
+        let branch = run(worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        let log = gh(
+            worktree,
+            &[
+                "run",
+                "list",
+                "--branch",
+                &branch,
+                "--status",
+                "failure",
+                "--limit",
+                "1",
+                "--json",
+                "databaseId",
+                "--jq",
+                ".[0].databaseId",
+            ],
+        )
+        .ok()
+        .filter(|id| !id.is_empty() && id != "null")
+        .and_then(|id| gh(worktree, &["run", "view", &id, "--log-failed"]).ok())
+        .unwrap_or_default();
+        let skip = log.chars().count().saturating_sub(CI_LOG_CHARS);
+        Ok(CiFailure {
+            checks,
+            base_also_failing,
+            log: log.chars().skip(skip).collect(),
+        })
+    }
+
     fn merge_pr(&self, worktree: &Path, pr_url: &str) -> Result<()> {
         gh(worktree, &["pr", "ready", pr_url])?;
         gh(worktree, &["pr", "merge", pr_url, "--merge"])?;
@@ -474,6 +559,10 @@ impl<G: Git> Git for LockedGit<G> {
 
     fn pr_branch(&self, repo: &Path, pr_url: &str) -> Result<Option<String>> {
         self.inner.pr_branch(repo, pr_url)
+    }
+
+    fn ci_failure(&self, worktree: &Path, pr_url: &str) -> Result<CiFailure> {
+        self.inner.ci_failure(worktree, pr_url)
     }
 
     fn ensure_pr_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
