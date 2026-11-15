@@ -6,6 +6,7 @@ use crate::id::JobId;
 use crate::inbox::InboxEntry;
 use crate::quota::QuotaView;
 use crate::stage::StageView;
+use crate::view::pull_requests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
@@ -232,6 +233,7 @@ pub fn render_timeline(
             "prompt": job.prompt,
             "submitted_at_ms": job.submitted_at_ms,
             "stages": stages,
+            "pull_requests": pull_requests(events),
             "events": events,
         })),
         OutputMode::Human => {
@@ -247,6 +249,21 @@ pub fn render_timeline(
             } else {
                 format!("{stage_rows}\n")
             };
+            let prs: String = pull_requests(events)
+                .iter()
+                .map(|pr| {
+                    let branch = pr
+                        .branch
+                        .as_deref()
+                        .map_or(String::new(), |b| format!(" [{b}]"));
+                    format!("PR  {}  {}{branch}\n", pr.url, pr.summary())
+                })
+                .collect();
+            let prs = if prs.is_empty() {
+                prs
+            } else {
+                format!("{prs}\n")
+            };
             let rows: String = events
                 .iter()
                 .map(|e| {
@@ -258,7 +275,7 @@ pub fn render_timeline(
                     )
                 })
                 .collect();
-            format!("{head}{stage_rows}{rows}")
+            format!("{head}{stage_rows}{prs}{rows}")
         }
     }
 }
@@ -403,6 +420,33 @@ mod tests {
         };
         let text = render_timeline(&view("AB", "p"), &[stage], &[], OutputMode::Human);
         assert!(text.contains("stage 1 implement  succeeded attempt 1  in - out 8 ms -"));
+    }
+
+    #[test]
+    fn status_lists_each_pull_request_once_with_its_state() {
+        use crate::event::{Actor, EventPayload};
+        let ev = |seq: u64, payload: EventPayload| Event {
+            id: format!("e{seq}"),
+            job_id: JobId::new("j1"),
+            stage_id: None,
+            seq,
+            ts_ms: 0,
+            actor: Actor::Daemon,
+            payload,
+        };
+        let not_merged = || EventPayload::PrNotMerged {
+            pr_url: Some("https://x/pull/1".into()),
+            reason: "checks failing: build".into(),
+        };
+        let events = [ev(1, not_merged()), ev(2, not_merged())];
+        let human = render_timeline(&view("AB", "p"), &[], &events, OutputMode::Human);
+        assert_eq!(human.matches("PR  https://x/pull/1").count(), 1);
+        assert!(human.contains("not merged: checks failing: build, CI was red"));
+        let json = render_timeline(&view("AB", "p"), &[], &events, OutputMode::Json);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+        assert_eq!(parsed["pull_requests"][0]["url"], "https://x/pull/1");
+        assert_eq!(parsed["pull_requests"][0]["state"], "not-merged");
+        assert_eq!(parsed["pull_requests"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]

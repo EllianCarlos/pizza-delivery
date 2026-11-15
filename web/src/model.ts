@@ -1,5 +1,6 @@
 import type { EventView } from "./generated/EventView";
 import type { JobDetailView } from "./generated/JobDetailView";
+import type { PullRequestView } from "./generated/PullRequestView";
 import type { JobState } from "./generated/JobState";
 import type { JobView } from "./generated/JobView";
 import type { StageState } from "./generated/StageState";
@@ -225,6 +226,17 @@ export function stageRows(detail: JobDetailView, nowMs: number): StageRow[] {
       costMicrousd: u?.cost_microusd ?? null,
     };
   });
+}
+
+/** The pull request to link from a jobs list row: the latest one the job opened. */
+export function prLinkOf(detail: Pick<JobDetailView, "pull_requests"> | undefined): string | null {
+  return detail?.pull_requests.at(-1)?.url ?? null;
+}
+
+/** One-phrase PR state for display, e.g. "not merged: checks failing, CI was red". */
+export function prStateText(pr: PullRequestView): string {
+  const base = pr.state === "not-merged" ? (pr.reason ? `not merged: ${pr.reason}` : "not merged") : pr.state;
+  return pr.ci_red ? `${base}, CI was red` : base;
 }
 
 export type JobSummary = { wallMs: number | null; costMicrousd: number | null; models: string[] };

@@ -4,6 +4,7 @@ import Container from "@cloudscape-design/components/container";
 import Header from "@cloudscape-design/components/header";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import StatusIndicator, { type StatusIndicatorProps } from "@cloudscape-design/components/status-indicator";
+import Link from "@cloudscape-design/components/link";
 import Table from "@cloudscape-design/components/table";
 import type { JobState } from "./generated/JobState";
 import type { JobView } from "./generated/JobView";
@@ -35,7 +36,12 @@ export function StateBadge({ state }: { state: JobState | Segment["state"] }) {
 
 type Pick = { selected: string | null; onSelect: (job: JobView) => void };
 
-export function TableView({ jobs, selected, onSelect }: { jobs: JobView[] } & Pick) {
+export function TableView({
+  jobs,
+  selected,
+  onSelect,
+  prLinks = {},
+}: { jobs: JobView[]; prLinks?: Record<string, string | null> } & Pick) {
   return (
     <Table
       variant="embedded"
@@ -52,6 +58,20 @@ export function TableView({ jobs, selected, onSelect }: { jobs: JobView[] } & Pi
         { id: "id", header: "Job", cell: (j) => j.short_id },
         { id: "state", header: "State", cell: (j) => <StateBadge state={j.state} /> },
         { id: "prompt", header: "Prompt", cell: (j) => j.prompt },
+        {
+          id: "pr",
+          header: "PR",
+          cell: (j) => {
+            const url = prLinks[j.id];
+            return url ? (
+              <Link href={url} external>
+                PR
+              </Link>
+            ) : (
+              "-"
+            );
+          },
+        },
         { id: "at", header: "Submitted", cell: (j) => new Date(j.submitted_at_ms).toLocaleString() },
       ]}
     />

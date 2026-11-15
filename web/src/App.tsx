@@ -26,6 +26,7 @@ import {
   jobFromPath,
   landingRoute,
   pipelineLanes,
+  prLinkOf,
   routeFromHash,
   STATE_ORDER,
   topNavItems,
@@ -198,8 +199,12 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
   const [view, setView] = useState<ViewName>("table");
   const [selected, setSelected] = useState<string | null>(jobFromPath(window.location.pathname));
   const [submitting, setSubmitting] = useState(false);
-  const details = useJobDetails(api.jobFull, jobs, selected, view === "pipeline");
+  const details = useJobDetails(api.jobFull, jobs, selected, view === "pipeline" || view === "table");
   const lanes = useMemo(() => pipelineLanes(details.data ?? []), [details.data]);
+  const prLinks = useMemo(
+    () => Object.fromEntries((details.data ?? []).map((d) => [d.job.id, prLinkOf(d)])),
+    [details.data],
+  );
   const detail = details.data?.find((d) => d.job.id === selected) ?? null;
   const pick = (job: JobView) => setSelected(job.id);
   const common = { selected, onSelect: pick };
@@ -226,7 +231,7 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
       >
         Jobs
       </Header>
-      {view === "table" && <TableView jobs={jobs} {...common} />}
+      {view === "table" && <TableView jobs={jobs} prLinks={prLinks} {...common} />}
       {view === "board" && <BoardView jobs={jobs} {...common} />}
       {view === "pipeline" && <PipelineView lanes={lanes} {...common} />}
       {detail && <DetailPanel detail={detail} api={api} onChanged={() => { onChanged(); void details.refresh(); }} />}
