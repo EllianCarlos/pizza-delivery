@@ -82,7 +82,7 @@ impl Defaults {
 pub fn tier_for(stage: &str) -> SizeTier {
     match stage {
         "implement" => SizeTier::Large,
-        "ship" | "grill" => SizeTier::Small,
+        "ship" | "disambiguate" => SizeTier::Small,
         _ => SizeTier::Medium,
     }
 }
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn cold_start_estimates_fall_back_to_the_tier_defaults() {
         let got = estimate_plan(
-            &planned(&["grill", "implement"]),
+            &planned(&["disambiguate", "implement"]),
             "claude",
             &[],
             &Defaults::standard(),
@@ -318,7 +318,7 @@ mod tests {
             got,
             vec![
                 StageEstimate {
-                    stage: "grill".into(),
+                    stage: "disambiguate".into(),
                     tier: SizeTier::Small,
                     tokens: 50_000,
                     wall_ms: 120_000
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn actual_usage_is_summed_across_recorded_stages_ignoring_unknowns() {
         let events = vec![
-            ev(1, recorded("grill", Some(40), Some(1))),
+            ev(1, recorded("disambiguate", Some(40), Some(1))),
             ev(2, recorded("implement", None, None)),
             ev(3, recorded("review", Some(70), Some(2))),
         ];
@@ -439,10 +439,13 @@ mod tests {
     #[test]
     fn samples_come_only_from_fully_known_actuals() {
         let events = vec![
-            ev(1, recorded("grill", Some(40), Some(1))),
+            ev(1, recorded("disambiguate", Some(40), Some(1))),
             ev(2, recorded("implement", None, Some(5))),
         ];
-        assert_eq!(samples(&events), vec![sample("grill", "claude", 40, 1)]);
+        assert_eq!(
+            samples(&events),
+            vec![sample("disambiguate", "claude", 40, 1)]
+        );
     }
 
     #[test]

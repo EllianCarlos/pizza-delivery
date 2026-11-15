@@ -32,7 +32,7 @@ fn an_explicit_repo_is_triaged_with_a_plan_context_and_context_read_events() -> 
         .iter()
         .filter_map(|s| s["name"].as_str())
         .collect();
-    assert_eq!(stages, vec!["grill", "implement", "review", "ship"]);
+    assert_eq!(stages, vec!["disambiguate", "implement", "review", "ship"]);
     assert!(result["plan"][0]["reason"]
         .as_str()
         .is_some_and(|r| !r.is_empty()));
@@ -166,7 +166,7 @@ fn dry_run_reflects_options_and_enqueues_nothing() -> TestResult {
         .iter()
         .filter_map(|s| s["name"].as_str())
         .collect();
-    assert_eq!(stages, vec!["investigate", "grill"]);
+    assert_eq!(stages, vec!["investigate", "disambiguate"]);
     assert!(triage["task"]
         .as_str()
         .is_some_and(|t| t.contains("Hint: start with the logs")));
@@ -212,6 +212,6 @@ fn a_submitted_jobs_plan_honours_report_only_and_max_stages() -> TestResult {
         .as_array()
         .ok_or("no plan")?;
     assert_eq!(plan.len(), 1);
-    assert_eq!(plan[0]["name"], "grill");
+    assert_eq!(plan[0]["name"], "disambiguate");
     Ok(())
 }

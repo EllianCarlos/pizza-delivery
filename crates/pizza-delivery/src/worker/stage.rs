@@ -116,7 +116,8 @@ impl Worker<'_> {
         } else {
             0
         };
-        let start = (pizza_delivery_core::resilience::escalation(&history) + earlier_rounds)
+        let start = (pizza_delivery_core::resilience::start_offset(&claimed.name, &history)
+            + earlier_rounds)
             .min(routed.candidates.len().saturating_sub(1));
         for (position, candidate) in routed.candidates.iter().enumerate().skip(start) {
             match self.try_candidate(claimed, &run, position, candidate, note.as_deref())? {
@@ -310,6 +311,8 @@ impl Worker<'_> {
                 .config
                 .timeout
                 .unwrap_or_else(|| stage_timeout(&claimed.name, tier_of(&claimed.name))),
+            max_cost_usd: (claimed.name == disambiguate::STAGE)
+                .then(|| disambiguate::MAX_COST_USD.to_owned()),
             grace: self.config.kill_grace,
             sandbox: sandbox.clone(),
             egress_log: egress_log.clone(),

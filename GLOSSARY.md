@@ -2,7 +2,9 @@
 
 **Job**: one submitted prompt and its whole run through the pipeline.
 
-**Stage**: one pipeline step inside a job (for example self-grill, spec, implement, review).
+**Stage**: one pipeline step inside a job (for example disambiguate, spec, implement, review).
+
+**Disambiguate**: the first stage of every plan template. It resolves and verifies the repository, gathers context from memory, the repository and linked URLs or PRs, restates the task, and records every leftover ambiguity as an assumption. It never asks questions. Later stages inherit its assumption list and do not re-record identical assumptions.
 
 **Handoff**: the validated document a finishing stage passes to the next stage.
 

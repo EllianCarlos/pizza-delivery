@@ -2,8 +2,6 @@ mod harness;
 
 use harness::{Harness, LedgerRow, TestResult};
 
-const GRILL_FIVE_ROUNDS: &str = "## Round 1\n- Q: which db?\n  A: sqlite\n  confidence: 90\n## Round 2\n- Q: which port?\n  A: 8080\n  confidence: 30\n  alternatives: 80, 9000\n  impact: clients reconfigure\n## Round 3\n- Q: who pays?\n  A: unanswerable\n## Round 4\n- Q: late question?\n  A: x\n  confidence: 10\n## Round 5\n- Q: later question?\n  A: y\n  confidence: 10\n";
-const GRILL_CLEAN: &str = "## Round 1\n- Q: which db?\n  A: sqlite\n  confidence: 90\n";
 const BLOCKING: &str =
     "## Findings\n- [blocking] null deref in parser\n- [non-blocking] rename helper\n";
 const CLEAN: &str = "## Findings\nNone\n";
@@ -20,7 +18,6 @@ const CYCLIC_TICKETS: &[(&str, &str)] = &[
 const NO_FEEDBACK: &str = "none";
 
 struct Plan<'a> {
-    grill: &'a str,
     review_first: &'a str,
     review_after_fix: &'a str,
     tickets: &'a [(&'a str, &'a str)],
@@ -30,7 +27,6 @@ struct Plan<'a> {
 impl Default for Plan<'_> {
     fn default() -> Self {
         Self {
-            grill: GRILL_CLEAN,
             review_first: CLEAN,
             review_after_fix: CLEAN,
             tickets: GOOD_TICKETS,
@@ -51,9 +47,7 @@ STAGE_DIR=$(dirname "$PIZZA_DELIVERY_HANDOFF")
 STAGE=$(basename "$STAGE_DIR" | sed 's/^[0-9]*-//')
 JOB=$(basename "$(dirname "$(dirname "$STAGE_DIR")")")
 case "$STAGE" in
-grill)
-cat > "$STAGE_DIR/grill.md" <<'G'
-{grill}G
+disambiguate)
 ;;
 spec)
 mkdir -p "docs/specs/$JOB/tickets"
@@ -75,7 +69,6 @@ fi
 esac
 {handoff}echo '{{"type":"result","is_error":false}}'
 "#,
-        grill = plan.grill,
         spec = SPEC,
         tickets = tickets,
         first = plan.review_first,
@@ -104,9 +97,9 @@ fn stage_names(job: &serde_json::Value) -> Vec<String> {
 }
 
 #[test]
-fn the_grill_never_blocks_and_stops_at_its_round_cap() -> TestResult {
+fn the_disambiguate_stage_never_blocks_and_asks_nothing() -> TestResult {
     let h = Harness::with_agent(&agent(&Plan {
-        grill: GRILL_FIVE_ROUNDS,
+        assumptions: "- Scope: only the CLI, not the web UI [confidence: 30; alternatives: both; impact: high; evidence: prompt]",
         ..Plan::default()
     }))?;
     let id = h.submit_in_repo("fix the bug")?;
@@ -115,43 +108,54 @@ fn the_grill_never_blocks_and_stops_at_its_round_cap() -> TestResult {
 
     assert_eq!(job["state"], "completed");
     let feedback = rows(&h, &id, "feedback-recorded")?;
-    let texts: Vec<String> = feedback
-        .iter()
-        .filter_map(|r| r.payload["text"].as_str().map(str::to_owned))
-        .collect();
-    assert!(texts.iter().any(|t| t.contains("which port?")));
-    assert!(texts.iter().any(|t| t == "who pays?"));
-    assert!(!texts.iter().any(|t| t.contains("late question?")));
-    assert!(texts.iter().any(|t| t.contains("round cap of 3")));
-    let port = feedback
+    assert!(feedback.iter().all(|r| r.payload["kind"] != "question"));
+    let scope = feedback
         .iter()
         .find(|r| {
             r.payload["text"]
                 .as_str()
-                .is_some_and(|t| t.contains("which port?"))
+                .is_some_and(|t| t.starts_with("Scope:"))
         })
-        .ok_or("no port entry")?;
-    assert_eq!(port.payload["confidence"], 30);
-    assert_eq!(
-        port.payload["alternatives"],
-        serde_json::json!(["80", "9000"])
-    );
-    assert_eq!(port.payload["impact"], "clients reconfigure");
+        .ok_or("no scope entry")?;
+    assert_eq!(scope.payload["confidence"], 30);
+    assert_eq!(scope.payload["impact"], "high");
     Ok(())
 }
 
 #[test]
-fn a_missing_grill_transcript_does_not_block_the_job() -> TestResult {
-    let script = agent(&Plan::default()).replace(
-        "cat > \"$STAGE_DIR/grill.md\" <<'G'",
-        "cat > /dev/null <<'G'",
-    );
+fn a_disambiguate_handoff_without_a_verified_repository_is_retried_once_then_fails() -> TestResult {
+    let script = agent(&Plan::default()).replace("- Repository: /repo", "- Repository: unresolved");
     let h = Harness::with_agent(&script)?;
     let id = h.submit_in_repo("fix the bug")?;
 
     let job = h.wait_for_end(&id)?;
 
-    assert_eq!(job["state"], "completed");
+    assert_eq!(job["state"], "failed");
+    let retried = rows(&h, &id, "stage-retried")?;
+    assert_eq!(retried.len(), 1);
+    assert!(retried[0].payload["reason"]
+        .as_str()
+        .is_some_and(|r| r.contains("invalid disambiguate handoff")));
+    assert_eq!(stage_names(&job), vec!["disambiguate"]);
+    Ok(())
+}
+
+#[test]
+fn later_stages_do_not_re_record_assumptions_an_earlier_stage_made() -> TestResult {
+    let h = Harness::with_agent(&agent(&Plan {
+        assumptions:
+            "- The API stays v1 [confidence: 30; alternatives: v2; impact: high; evidence: repo]",
+        ..Plan::default()
+    }))?;
+    let id = h.submit_in_repo("fix the bug")?;
+    h.wait_for_end(&id)?;
+
+    let recorded = rows(&h, &id, "feedback-recorded")?
+        .into_iter()
+        .filter(|r| r.payload["text"] == "The API stays v1")
+        .count();
+
+    assert_eq!(recorded, 1);
     Ok(())
 }
 
@@ -165,7 +169,7 @@ fn the_spec_stage_commits_to_a_valid_graph_and_indexes_the_files() -> TestResult
     assert_eq!(job["state"], "completed");
     assert_eq!(
         stage_names(&job),
-        vec!["grill", "spec", "implement", "review"]
+        vec!["disambiguate", "spec", "implement", "review"]
     );
     let artifacts = rows(&h, &id, "artifact-recorded")?;
     let kinds = |kind: &str| {
@@ -228,7 +232,7 @@ fn a_fixed_finding_is_fixed_once_and_re_reviewed_clean() -> TestResult {
     assert_eq!(job["state"], "completed");
     assert_eq!(
         stage_names(&job),
-        vec!["grill", "implement", "review", "fix", "review"]
+        vec!["disambiguate", "implement", "review", "fix", "review"]
     );
     assert_eq!(rows(&h, &id, "plan-amended")?.len(), 1);
     assert!(!rows(&h, &id, "feedback-recorded")?
@@ -252,7 +256,7 @@ fn the_review_fix_loop_stops_after_two_rounds_and_records_the_leftovers() -> Tes
     assert_eq!(
         stage_names(&job),
         vec![
-            "grill",
+            "disambiguate",
             "implement",
             "review",
             "fix",
@@ -316,9 +320,14 @@ fn agent_invoked_events_carry_template_name_version_and_prompt_hash() -> TestRes
                 .to_owned()
         })
         .collect();
-    assert_eq!(templates, vec!["grill", "implement", "review"]);
+    assert_eq!(templates, vec!["disambiguate", "implement", "review"]);
     for row in &invoked {
-        assert_eq!(row.payload["version"], 2);
+        let expected = if row.payload["template"] == "disambiguate" {
+            1
+        } else {
+            2
+        };
+        assert_eq!(row.payload["version"], expected);
         assert!(row.payload["prompt_sha256"]
             .as_str()
             .is_some_and(|h| h.len() == 64));

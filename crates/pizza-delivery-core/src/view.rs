@@ -469,9 +469,12 @@ mod tests {
     #[test]
     fn plan_carries_reasons_and_the_latest_estimates() {
         let events = [
-            event(1, triaged(&[("grill", "clarify"), ("implement", "build")])),
-            event(2, estimated("grill", SizeTier::Small, 100)),
-            event(3, estimated("grill", SizeTier::Medium, 900)),
+            event(
+                1,
+                triaged(&[("disambiguate", "clarify"), ("implement", "build")]),
+            ),
+            event(2, estimated("disambiguate", SizeTier::Small, 100)),
+            event(3, estimated("disambiguate", SizeTier::Medium, 900)),
         ];
         let plan = plan_view(&events);
         assert_eq!(plan.stages.len(), 2);
@@ -540,7 +543,7 @@ mod tests {
         };
         let detail = job_detail(
             job("j1", JobState::Queued),
-            &[(1, event(1, triaged(&[("grill", "x")])))],
+            &[(1, event(1, triaged(&[("disambiguate", "x")])))],
             &[entry("j1"), entry("j2")],
         );
         assert_eq!(detail.feedback.len(), 1);
@@ -564,7 +567,7 @@ mod tests {
             )
         };
         let events = [
-            (1, event(1, triaged(&[("grill", "x")]))),
+            (1, event(1, triaged(&[("disambiguate", "x")]))),
             artifact(2, "a.md"),
             artifact(3, "b.md"),
         ];

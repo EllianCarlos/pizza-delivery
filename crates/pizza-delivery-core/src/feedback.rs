@@ -89,11 +89,61 @@ pub fn parse_feedback(handoff: &str) -> Vec<Feedback> {
         .collect()
 }
 
+fn normalize(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches('.')
+        .to_lowercase()
+}
+
+/// The assumption texts earlier stages recorded, without their metadata, in
+/// order and without repeats. Later stages inherit this list.
+pub fn inherited_assumptions<'a>(handoffs: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    handoffs
+        .into_iter()
+        .flat_map(parse_feedback)
+        .filter(|f| f.kind == "assumption")
+        .map(|f| f.text)
+        .fold(Vec::new(), |mut seen: Vec<String>, text| {
+            if !seen.iter().any(|s| normalize(s) == normalize(&text)) {
+                seen.push(text);
+            }
+            seen
+        })
+}
+
+/// Drops assumptions that repeat an inherited one, so a later stage does not
+/// re-record what an earlier stage already settled.
+pub fn drop_repeats(entries: Vec<Feedback>, inherited: &[String]) -> Vec<Feedback> {
+    entries
+        .into_iter()
+        .filter(|f| {
+            f.kind != "assumption" || !inherited.iter().any(|i| normalize(i) == normalize(&f.text))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const HANDOFF: &str = "---\njob: J\nstage: grill\n---\n\n## Goal\ng\n\n## Assumptions\n- The API stays v1 [confidence: 70; alternatives: bump to v2, keep both; impact: clients break on v2]\n- Tests run offline\n\n## Open questions\n- Which database? [confidence: 20; severity: high]\n\n## Risks\n- Migration may lock the table [severity: high; impact: downtime]\n";
+    #[test]
+    fn inherited_assumptions_are_deduplicated_and_repeats_are_dropped() {
+        let first =
+            "## Assumptions\n- The API stays v1 [confidence: 70; impact: low]\n- Use sqlite\n";
+        let second = "## Assumptions\n- the api stays v1.\n";
+        let inherited = inherited_assumptions([first, second]);
+        assert_eq!(inherited, vec!["The API stays v1", "Use sqlite"]);
+        let later = parse_feedback("## Assumptions\n- The API  stays v1 [confidence: 90]\n- New one\n## Risks\n- Use sqlite\n");
+        let kept: Vec<String> = drop_repeats(later, &inherited)
+            .into_iter()
+            .map(|f| f.text)
+            .collect();
+        assert_eq!(kept, vec!["New one", "Use sqlite"]);
+    }
+
+    const HANDOFF: &str = "---\njob: J\nstage: disambiguate\n---\n\n## Goal\ng\n\n## Assumptions\n- The API stays v1 [confidence: 70; alternatives: bump to v2, keep both; impact: clients break on v2]\n- Tests run offline\n\n## Open questions\n- Which database? [confidence: 20; severity: high]\n\n## Risks\n- Migration may lock the table [severity: high; impact: downtime]\n";
 
     fn entry(kind: &str) -> Option<Feedback> {
         parse_feedback(HANDOFF).into_iter().find(|f| f.kind == kind)

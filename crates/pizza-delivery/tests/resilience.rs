@@ -71,7 +71,7 @@ wait
         h.data_dir()
             .join("jobs")
             .join(&id)
-            .join("stages/1-grill/pids.txt"),
+            .join("stages/1-disambiguate/pids.txt"),
     )?;
     assert_eq!(pids.split_whitespace().count(), 4);
     for pid in pids.split_whitespace() {
@@ -130,11 +130,11 @@ fn a_crash_is_recovered_as_a_new_attempt_with_a_note_and_without_duplicate_work(
         h.data_dir()
             .join("jobs")
             .join(&id)
-            .join("stages/1-grill/interruption-1.md"),
+            .join("stages/1-disambiguate/interruption-1.md"),
     )?;
     assert!(note.contains("crash"));
     let log = h.vcs(&worktree(&h, &id), &["log", "--format=%s"])?;
-    assert!(log.contains("wip: grill attempt 1 interrupted (crash)"));
+    assert!(log.contains("wip: disambiguate attempt 1 interrupted (crash)"));
     Ok(())
 }
 

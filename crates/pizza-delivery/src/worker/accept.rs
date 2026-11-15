@@ -80,7 +80,7 @@ impl Worker<'_> {
             ));
         }
         let outcome = match claimed.name.as_str() {
-            "grill" => self.accept_grill(claimed, run)?,
+            "disambiguate" => self.accept_disambiguate(&text)?,
             "spec" => self.accept_spec(claimed, run)?,
             "review" => self.accept_review(claimed, run)?,
             _ => Ok(Vec::new()),
@@ -96,7 +96,16 @@ impl Worker<'_> {
                 path: handoff_rel.to_string_lossy().into_owned(),
             },
         )?;
-        self.record_gated_feedback(claimed, parse_feedback(&text))?;
+        let entries = if claimed.name == "disambiguate" {
+            parse_feedback(&text)
+        } else {
+            let events = self.with_store(|s| s.read_timeline(&claimed.job.id))?;
+            drop_repeats(
+                parse_feedback(&text),
+                &self.earlier_assumptions(&events, &claimed.stage_id),
+            )
+        };
+        self.record_gated_feedback(claimed, entries)?;
         self.record_feedback(claimed, Actor::Daemon, extra)?;
         if claimed.name == "review" {
             self.plan_review_follow_up(claimed, run)?;
@@ -104,19 +113,10 @@ impl Worker<'_> {
         Ok(Verdict::Succeeded)
     }
 
-    pub(super) fn accept_grill(
-        &self,
-        claimed: &Claimed,
-        run: &StageRun,
-    ) -> Result<Result<Vec<Feedback>, String>> {
-        let rel = run.relative.join("grill.md");
-        let Some(transcript) = self.read_data(&rel.to_string_lossy()) else {
-            return Ok(Ok(Vec::new()));
-        };
-        self.record_artifact(&claimed.job.id, &claimed.stage_id, "grill-transcript", &rel)?;
-        Ok(Ok(
-            grill::assess(&transcript, grill::DEFAULT_ROUND_CAP).feedback
-        ))
+    pub(super) fn accept_disambiguate(&self, text: &str) -> Result<Result<Vec<Feedback>, String>> {
+        Ok(disambiguate::validate(text)
+            .map(|()| Vec::new())
+            .map_err(|e| format!("invalid disambiguate handoff: {e}")))
     }
 
     pub(super) fn accept_spec(

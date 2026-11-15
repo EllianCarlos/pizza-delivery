@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::grill::DEFAULT_ROUND_CAP;
 use crate::handoff;
 
 const PREAMBLE: &str = "You are running unattended. Never ask the human anything. Wherever a skill or instruction says to ask, interview or check with the user, take the recommended answer and note it as an assumption in the handoff. Record every assumption you make, every question you could not answer and every risk you notice as a bullet in the handoff sections Assumptions, Open questions and Risks.";
@@ -15,7 +14,7 @@ fn calibration(auto_at: u8) -> String {
 }
 
 const EMBEDDED: [(&str, &str); 7] = [
-    ("grill", include_str!("../prompts/grill.md")),
+    ("disambiguate", include_str!("../prompts/disambiguate.md")),
     ("spec", include_str!("../prompts/spec.md")),
     ("investigate", include_str!("../prompts/investigate.md")),
     ("act", include_str!("../prompts/act.md")),
@@ -94,6 +93,8 @@ pub struct Vars<'a> {
     pub spec_dir: &'a str,
     pub previous_handoff: Option<&'a str>,
     pub review_report: Option<&'a str>,
+    /// Assumptions earlier stages already recorded; later stages inherit them.
+    pub inherited_assumptions: &'a [String],
     /// Confidence at or above which the agent proceeds without escalating.
     pub auto_at: u8,
 }
@@ -127,7 +128,6 @@ fn substitute(body: &str, vars: &Vars<'_>) -> String {
             "handoff_path" => Some(vars.handoff_path.to_owned()),
             "artifact_dir" => Some(vars.artifact_dir.to_owned()),
             "spec_dir" => Some(vars.spec_dir.to_owned()),
-            "grill_round_cap" => Some(DEFAULT_ROUND_CAP.to_string()),
             "previous_handoff" => Some(vars.previous_handoff.unwrap_or("none").to_owned()),
             "review_report" => Some(vars.review_report.unwrap_or("none").to_owned()),
             _ => None,
@@ -142,12 +142,31 @@ fn substitute(body: &str, vars: &Vars<'_>) -> String {
     out
 }
 
+fn inherited_block(vars: &Vars<'_>) -> String {
+    if vars.inherited_assumptions.is_empty() {
+        return String::new();
+    }
+    let list: String = vars
+        .inherited_assumptions
+        .iter()
+        .map(|a| format!("\n- {a}"))
+        .collect();
+    format!(
+        "\n\nAssumptions already recorded by earlier stages (starting with disambiguate). Treat them as settled: do not record an identical assumption again, only new ones or ones you change, and name any you override:{list}"
+    )
+}
+
 pub fn render(templates: &Templates, vars: &Vars<'_>) -> Option<Rendered> {
     let template = templates.get(vars.stage)?;
+    let body = format!(
+        "{}{}",
+        substitute(&template.body, vars).trim_end(),
+        inherited_block(vars)
+    );
     let text = format!(
         "{PREAMBLE}\n\n{}\n\n{}\n\nWhen the work is done, write the handoff document to {} using exactly this structure (the Risks section is optional):\n\n{}",
         calibration(vars.auto_at),
-        substitute(&template.body, vars).trim_end(),
+        body,
         vars.handoff_path,
         handoff::template(vars.job, vars.stage)
     );
@@ -196,6 +215,7 @@ mod tests {
             spec_dir: "docs/specs/J1",
             previous_handoff: None,
             review_report: None,
+            inherited_assumptions: &[],
             auto_at: 80,
         }
     }
@@ -207,7 +227,7 @@ mod tests {
     #[test]
     fn every_pipeline_stage_prompt_starts_with_the_autonomy_preamble() {
         for stage in [
-            "grill",
+            "disambiguate",
             "spec",
             "investigate",
             "act",
@@ -311,12 +331,38 @@ mod tests {
 
     #[test]
     fn the_prompt_asks_for_calibrated_metadata_with_the_configured_threshold() {
-        let mut v = vars("grill");
+        let mut v = vars("disambiguate");
         v.auto_at = 73;
         let prompt = render(&Templates::embedded(), &v)
             .map(|p| p.text)
             .unwrap_or_default();
         assert!(prompt.contains("[confidence: 0-100; alternatives: a, b; impact: low|medium|high|irreversible; evidence: <source>]"));
         assert!(prompt.contains("confidence is 73 or higher"));
+    }
+    #[test]
+    fn the_disambiguate_prompt_never_asks_and_resolves_the_repository_first() {
+        let prompt = render_stage("disambiguate")
+            .map(|p| p.text)
+            .unwrap_or_default();
+        assert!(prompt.contains("Never ask the human a question"));
+        assert!(prompt.contains("Resolve and verify the repository first"));
+        assert!(prompt.contains("Scope:"));
+        assert!(prompt.contains("- Repository:"));
+        assert!(!prompt.contains("self-grill"));
+        assert!(!prompt.contains("{{"));
+    }
+
+    #[test]
+    fn later_stages_inherit_the_assumption_list_and_are_told_not_to_repeat_it() {
+        let inherited = vec!["The API stays v1".to_owned()];
+        let mut v = vars("spec");
+        v.inherited_assumptions = &inherited;
+        let prompt = render(&Templates::embedded(), &v)
+            .map(|p| p.text)
+            .unwrap_or_default();
+        assert!(prompt.contains("do not record an identical assumption again"));
+        assert!(prompt.contains("- The API stays v1"));
+        let none = render_stage("spec").map(|p| p.text).unwrap_or_default();
+        assert!(!none.contains("already recorded by earlier stages"));
     }
 }

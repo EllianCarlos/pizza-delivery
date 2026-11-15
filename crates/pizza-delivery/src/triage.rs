@@ -416,6 +416,7 @@ impl TieBreaker for AgentTieBreaker<'_> {
             sandbox: SandboxProfile::default(),
             egress_log: self.cwd.join("tie-break-egress.log"),
             mcp_config: None,
+            max_cost_usd: None,
         };
         let output = self.agent.run(&invocation, &mut |_| {}).ok()?;
         if output.timed_out {

@@ -33,7 +33,7 @@ export const emptyOptionFields: OptionFields = {
 /** Models offered as suggestions; any other value can still be typed. */
 export const MODEL_SUGGESTIONS: { value: string; description: string }[] = [
   { value: "haiku", description: "Claude: cheapest; default for triage and memorize" },
-  { value: "sonnet", description: "Claude: default for grill, spec, implement, fix and review" },
+  { value: "sonnet", description: "Claude: default for disambiguate, spec, implement, fix and review" },
   { value: "opus", description: "Claude: hard or risky jobs" },
   { value: "gemini-flash", description: "Agy: fast Gemini model" },
   { value: "deepseek/chat", description: "Opencode: provider/model format" },

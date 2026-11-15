@@ -22,8 +22,7 @@ STAGE_DIR=$(dirname "$PIZZA_DELIVERY_HANDOFF")
 STAGE=$(basename "$STAGE_DIR" | sed 's/^[0-9]*-//')
 JOB=$(basename "$(dirname "$(dirname "$STAGE_DIR")")")
 case "$STAGE" in
-grill)
-printf '## Round 1\n- Q: which approach?\n  A: the simple one\n  confidence: 90\n' > "$STAGE_DIR/grill.md"
+disambiguate)
 ;;
 spec)
 mkdir -p "docs/specs/$JOB/tickets"
@@ -38,7 +37,7 @@ esac
 
 pub fn handoff_writer(stage: &str, assumptions: &str, next: &str) -> String {
     format!(
-        "cat > \"$PIZZA_DELIVERY_HANDOFF\" <<'DOC'\n---\njob: J\nstage: {stage}\n---\n\n## Goal\ndo the thing\n\n## What was done\ndid it\n\n## Decisions made\nnone\n\n## Assumptions\n{assumptions}\n\n## Open questions\nnone\n\n## Files touched\nnone\n\n## Instructions for the next stage\n{next}\nDOC\n"
+        "cat > \"$PIZZA_DELIVERY_HANDOFF\" <<'DOC'\n---\njob: J\nstage: {stage}\n---\n\n## Goal\ndo the thing\n\n## What was done\ndid it\n- Repository: /repo\n- Default branch: main\n- Remote: origin\n- Latest commit: abc1234 init\n- Resolved references: none\n\n## Decisions made\nnone\n\n## Assumptions\n{assumptions}\n\n## Open questions\nnone\n\n## Files touched\nnone\n\n## Instructions for the next stage\n{next}\nDOC\n"
     )
 }
 

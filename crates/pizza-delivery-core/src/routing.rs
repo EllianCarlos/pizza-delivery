@@ -49,7 +49,8 @@ impl AdapterKind {
     }
 }
 
-const SKILL_DRIVEN_STAGES: [&str; 6] = ["grill", "spec", "act", "implement", "fix", "review"];
+const SKILL_DRIVEN_STAGES: [&str; 6] =
+    ["disambiguate", "spec", "act", "implement", "fix", "review"];
 
 pub fn stage_capabilities(stage: &str) -> Vec<Capability> {
     if SKILL_DRIVEN_STAGES.contains(&stage) {
@@ -351,6 +352,12 @@ fn matching_rule<'a>(
         })
 }
 
+/// The disambiguate stage never runs on agy: agy wrote no handoff on every
+/// earlier attempt at this stage, and the stage is too short to retry there.
+fn refuses(stage: &str, adapter: AdapterKind) -> bool {
+    stage == crate::disambiguate::STAGE && adapter == AdapterKind::Agy
+}
+
 pub fn route(
     config: &RoutingConfig,
     request: &RouteRequest<'_>,
@@ -362,10 +369,9 @@ pub fn route(
         .chain
         .iter()
         .filter(|c| {
-            config
-                .agents
-                .get(&c.agent)
-                .is_some_and(|a| a.adapter.has(request.required))
+            config.agents.get(&c.agent).is_some_and(|a| {
+                a.adapter.has(request.required) && !refuses(request.stage, a.adapter)
+            })
         })
         .collect();
     if capable.is_empty() {
@@ -449,7 +455,7 @@ pub fn resolve_models(config: &RoutingConfig, routed: Routed, inputs: &ModelInpu
 /// Stages the daemon routes, in pipeline order, plus the two cheap ones.
 pub const CHECKED_STAGES: [&str; 9] = [
     "triage",
-    "grill",
+    "disambiguate",
     "spec",
     "investigate",
     "act",
@@ -519,7 +525,7 @@ pub fn check(config: &RoutingConfig) -> CheckReport {
                             config.agents.get(&c.agent).map(|a| CheckedCandidate {
                                 candidate: c.clone(),
                                 adapter: a.adapter,
-                                usable: a.adapter.has(&required),
+                                usable: a.adapter.has(&required) && !refuses(stage, a.adapter),
                             })
                         })
                         .collect();
@@ -703,7 +709,7 @@ chain = [
 
     #[test]
     fn skill_driven_stages_route_only_to_skill_capable_adapters() {
-        for stage in ["grill", "spec", "implement", "fix", "review"] {
+        for stage in ["disambiguate", "spec", "implement", "fix", "review"] {
             let needs = stage_capabilities(stage);
             let routed = route(&config(), &req(stage, &needs), &QuotaSnapshot::default(), 0);
             assert_eq!(needs, vec![Capability::Skills], "{stage}");
@@ -720,6 +726,39 @@ chain = [
         for stage in ["triage", "investigate"] {
             assert_eq!(stage_capabilities(stage), vec![], "{stage}");
         }
+    }
+
+    #[test]
+    fn disambiguate_is_never_routed_to_agy() {
+        let needs = stage_capabilities("disambiguate");
+        let routed = route(
+            &config(),
+            &req("disambiguate", &needs),
+            &QuotaSnapshot::default(),
+            0,
+        );
+        let agents: Vec<String> = routed
+            .map(|r| r.candidates.into_iter().map(|c| c.agent).collect())
+            .unwrap_or_default();
+        assert!(!agents.is_empty());
+        assert!(!agents.iter().any(|a| a == "agy"), "{agents:?}");
+        let only_agy = RoutingConfig::builtin("claude").with_owner(
+            "[agents.agy]\nadapter = \"agy\"\ncommand = \"agy\"\n[[rules]]\nstage = \"disambiguate\"\nchain = [{ agent = \"agy\" }]",
+        );
+        let routed = only_agy.map(|c| {
+            route(
+                &c,
+                &req("disambiguate", &needs),
+                &QuotaSnapshot::default(),
+                0,
+            )
+        });
+        assert_eq!(
+            routed,
+            Ok(Err(RouteError::NoCapableAgent {
+                stage: "disambiguate".to_owned()
+            }))
+        );
     }
 
     #[test]
@@ -912,7 +951,7 @@ chain = [{ agent = "hermes" }]
         );
         assert!(triage.is_some_and(|s| s.problem.is_none()));
         for name in [
-            "grill",
+            "disambiguate",
             "spec",
             "implement",
             "fix",

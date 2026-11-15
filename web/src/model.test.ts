@@ -231,7 +231,7 @@ test("tool-called events are hidden unless shown or their family is filtered", (
 
 test("artifact paths read as stage and file", () => {
   expect(labelArtifact("jobs/01M78/context.md")).toEqual({ stage: "job", file: "context.md", order: -1 });
-  expect(labelArtifact("jobs/01M78/stages/1-grill/handoff.md")).toEqual({ stage: "grill", file: "handoff.md", order: 1 });
+  expect(labelArtifact("jobs/01M78/stages/1-disambiguate/handoff.md")).toEqual({ stage: "disambiguate", file: "handoff.md", order: 1 });
   expect(labelArtifact("jobs/01M78/stages/12-review/out/raw.jsonl")).toEqual({ stage: "review", file: "out/raw.jsonl", order: 12 });
   expect(labelArtifact("worktrees/pizza-delivery/01M78/docs/specs/01M78/spec.md").file).toBe("docs/specs/01M78/spec.md");
   expect(labelArtifact("odd.txt")).toEqual({ stage: "", file: "odd.txt", order: 0 });
@@ -270,10 +270,10 @@ test("problems list each failure, retry and fallback with its reason and stage",
     failed,
     ev(4, "job-failed", { reason: "worktree: boom" }),
   ];
-  const problems = problemsOf(detailOf([stage("S1", "grill", "failed", null)], events));
+  const problems = problemsOf(detailOf([stage("S1", "disambiguate", "failed", null)], events));
   expect(problems.map((p) => [p.stage, p.kind, p.reason])).toEqual([
     ["-", "agent-fell-back", "agy: quota"],
-    ["grill", "stage-failed", "worktree: boom"],
+    ["disambiguate", "stage-failed", "worktree: boom"],
     ["-", "job-failed", "worktree: boom"],
   ]);
 });

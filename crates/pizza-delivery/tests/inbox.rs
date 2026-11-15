@@ -3,9 +3,9 @@ mod harness;
 use harness::{Harness, LedgerRow, TestResult};
 
 fn harness() -> TestResult<Harness> {
-    let script = harness::VALID_HANDOFF_AGENT.replace(
+    let script = harness::VALID_HANDOFF_AGENT.replace("<<'DOC'", "<<DOC").replace(
         "## Assumptions\nnone",
-        "## Assumptions\n- The API stays v1 [confidence: 70; alternatives: bump to v2; impact: clients break]",
+        "## Assumptions\n- The API stays v1 in $STAGE [confidence: 70; alternatives: bump to v2; impact: clients break]",
     );
     Harness::with_agent(&script)
 }
@@ -58,7 +58,9 @@ fn the_inbox_lists_feedback_entries_with_their_job_and_state() -> TestResult {
     for entry in &entries {
         assert_eq!(entry["job"], job.as_str());
         assert_eq!(entry["kind"], "assumption");
-        assert_eq!(entry["text"], "The API stays v1");
+        assert!(entry["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("The API stays v1")));
         assert_eq!(entry["status"], "open");
         assert_eq!(entry["answered_by"], serde_json::Value::Null);
     }
