@@ -48,6 +48,8 @@ pub trait Git: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeReadiness {
     Ready,
+    /// Mergeable, but the repository reported no CI checks at all.
+    ReadyWithoutChecks,
     Blocked(String),
 }
 
@@ -294,7 +296,7 @@ impl Git for SystemGit {
                 PrPoll::Ready => return Ok(MergeReadiness::Ready),
                 PrPoll::Blocked(reason) => return Ok(MergeReadiness::Blocked(reason)),
                 PrPoll::NoChecks if started.elapsed() >= NO_CHECKS_GRACE => {
-                    return Ok(MergeReadiness::Ready)
+                    return Ok(MergeReadiness::ReadyWithoutChecks)
                 }
                 PrPoll::NoChecks => "no checks have reported yet".to_owned(),
                 PrPoll::Pending(reason) => reason,
