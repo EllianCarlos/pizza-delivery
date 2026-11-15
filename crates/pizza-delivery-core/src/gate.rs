@@ -66,6 +66,7 @@ pub enum GateDecision {
     Inbox,
     HandoffOnly,
     AutoResolved,
+    RuleSuppressed,
 }
 
 impl GateDecision {
@@ -74,6 +75,7 @@ impl GateDecision {
             Self::Inbox => "inbox",
             Self::HandoffOnly => "handoff-only",
             Self::AutoResolved => "auto-resolved",
+            Self::RuleSuppressed => "rule-suppressed",
         }
     }
 }

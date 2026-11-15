@@ -490,6 +490,16 @@ fn route(api: &Api, req: &Req) -> Reply {
             Response::Error { error } => failed(error),
             _ => bad(ErrorKind::Internal, "unexpected response"),
         },
+        ("GET", ["api", "insights"]) => match api.run(Request::Insights) {
+            Response::Insights { insights } => ok(&insights),
+            Response::Error { error } => failed(error),
+            _ => bad(ErrorKind::Internal, "unexpected response"),
+        },
+        ("GET", ["api", "suppressions"]) => match api.run(Request::Suppressions) {
+            Response::Suppressions { rules } => ok(&rules),
+            Response::Error { error } => failed(error),
+            _ => bad(ErrorKind::Internal, "unexpected response"),
+        },
         ("GET", ["api", "inbox"]) => {
             let all = matches!(query(req, "all"), Some("1" | "true"));
             let statuses = query(req, "status")

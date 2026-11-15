@@ -6,10 +6,12 @@ use crate::exit::ExitCode;
 use crate::filter::{ArtifactFilter, ArtifactItem, EventFilter, InboxFilter};
 use crate::id::JobId;
 use crate::inbox::InboxEntry;
+use crate::insights::Insights;
 use crate::job::JobState;
 use crate::quota::QuotaView;
 use crate::schedule::Priority;
 use crate::stage::StageView;
+use crate::suppress::Rule;
 use crate::triage::{Outcome, TriageOptions};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +77,11 @@ pub enum Request {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         priority: Option<Priority>,
+    },
+    Insights,
+    Suppressions,
+    Unsuppress {
+        rule: String,
     },
     Stop,
 }
@@ -163,6 +170,15 @@ pub enum Response {
         id: JobId,
         short_id: String,
         answered: Vec<String>,
+    },
+    Insights {
+        insights: Insights,
+    },
+    Suppressions {
+        rules: Vec<Rule>,
+    },
+    Unsuppressed {
+        rule: String,
     },
     Stopped,
     Error {

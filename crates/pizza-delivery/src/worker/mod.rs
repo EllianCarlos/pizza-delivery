@@ -29,13 +29,14 @@ use pizza_delivery_core::sandbox::{blocked_hosts, Mount, SandboxProfile, TrustCo
 use pizza_delivery_core::ship::{pr_title, render_pr_body, DiffPolicy};
 use pizza_delivery_core::spec;
 use pizza_delivery_core::stage::{StageState, PIPELINE_STAGES};
+use pizza_delivery_core::suppress;
 use pizza_delivery_core::triage::{
     amend_plan, current_plan, Feedback, PlannedStage, DEFAULT_MAX_STAGES,
 };
 use pizza_delivery_core::{
-    fix_rounds, fold_stages, is_cancelled, pipeline_done, render_interruption_note, retry_history,
-    stage_timeout, worktree_removable, Caps, ClaimRequest, Claimed, Interruption, Job, JobId,
-    JobState, NewEvent, RetryCause, Store, StoreError, Tier, WorktreeFacts,
+    fix_rounds, fold_stages, is_cancelled, ledger_events, pipeline_done, render_interruption_note,
+    retry_history, stage_timeout, worktree_removable, Caps, ClaimRequest, Claimed, Interruption,
+    Job, JobId, JobState, NewEvent, RetryCause, Store, StoreError, Tier, WorktreeFacts,
 };
 use sha2::{Digest, Sha256};
 

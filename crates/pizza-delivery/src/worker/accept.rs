@@ -7,7 +7,24 @@ impl Worker<'_> {
         actor: Actor,
         entries: Vec<Feedback>,
     ) -> Result<()> {
+        let rules = self
+            .with_store(|s| ledger_events(&*s))
+            .map(|events| suppress::rules(&events))?;
         for f in entries {
+            if suppress::matching(&rules, claimed.job.repo.as_deref(), &f.kind, &f.text).is_some() {
+                self.append(
+                    &claimed.job.id,
+                    Some(&claimed.stage_id),
+                    EventPayload::FeedbackSuppressed {
+                        kind: f.kind,
+                        text: f.text,
+                        confidence: f.confidence,
+                        impact: f.impact.as_deref().and_then(Impact::parse),
+                        decision: GateDecision::RuleSuppressed,
+                    },
+                )?;
+                continue;
+            }
             let event = NewEvent {
                 id: self.env.new_ulid(),
                 job_id: claimed.job.id.clone(),

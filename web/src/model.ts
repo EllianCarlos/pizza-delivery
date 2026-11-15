@@ -7,10 +7,10 @@ import type { StageState } from "./generated/StageState";
 
 export const PHONE_MAX_WIDTH = 600;
 
-export type Route = "home" | "jobs" | "inbox" | "events" | "artifacts";
+export type Route = "home" | "jobs" | "inbox" | "events" | "artifacts" | "insights";
 
 /** The views grouped under the "Agent workers" section of the navigation. */
-export const AGENT_WORKER_ROUTES = ["jobs", "inbox", "events", "artifacts"] as const;
+export const AGENT_WORKER_ROUTES = ["jobs", "inbox", "events", "artifacts", "insights"] as const;
 
 export function landingRoute(width: number): Route {
   return width <= PHONE_MAX_WIDTH ? "inbox" : "home";
@@ -18,7 +18,7 @@ export function landingRoute(width: number): Route {
 
 export function routeFromHash(hash: string): Route | null {
   if (hash === "" || hash === "#" || hash === "#/") return "home";
-  const match = /^#\/agent-workers\/(jobs|inbox|events|artifacts)\/?$/.exec(hash);
+  const match = /^#\/agent-workers\/(jobs|inbox|events|artifacts|insights)\/?$/.exec(hash);
   return (match?.[1] as Route | undefined) ?? null;
 }
 
