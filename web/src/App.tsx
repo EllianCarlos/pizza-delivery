@@ -173,13 +173,16 @@ function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onCl
               <FormField label="Risk flags" description="Comma-separated, kebab-case">
                 <Input value={fields.riskFlags} onChange={({ detail }) => set({ riskFlags: detail.value })} />
               </FormField>
-              <FormField label="Model" description="Claude model for every stage, e.g. haiku or sonnet. Empty lets routing choose.">
+              <FormField
+                label="Model"
+                description="Model for every stage, e.g. haiku or sonnet (Claude), gemini-flash (agy), deepseek/chat (opencode). Empty lets routing choose; applies to Claude agents."
+              >
                 <Autosuggest
                   value={fields.model}
                   onChange={({ detail }) => set({ model: detail.value })}
                   options={MODEL_SUGGESTIONS}
                   enteredTextLabel={(value) => `Use "${value}"`}
-                  placeholder="haiku, sonnet or a full model id"
+                  placeholder="haiku, gemini-flash, deepseek/chat or full model id"
                   empty="No matching suggestion"
                 />
               </FormField>
