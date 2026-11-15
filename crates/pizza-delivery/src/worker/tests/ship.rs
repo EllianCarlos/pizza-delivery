@@ -102,12 +102,31 @@ fn a_report_only_job_ends_with_a_report_artifact_and_never_ships() -> Result<()>
 fn a_rejected_push_fails_the_job_with_the_reason() -> Result<()> {
     let rig = Rig::new(vec![good()])?;
     plan_of(&rig, &["implement", "ship"])?;
+    *acquire(&rig.git.files, "files")? = vec!["src/a.rs".to_owned()];
     rig.git.push_fails.store(true, Ordering::SeqCst);
 
     rig.worker().tick()?;
 
     assert_eq!(rig.job_state()?, JobState::Failed);
     assert!(acquire(&rig.git.prs, "prs")?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_job_with_no_changes_completes_with_a_report_and_opens_no_pr() -> Result<()> {
+    let rig = Rig::new(vec![good()])?;
+    plan_of(&rig, &["implement", "ship"])?;
+    acquire(&rig.git.files, "files")?.clear();
+
+    rig.worker().tick()?;
+
+    assert_eq!(rig.job_state()?, JobState::Completed);
+    assert!(acquire(&rig.git.pushes, "pushes")?.is_empty());
+    assert!(acquire(&rig.git.prs, "prs")?.is_empty());
+    let has_report = rig.timeline()?.into_iter().any(
+        |e| matches!(&e.payload, EventPayload::ArtifactRecorded { kind, .. } if kind == "report"),
+    );
+    assert!(has_report);
     Ok(())
 }
 

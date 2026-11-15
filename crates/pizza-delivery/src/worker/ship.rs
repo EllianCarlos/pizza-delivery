@@ -293,6 +293,12 @@ impl Worker<'_> {
             Ok(files) => files,
             Err(e) => return Ok(Err(format!("ship: {e:#}"))),
         };
+        if files.is_empty() {
+            // Nothing to ship (report-only or investigation work): pushing an
+            // empty branch makes `gh pr create` fail with "No commits between".
+            self.report(job, events)?;
+            return Ok(Ok(Delivery::Done));
+        }
         let policy = DiffPolicy::evaluate(&files);
         if let Some(risk) = policy.risk() {
             let event = NewEvent {
