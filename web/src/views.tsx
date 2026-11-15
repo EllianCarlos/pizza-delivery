@@ -34,14 +34,17 @@ export function StateBadge({ state }: { state: JobState | Segment["state"] }) {
   return <StatusIndicator type={stateType(state)}>{state}</StatusIndicator>;
 }
 
+const emptyText = (total: number) => (total > 0 ? "No jobs match the current filters" : "No jobs yet");
+
 type Pick = { selected: string | null; onSelect: (job: JobView) => void };
 
 export function TableView({
   jobs,
+  total = jobs.length,
   selected,
   onSelect,
   prLinks = {},
-}: { jobs: JobView[]; prLinks?: Record<string, string | null> } & Pick) {
+}: { jobs: JobView[]; total?: number; prLinks?: Record<string, string | null> } & Pick) {
   return (
     <Table
       variant="embedded"
@@ -53,7 +56,7 @@ export function TableView({
         const job = detail.selectedItems[0];
         if (job) onSelect(job);
       }}
-      empty={<Box textAlign="center">No jobs yet</Box>}
+      empty={<Box textAlign="center">{emptyText(total)}</Box>}
       columnDefinitions={[
         { id: "id", header: "Job", cell: (j) => j.short_id },
         { id: "state", header: "State", cell: (j) => <StateBadge state={j.state} /> },
@@ -78,9 +81,9 @@ export function TableView({
   );
 }
 
-export function BoardView({ jobs, selected, onSelect }: { jobs: JobView[] } & Pick) {
+export function BoardView({ jobs, total = jobs.length, selected, onSelect }: { jobs: JobView[]; total?: number } & Pick) {
   const columns = groupByState(jobs).filter((c) => c.jobs.length > 0);
-  if (columns.length === 0) return <Box textAlign="center">No jobs yet</Box>;
+  if (columns.length === 0) return <Box textAlign="center">{emptyText(total)}</Box>;
   return (
     <ColumnLayout columns={Math.min(columns.length, 4)}>
       {columns.map((column) => (
@@ -108,8 +111,8 @@ export function BoardView({ jobs, selected, onSelect }: { jobs: JobView[] } & Pi
   );
 }
 
-export function PipelineView({ lanes, selected, onSelect }: { lanes: Lane[] } & Pick) {
-  if (lanes.length === 0) return <Box textAlign="center">No jobs yet</Box>;
+export function PipelineView({ lanes, total = lanes.length, selected, onSelect }: { lanes: Lane[]; total?: number } & Pick) {
+  if (lanes.length === 0) return <Box textAlign="center">{emptyText(total)}</Box>;
   return (
     <SpaceBetween size="m">
       {lanes.map((lane) => (

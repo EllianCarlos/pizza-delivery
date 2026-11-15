@@ -65,6 +65,23 @@ export const STATE_ORDER: JobState[] = [
   "cancelled",
 ];
 
+export const FINISHED_JOB_STATES: readonly JobState[] = ["completed", "failed", "cancelled"];
+
+export function isFinishedJobState(state: JobState): boolean {
+  return FINISHED_JOB_STATES.includes(state);
+}
+
+/** A non-empty state filter wins; otherwise finished jobs show only when `showFinished`. */
+export function visibleJobs(
+  jobs: JobView[],
+  states: ReadonlySet<JobState> | readonly JobState[],
+  showFinished: boolean,
+): JobView[] {
+  const chosen = new Set<JobState>(states);
+  if (chosen.size > 0) return jobs.filter((j) => chosen.has(j.state));
+  return showFinished ? jobs : jobs.filter((j) => !isFinishedJobState(j.state));
+}
+
 export type Column = { state: JobState; jobs: JobView[] };
 export type Artifact = { index: number; kind: string; path: string; sha256: string };
 

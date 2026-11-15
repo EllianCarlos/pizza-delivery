@@ -28,6 +28,10 @@
 
 **Pipeline**: the view that shows one lane per job with one segment per stage.
 
+**Finished jobs**: jobs in a terminal state (completed, failed, cancelled). The Jobs page hides them by default; the "Show finished jobs" toggle or a job state filter that selects them shows them.
+
+**Job state filter**: the multi-select in the Jobs page header that narrows every view (Table, Board, Pipeline) to the chosen states. Empty means no restriction, so visibility follows "Show finished jobs"; a non-empty filter wins over the toggle. Held in page state only, not persisted.
+
 **Filter**: a set of property constraints that narrows a list of events, artifacts or feedback entries (the inbox). The inbox filter also covers an entry's status: open, answered or dismissed. Different properties are ANDed; repeated values of one property are ORed.
 
 **Search**: a case-insensitive substring match over an item's text fields, ANDed with the filter.
