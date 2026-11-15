@@ -258,7 +258,12 @@ impl Rig {
                 now: AtomicI64::new(100),
                 next: AtomicI64::new(1),
             },
-            git: FakeGit::default(),
+            git: FakeGit {
+                // A job normally changes something; tests of the no-change
+                // path clear this.
+                files: Mutex::new(vec!["src/work.rs".to_owned()]),
+                ..FakeGit::default()
+            },
             egress: Arc::clone(&egress),
             prompts: Arc::clone(&prompts),
             fleet: Fleet::new(
