@@ -14,10 +14,11 @@ fn calibration(auto_at: u8) -> String {
     )
 }
 
-const EMBEDDED: [(&str, &str); 6] = [
+const EMBEDDED: [(&str, &str); 7] = [
     ("grill", include_str!("../prompts/grill.md")),
     ("spec", include_str!("../prompts/spec.md")),
     ("investigate", include_str!("../prompts/investigate.md")),
+    ("act", include_str!("../prompts/act.md")),
     ("implement", include_str!("../prompts/implement.md")),
     ("fix", include_str!("../prompts/fix.md")),
     ("review", include_str!("../prompts/review.md")),
@@ -205,7 +206,15 @@ mod tests {
 
     #[test]
     fn every_pipeline_stage_prompt_starts_with_the_autonomy_preamble() {
-        for stage in ["grill", "spec", "investigate", "implement", "fix", "review"] {
+        for stage in [
+            "grill",
+            "spec",
+            "investigate",
+            "act",
+            "implement",
+            "fix",
+            "review",
+        ] {
             let prompt = render_stage(stage);
             assert!(
                 prompt.as_ref().is_some_and(|p| p

@@ -49,7 +49,7 @@ impl AdapterKind {
     }
 }
 
-const SKILL_DRIVEN_STAGES: [&str; 5] = ["grill", "spec", "implement", "fix", "review"];
+const SKILL_DRIVEN_STAGES: [&str; 6] = ["grill", "spec", "act", "implement", "fix", "review"];
 
 pub fn stage_capabilities(stage: &str) -> Vec<Capability> {
     if SKILL_DRIVEN_STAGES.contains(&stage) {
@@ -447,11 +447,12 @@ pub fn resolve_models(config: &RoutingConfig, routed: Routed, inputs: &ModelInpu
 }
 
 /// Stages the daemon routes, in pipeline order, plus the two cheap ones.
-pub const CHECKED_STAGES: [&str; 8] = [
+pub const CHECKED_STAGES: [&str; 9] = [
     "triage",
     "grill",
     "spec",
     "investigate",
+    "act",
     "implement",
     "fix",
     "review",

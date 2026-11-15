@@ -133,17 +133,18 @@ fn hard_stops_bypass_the_gate_whatever_the_thresholds() -> TestResult {
 }
 
 #[test]
-fn an_unresolved_repo_still_reaches_the_inbox_with_permissive_thresholds() -> TestResult {
-    let h = Harness::new()?
-        .with_env("PIZZA_DELIVERY_GATE_INBOX_BELOW", "0")
-        .with_env("PIZZA_DELIVERY_GATE_AUTO_AT", "0");
+fn a_prompt_naming_no_project_runs_as_an_action_and_says_so() -> TestResult {
+    let h = Harness::new()?;
     h.repo()?;
     let id = h.submit("do something unrelated")?;
 
-    h.wait_for_state(&id, &["needs-human"])?;
+    h.wait_for_state(&id, &["completed"])?;
 
-    assert!(of_kind(&h, &id, "feedback-recorded")?
-        .iter()
-        .any(|f| f["kind"] == "needs-human"));
+    assert!(of_kind(&h, &id, "feedback-recorded")?.iter().any(|f| {
+        f["kind"] == "assumption"
+            && f["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("repository-less action"))
+    }));
     Ok(())
 }

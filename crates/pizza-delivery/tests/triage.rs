@@ -88,22 +88,22 @@ fn a_low_confidence_pick_logs_an_assumption_and_still_runs() -> TestResult {
 }
 
 #[test]
-fn no_candidate_ends_the_job_as_needs_human_with_a_feedback_entry() -> TestResult {
+fn no_candidate_runs_the_job_as_a_repo_less_action_with_an_assumption() -> TestResult {
     let h = Harness::new()?;
     h.repo()?;
     let id = h.submit("do something unrelated")?;
 
-    let job = h.wait_for_state(&id, &["needs-human"])?;
+    let job = h.wait_for_state(&id, &["completed"])?;
 
-    assert_eq!(job["state"], "needs-human");
+    assert_eq!(job["state"], "completed");
     let ledger = h.ledger()?;
     let feedback = ledger
         .iter()
         .find(|r| r.kind == "feedback-recorded")
         .ok_or("no feedback")?;
-    assert_eq!(feedback.payload["kind"], "needs-human");
-    assert!(ledger.iter().any(|r| r.kind == "job-needs-human"));
-    assert!(!ledger.iter().any(|r| r.kind == "stage-claimed"));
+    assert_eq!(feedback.payload["kind"], "assumption");
+    assert!(ledger.iter().any(|r| r.kind == "stage-claimed"));
+    assert!(!ledger.iter().any(|r| r.kind == "job-needs-human"));
     Ok(())
 }
 
@@ -128,12 +128,13 @@ fn dry_run_prints_the_triage_and_enqueues_nothing() -> TestResult {
 }
 
 #[test]
-fn dry_run_without_a_candidate_exits_3() -> TestResult {
+fn dry_run_without_a_candidate_plans_a_repo_less_action() -> TestResult {
     let h = Harness::new()?;
 
     let cli = h.run(&["--dry-run", "do something unrelated"])?;
 
-    assert_eq!(cli.code, 3);
+    assert_eq!(cli.code, 0);
+    assert!(cli.stdout.contains("\"act\""), "{}", cli.stdout);
     assert!(h.ledger().map(|l| l.is_empty()).unwrap_or(true));
     Ok(())
 }

@@ -6,8 +6,15 @@ use crate::usage::Usage;
 
 pub const STAGE_NAME: &str = "implement";
 
-pub const PIPELINE_STAGES: [&str; 6] =
-    ["grill", "spec", "investigate", "implement", "fix", "review"];
+pub const PIPELINE_STAGES: [&str; 7] = [
+    "grill",
+    "spec",
+    "investigate",
+    "act",
+    "implement",
+    "fix",
+    "review",
+];
 
 pub fn pipeline(events: &[Event]) -> Vec<String> {
     let triaged = events

@@ -58,6 +58,10 @@ A chain moves to its next candidate when an agent is out of quota or hits a prov
 
 Set `PIZZA_DELIVERY_SHADOW_MODEL` (an Ollama model such as `qwen3.5:4b`) to ask a local model, once per job before the first agent stage, which Claude model each stage should use. It follows the SOP in `PIZZA_DELIVERY_TRIAGE_SOP` (default `triage-sop.md` next to the routing file). Ollama is reached at `PIZZA_DELIVERY_SHADOW_URL` (default `http://localhost:11434`). Jobs are split by a hash of their id: `PIZZA_DELIVERY_DECIDER_LIVE_PERCENT` (default 50) of jobs without risk flags run the decider's picks (haiku or sonnet only), the rest are the control group, and jobs with risk flags are always control. The decision is stored as the `model-decider` artifact; at job end a `model-shadow` artifact compares the picks with the models that ran, their cost and the outcome. The decider's pick comes after the job, chain and `[[models]]` choices.
 
+### Jobs without a repository
+
+A prompt that matches no known project runs as an `action`: one `act` stage in a fresh scratch repository under the data dir, with your home directory writable in its sandbox, ending in a report with no pull request. The job records a medium-severity assumption saying so; if a project was meant, resubmit with `--repo`. A mistyped `--repo` is still rejected at submit.
+
 ### Waiting for CI
 
 After the draft PR is opened, the daemon always waits (up to 20 minutes) for every automatic check to finish, whether or not the PR is eligible to auto-merge. If any check fails, the PR stays open, a `pr-not-merged` event records the failing checks, and the job ends as needs-human instead of completed. Merge conflicts and a checks timeout are recorded the same way but leave the job completed.
