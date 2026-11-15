@@ -60,6 +60,20 @@ pub fn escalation(history: &[RetryCause]) -> usize {
         .count()
 }
 
+/// Like `may_retry`, but a retry after bad work is also allowed while the
+/// chain (of `chain_len` candidates) still has an agent that has not tried,
+/// so escalation can reach the last candidate. The total cap still holds.
+pub fn may_retry_on_chain(cause: RetryCause, history: &[RetryCause], chain_len: usize) -> bool {
+    let escalates = matches!(
+        cause,
+        RetryCause::InvalidHandoff | RetryCause::Timeout | RetryCause::Crash
+    );
+    if escalates && history.len() < TOTAL_RETRY_CAP && escalation(history) + 1 < chain_len {
+        return true;
+    }
+    may_retry(cause, history)
+}
+
 pub fn may_retry(cause: RetryCause, history: &[RetryCause]) -> bool {
     history.len() < TOTAL_RETRY_CAP
         && history.iter().filter(|c| **c == cause).count() < cause.limit()
@@ -180,6 +194,24 @@ mod tests {
             ]),
             2
         );
+    }
+
+    #[test]
+    fn bad_work_keeps_retrying_while_the_chain_has_an_untried_agent() {
+        let once = [RetryCause::InvalidHandoff];
+        assert!(!may_retry(RetryCause::InvalidHandoff, &once));
+        assert!(may_retry_on_chain(RetryCause::InvalidHandoff, &once, 3));
+        assert!(!may_retry_on_chain(RetryCause::InvalidHandoff, &once, 2));
+        // On the last candidate only the cause's own limit is left.
+        let twice = [RetryCause::InvalidHandoff, RetryCause::InvalidHandoff];
+        assert!(!may_retry_on_chain(RetryCause::InvalidHandoff, &twice, 3));
+        let capped = [
+            RetryCause::Quota,
+            RetryCause::Quota,
+            RetryCause::Crash,
+            RetryCause::Transient,
+        ];
+        assert!(!may_retry_on_chain(RetryCause::Crash, &capped, 9));
     }
 
     #[test]

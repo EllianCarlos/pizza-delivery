@@ -68,6 +68,37 @@ fn a_retry_after_bad_work_escalates_to_the_next_candidate() -> Result<()> {
 }
 
 #[test]
+fn bad_work_escalates_through_a_three_agent_chain_to_the_last_agent() -> Result<()> {
+    let rig = Rig::with_chain(
+        vec![
+            ("claude", AdapterKind::Claude, vec![bad_handoff()]),
+            ("claude-alt", AdapterKind::Claude, vec![bad_handoff()]),
+            ("claude-last", AdapterKind::Claude, vec![good()]),
+        ],
+        r#"
+[agents.claude-alt]
+adapter = "claude"
+command = "claude"
+
+[agents.claude-last]
+adapter = "claude"
+command = "claude"
+
+[[rules]]
+chain = [{ agent = "claude" }, { agent = "claude-alt" }, { agent = "claude-last" }]
+"#,
+    )?;
+
+    for _ in 0..3 {
+        rig.worker().tick()?;
+    }
+
+    assert_eq!(rig.job_state()?, JobState::Completed);
+    assert_eq!(invoked(&rig)?, ["claude", "claude-alt", "claude-last"]);
+    Ok(())
+}
+
+#[test]
 fn a_fully_exhausted_chain_parks_the_job_until_the_earliest_known_reset_and_resumes_on_its_own(
 ) -> Result<()> {
     let rig = Rig::with_chain(
