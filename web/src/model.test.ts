@@ -5,6 +5,7 @@ import type { JobDetailView } from "./generated/JobDetailView";
 import type { StageView } from "./generated/StageView";
 import {
   prLinkOf,
+  visibleJobs,
   prStateText,
   artifactsOf,
   eventFamilies,
@@ -291,4 +292,30 @@ test("pull request state reads as one phrase", () => {
   expect(prStateText({ ...base, state: "not-merged", reason: "policy", ci_red: true })).toBe(
     "not merged: policy, CI was red",
   );
+});
+
+const jobIn = (state: JobView["state"]) => ({ id: state, state }) as unknown as JobView;
+const allStates = ["queued", "running", "waiting-for-quota", "needs-human", "completed", "failed", "cancelled"] as const;
+const everyJob = allStates.map(jobIn);
+const ids = (jobs: JobView[]) => jobs.map((j) => j.id);
+
+test("visibleJobs hides finished jobs by default", () => {
+  expect(ids(visibleJobs(everyJob, [], false))).toEqual(["queued", "running", "waiting-for-quota", "needs-human"]);
+});
+
+test("visibleJobs shows everything when finished jobs are enabled", () => {
+  expect(visibleJobs(everyJob, [], true)).toEqual(everyJob);
+});
+
+test("an explicit finished state overrides the selector", () => {
+  expect(ids(visibleJobs(everyJob, new Set(["completed"] as const), false))).toEqual(["completed"]);
+});
+
+test("a multi-state filter keeps only those states", () => {
+  expect(ids(visibleJobs(everyJob, ["running", "failed"], false))).toEqual(["running", "failed"]);
+});
+
+test("visibleJobs handles empty input and no matches", () => {
+  expect(visibleJobs([], [], false)).toEqual([]);
+  expect(visibleJobs([jobIn("queued")], ["failed"], true)).toEqual([]);
 });

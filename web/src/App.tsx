@@ -16,10 +16,13 @@ import SegmentedControl from "@cloudscape-design/components/segmented-control";
 import SpaceBetween from "@cloudscape-design/components/space-between";
 import Container from "@cloudscape-design/components/container";
 import SideNavigation from "@cloudscape-design/components/side-navigation";
+import Multiselect from "@cloudscape-design/components/multiselect";
+import Toggle from "@cloudscape-design/components/toggle";
 import Textarea from "@cloudscape-design/components/textarea";
 import TopNavigation, { type TopNavigationProps } from "@cloudscape-design/components/top-navigation";
 import { createApi } from "./api";
 import { useJobDetails, usePolled } from "./hooks";
+import type { JobState } from "./generated/JobState";
 import type { JobView } from "./generated/JobView";
 import {
   hashFor,
@@ -30,6 +33,7 @@ import {
   routeFromHash,
   STATE_ORDER,
   topNavItems,
+  visibleJobs,
   type Route,
 } from "./model";
 import { buildOptions, emptyOptionFields, MODEL_SUGGESTIONS, type OptionFields } from "./options";
@@ -200,8 +204,22 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
   const [view, setView] = useState<ViewName>("table");
   const [selected, setSelected] = useState<string | null>(jobFromPath(window.location.pathname));
   const [submitting, setSubmitting] = useState(false);
-  const details = useJobDetails(api.jobFull, jobs, selected, view === "pipeline" || view === "table");
-  const lanes = useMemo(() => pipelineLanes(details.data ?? []), [details.data]);
+  const [showFinished, setShowFinished] = useState(false);
+  const [selectedStates, setSelectedStates] = useState<JobState[]>([]);
+  const filteredJobs = useMemo(
+    () => visibleJobs(jobs, new Set(selectedStates), showFinished),
+    [jobs, selectedStates, showFinished],
+  );
+  // Keep the selected job's details loaded even when the filters hide it.
+  const detailJobs = useMemo(() => {
+    const open = jobs.find((j) => j.id === selected);
+    return open && !filteredJobs.includes(open) ? [...filteredJobs, open] : filteredJobs;
+  }, [jobs, filteredJobs, selected]);
+  const details = useJobDetails(api.jobFull, detailJobs, selected, view === "pipeline" || view === "table");
+  const lanes = useMemo(() => {
+    const shown = new Set(filteredJobs.map((j) => j.id));
+    return pipelineLanes((details.data ?? []).filter((d) => shown.has(d.job.id)));
+  }, [details.data, filteredJobs]);
   const prLinks = useMemo(
     () => Object.fromEntries((details.data ?? []).map((d) => [d.job.id, prLinkOf(d)])),
     [details.data],
@@ -213,6 +231,7 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
     <SpaceBetween size="l">
       <Header
         variant="h1"
+        counter={filteredJobs.length === jobs.length ? `(${jobs.length})` : `(${filteredJobs.length} of ${jobs.length})`}
         actions={
           <SpaceBetween size="xs" direction="horizontal">
             <SegmentedControl
@@ -224,6 +243,18 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
                 { id: "pipeline", text: "Pipeline" },
               ]}
             />
+            <Toggle checked={showFinished} onChange={({ detail }) => setShowFinished(detail.checked)}>
+              Show finished jobs
+            </Toggle>
+            <Multiselect
+              selectedOptions={selectedStates.map((s) => ({ label: s, value: s }))}
+              onChange={({ detail }) =>
+                setSelectedStates(detail.selectedOptions.map((o) => o.value as JobState))
+              }
+              options={STATE_ORDER.map((s) => ({ label: s, value: s }))}
+              placeholder="Filter by state"
+              hideTokens
+            />
             <Button variant="primary" disabled={api.staleSince() !== null} onClick={() => setSubmitting(true)}>
               Submit job
             </Button>
@@ -232,9 +263,9 @@ function JobsPage({ jobs, onChanged }: { jobs: JobView[]; onChanged: () => void 
       >
         Jobs
       </Header>
-      {view === "table" && <TableView jobs={jobs} prLinks={prLinks} {...common} />}
-      {view === "board" && <BoardView jobs={jobs} {...common} />}
-      {view === "pipeline" && <PipelineView lanes={lanes} {...common} />}
+      {view === "table" && <TableView jobs={filteredJobs} total={jobs.length} prLinks={prLinks} {...common} />}
+      {view === "board" && <BoardView jobs={filteredJobs} total={jobs.length} {...common} />}
+      {view === "pipeline" && <PipelineView lanes={lanes} total={jobs.length} {...common} />}
       {detail && <DetailPanel detail={detail} api={api} onChanged={() => { onChanged(); void details.refresh(); }} />}
       <SubmitModal visible={submitting} onClose={() => setSubmitting(false)} onSubmitted={onChanged} />
     </SpaceBetween>
