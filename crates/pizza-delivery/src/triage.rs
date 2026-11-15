@@ -11,8 +11,8 @@ use pizza_delivery_core::event::{Actor, EventPayload};
 use pizza_delivery_core::job::JobState;
 use pizza_delivery_core::sandbox::SandboxProfile;
 use pizza_delivery_core::triage::{
-    conclude_with, parse_choice, reply_text, resolve_repo, tiebreak_prompt, Candidate, Outcome,
-    Project, Triage, TriageOptions,
+    conclude_with, github_slugs, parse_choice, remote_slug, reply_text, resolve_repo,
+    tiebreak_prompt, Candidate, Outcome, Project, Triage, TriageOptions,
 };
 use pizza_delivery_core::{Job, JobId, NewEvent, Store, StoreError};
 use sha2::{Digest, Sha256};
@@ -34,6 +34,10 @@ const CONVENTION_FILES: [&str; 5] = [
 
 pub trait ProjectIndex: Send + Sync {
     fn projects(&self) -> Vec<Project>;
+    /// `owner/name` of the project's GitHub `origin`, when it has one.
+    fn remote_slug_of(&self, _project: &Project) -> Option<String> {
+        None
+    }
 }
 
 pub trait TieBreaker: Send + Sync {
@@ -63,6 +67,21 @@ pub fn analyze(
     deps: &Deps<'_>,
 ) -> Report {
     let index = deps.index.projects();
+    // A GitHub link in the prompt (a PR, an issue) names the repository.
+    let linked = if repo_flag.is_none() {
+        let slugs = github_slugs(prompt);
+        index
+            .iter()
+            .find(|p| {
+                deps.index
+                    .remote_slug_of(p)
+                    .is_some_and(|slug| slugs.contains(&slug))
+            })
+            .map(|p| p.path.clone())
+    } else {
+        None
+    };
+    let repo_flag = repo_flag.or(linked.as_deref());
     let resolution = resolve_repo(repo_flag, prompt, &index, &|top| {
         deps.tie_breaker.choose(prompt, top)
     });
@@ -319,6 +338,17 @@ fn engram_directories(db: &Path) -> Vec<PathBuf> {
 }
 
 impl ProjectIndex for SystemIndex {
+    fn remote_slug_of(&self, project: &Project) -> Option<String> {
+        let out = std::process::Command::new("git")
+            .args(["-C", &project.path, "remote", "get-url", "origin"])
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| remote_slug(&String::from_utf8_lossy(&out.stdout)))
+            .flatten()
+    }
+
     fn projects(&self) -> Vec<Project> {
         let scanned: Vec<PathBuf> = std::fs::read_dir(&self.projects_dir)
             .map(|entries| entries.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -470,6 +500,37 @@ mod tests {
         fn projects(&self) -> Vec<Project> {
             self.0.clone()
         }
+    }
+
+    struct RemoteIndex;
+
+    impl ProjectIndex for RemoteIndex {
+        fn projects(&self) -> Vec<Project> {
+            vec![project("website"), project("blog")]
+        }
+        fn remote_slug_of(&self, p: &Project) -> Option<String> {
+            (p.name == "website").then(|| "ellian/ellian.github.io".to_owned())
+        }
+    }
+
+    #[test]
+    fn a_github_link_in_the_prompt_resolves_the_repository_by_its_remote() {
+        let deps = Deps {
+            index: &RemoteIndex,
+            tie_breaker: &Choose(None),
+            sources: vec![],
+        };
+
+        let report = analyze(
+            "fix https://github.com/Ellian/ellian.github.io/pull/1",
+            None,
+            None,
+            &deps,
+        );
+
+        let repo = report.outcome.triage.map(|t| t.repo);
+        assert_eq!(repo.as_ref().map(|r| r.path.as_str()), Some("/p/website"));
+        assert_eq!(repo.map(|r| r.confidence), Some(100));
     }
 
     struct Choose(Option<usize>);
