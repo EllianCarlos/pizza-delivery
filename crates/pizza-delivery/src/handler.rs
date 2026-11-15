@@ -1,9 +1,10 @@
 use pizza_delivery_core::api::{ApiError, ErrorKind, JobView};
 use pizza_delivery_core::inbox::{fold_inbox, follow_up_prompt, EntryStatus, InboxEntry};
+use pizza_delivery_core::suppress;
 use pizza_delivery_core::{
-    check_range, filter_artifacts, filter_events, filter_inbox, fold_quota, fold_stages,
-    quota_views, resolve, short_id, Actor, EventPayload, FollowUp, Job, JobId, JobState, NewEvent,
-    NewJob, Priority, Request, ResolveError, Response, Store, StoreError,
+    aggregate, check_range, filter_artifacts, filter_events, filter_inbox, fold_quota, fold_stages,
+    ledger_events, quota_views, resolve, short_id, Actor, EventPayload, FollowUp, Job, JobId,
+    JobState, NewEvent, NewJob, Priority, Request, ResolveError, Response, Store, StoreError,
 };
 
 pub trait Env: Send + Sync {
@@ -453,7 +454,61 @@ pub fn handle(request: Request, store: &mut dyn Store, env: &dyn Env) -> Respons
             text,
             priority,
         } => reply(&targets, &text, priority, store, env),
+        Request::Insights => match ledger_events(store) {
+            Ok(events) => Response::Insights {
+                insights: aggregate(&events),
+            },
+            Err(e) => internal(e),
+        },
+        Request::Suppressions => match ledger_events(store) {
+            Ok(events) => Response::Suppressions {
+                rules: suppress::rules(&events),
+            },
+            Err(e) => internal(e),
+        },
+        Request::Unsuppress { rule } => unsuppress(&rule, store, env),
         Request::Stop => Response::Stopped,
+    }
+}
+
+fn unsuppress(reference: &str, store: &mut dyn Store, env: &dyn Env) -> Response {
+    let events = match ledger_events(store) {
+        Ok(events) => events,
+        Err(e) => return internal(e),
+    };
+    let rules = suppress::rules(&events);
+    let found = match suppress::resolve_rule(&rules, reference) {
+        Ok(found) => found,
+        Err(hits) if hits.is_empty() => {
+            return error(
+                ErrorKind::NotFound,
+                format!("no suppression rule matches {reference:?}"),
+                vec![],
+            )
+        }
+        Err(_) => {
+            return error(
+                ErrorKind::Ambiguous,
+                format!("{reference:?} matches several suppression rules"),
+                vec![],
+            )
+        }
+    };
+    let event = NewEvent {
+        id: env.new_ulid(),
+        job_id: JobId::new(found.job.clone()),
+        stage_id: None,
+        ts_ms: env.now_ms(),
+        actor: Actor::Human,
+        payload: EventPayload::SuppressionRemoved {
+            rule: found.id.clone(),
+        },
+    };
+    match store.append_event(event) {
+        Ok(_) => Response::Unsuppressed {
+            rule: found.id.clone(),
+        },
+        Err(e) => internal(e),
     }
 }
 

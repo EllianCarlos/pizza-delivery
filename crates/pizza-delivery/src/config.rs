@@ -42,6 +42,12 @@ pub struct Config {
     pub reject_window_ms: u64,
     pub vapid_subject: String,
     pub auto_merge: bool,
+    /// File insight proposals as GitHub issues without `--file-issues`. Off by default.
+    pub insights_file_issues: bool,
+    /// Occurrences before a pattern becomes a proposed improvement.
+    pub insights_threshold: u32,
+    pub insights_repo: String,
+    pub gh_command: PathBuf,
     pub shadow: Option<ShadowConfig>,
 }
 
@@ -225,6 +231,19 @@ impl Config {
                     .as_deref(),
                 Some("0" | "false" | "off" | "no")
             ),
+            insights_file_issues: matches!(
+                get("PIZZA_DELIVERY_INSIGHTS_FILE_ISSUES")
+                    .map(|v| v.to_lowercase())
+                    .as_deref(),
+                Some("1" | "true" | "on" | "yes")
+            ),
+            insights_threshold: get("PIZZA_DELIVERY_INSIGHTS_THRESHOLD")
+                .and_then(|v| v.parse().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(3),
+            insights_repo: get("PIZZA_DELIVERY_INSIGHTS_REPO")
+                .unwrap_or_else(|| "EllianCarlos/pizza-delivery".to_owned()),
+            gh_command: path_or("PIZZA_DELIVERY_GH", PathBuf::from("gh")),
             reject_window_ms: number("PIZZA_DELIVERY_AUTH_REJECT_WINDOW_MS", 60_000),
             vapid_subject: get("PIZZA_DELIVERY_VAPID_SUBJECT")
                 .unwrap_or_else(|| "mailto:owner@pizza-delivery.invalid".to_owned()),
@@ -499,6 +518,21 @@ mod tests {
             ("PIZZA_DELIVERY_AUTO_MERGE", "1"),
         ]))?;
         assert!(c.auto_merge);
+        Ok(())
+    }
+
+    #[test]
+    fn filing_insight_issues_is_opt_in_with_a_threshold_of_three() -> Result<(), ConfigError> {
+        let off = Config::from_lookup(lookup(&[("HOME", "/h")]))?;
+        assert!(!off.insights_file_issues);
+        assert_eq!(off.insights_threshold, 3);
+        let on = Config::from_lookup(lookup(&[
+            ("HOME", "/h"),
+            ("PIZZA_DELIVERY_INSIGHTS_FILE_ISSUES", "1"),
+            ("PIZZA_DELIVERY_INSIGHTS_THRESHOLD", "5"),
+        ]))?;
+        assert!(on.insights_file_issues);
+        assert_eq!(on.insights_threshold, 5);
         Ok(())
     }
 

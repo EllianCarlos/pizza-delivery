@@ -36,6 +36,7 @@ import { buildOptions, emptyOptionFields, MODEL_SUGGESTIONS, type OptionFields }
 import { previewSummary, type TriagePreview } from "./triage";
 import { enablePush, pushSupported } from "./push";
 import { ArtifactBrowser, DetailPanel, EventsPanel, InboxPanel } from "./panels";
+import { InsightsPanel } from "./InsightsPanel";
 import { BoardView, PipelineView, TableView } from "./views";
 
 const api = createApi();
@@ -245,6 +246,7 @@ const AGENT_WORKER_LINKS: { route: Exclude<Route, "home">; text: string }[] = [
   { route: "inbox", text: "Inbox" },
   { route: "events", text: "Events" },
   { route: "artifacts", text: "Artifacts" },
+  { route: "insights", text: "Insights" },
 ];
 
 function HomePage({ jobs }: { jobs: JobView[] }) {
@@ -350,6 +352,7 @@ export function App() {
             {route === "inbox" && <InboxPanel api={api} />}
             {route === "events" && <EventsPanel api={api} />}
             {route === "artifacts" && <ArtifactBrowser jobs={list} api={api} />}
+            {route === "insights" && <InsightsPanel api={api} />}
           </SpaceBetween>
         }
       />

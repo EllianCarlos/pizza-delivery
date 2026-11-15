@@ -32,4 +32,8 @@
 
 **Search**: a case-insensitive substring match over an item's text fields, ANDed with the filter.
 
+**Insights**: deterministic patterns mined from the ledger (retry and failure causes by stage and agent, feedback dismissal rates, stage durations and cost, lease expiries per daemon run). A pattern at or above the threshold (default 3) can be filed as a `needs-triage` GitHub issue, only when the owner opts in with `--file-issues` or `PIZZA_DELIVERY_INSIGHTS_FILE_ISSUES`; an open issue for the same pattern is never duplicated and nothing is implemented or merged automatically.
+
+**Suppression rule**: a per-repo rule learned from a dismissed feedback entry or one answered "no issue". The same kind and text in the same repo is kept out of the inbox (recorded as a `feedback-suppressed` event with decision `rule-suppressed`). The owner lists rules with `pizza-delivery suppressions` and removes one with `suppressions remove <id>`.
+
 **Triage options**: the optional "Additional Parameters" a submitter can give with a job (template, report-only, max stages, context hint, extra risk flags) to override or sharpen what triage would decide from the prompt alone.

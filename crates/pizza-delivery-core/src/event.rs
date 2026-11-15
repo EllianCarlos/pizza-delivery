@@ -234,6 +234,9 @@ pub enum EventPayload {
         count: u32,
         reasons: std::collections::BTreeMap<String, u32>,
     },
+    SuppressionRemoved {
+        rule: String,
+    },
     Conciliated {
         repo: String,
         pr: u64,
@@ -296,6 +299,7 @@ impl EventPayload {
             EventPayload::WriteBack { .. } => "write-back",
             EventPayload::RemoteAction { .. } => "remote-action",
             EventPayload::AuthRejected { .. } => "auth-rejected",
+            EventPayload::SuppressionRemoved { .. } => "suppression-removed",
             EventPayload::Conciliated { .. } => "conciliated",
         }
     }

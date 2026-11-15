@@ -8,6 +8,7 @@ mod config;
 mod git;
 mod handler;
 mod http;
+mod insights_cmd;
 mod lock;
 mod mcp_broker;
 mod notify;
@@ -168,6 +169,12 @@ enum RoutingAction {
 }
 
 #[derive(Subcommand)]
+enum SuppressionAction {
+    /// Remove a rule by id (or unique id prefix); the entry can be raised again
+    Remove { rule: String },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Inspect agent routing without the daemon
     Routing {
@@ -236,6 +243,27 @@ enum Command {
         /// Print the plan only; change nothing
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Group ledger events into patterns (retry and failure causes, feedback
+    /// rates, stage durations and cost, lease expiries)
+    Insights {
+        /// Emit JSON lines even on a terminal
+        #[arg(long)]
+        json: bool,
+        /// File patterns above the threshold as GitHub issues (needs-triage); off by default
+        #[arg(long)]
+        file_issues: bool,
+        /// Occurrences before a pattern becomes a proposal (default 3)
+        #[arg(long)]
+        threshold: Option<u32>,
+    },
+    /// List the per-repo rules that keep dismissed or "no issue" feedback out, or remove one
+    Suppressions {
+        #[command(subcommand)]
+        action: Option<SuppressionAction>,
+        /// Emit JSON lines even on a terminal
+        #[arg(long)]
+        json: bool,
     },
     /// Cancel a job, terminate its running stage and keep its worktree
     Cancel { job: String },
@@ -500,6 +528,24 @@ fn present(reply: Result<Response, ClientError>, mode: OutputMode) -> ProcessExi
             print!("{}", render_replied(&id, &short_id, &answered, mode));
             exit(ExitCode::Success)
         }
+        Ok(Response::Insights { insights }) => {
+            print!(
+                "{}",
+                pizza_delivery_core::render_insights(&insights, mode == OutputMode::Json)
+            );
+            exit(ExitCode::Success)
+        }
+        Ok(Response::Suppressions { rules }) => {
+            print!(
+                "{}",
+                pizza_delivery_core::render_rules(&rules, mode == OutputMode::Json)
+            );
+            exit(ExitCode::Success)
+        }
+        Ok(Response::Unsuppressed { rule }) => {
+            println!("removed {rule}");
+            exit(ExitCode::Success)
+        }
         Ok(Response::Stopped) => exit(ExitCode::Success),
         Ok(Response::Error { error }) => {
             eprintln!("error: {}", error.message);
@@ -626,6 +672,24 @@ fn run(cli: Cli) -> ProcessExitCode {
             }
         },
         Some(Command::Conciliate { repo, dry_run }) => run_conciliate(&config, repo, dry_run),
+        Some(Command::Insights {
+            json,
+            file_issues,
+            threshold,
+        }) => exit(insights_cmd::run(
+            &config,
+            OutputMode::resolve(json, tty) == OutputMode::Json,
+            file_issues,
+            threshold,
+        )),
+        Some(Command::Suppressions { action, json }) => request(
+            &config,
+            match action {
+                None => Request::Suppressions,
+                Some(SuppressionAction::Remove { rule }) => Request::Unsuppress { rule },
+            },
+            OutputMode::resolve(json, tty),
+        ),
         Some(Command::McpBroker { .. } | Command::InstallService | Command::Completions { .. }) => {
             exit(ExitCode::General)
         }

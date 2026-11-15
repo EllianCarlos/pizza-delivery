@@ -2,6 +2,7 @@ import type { ApiError } from "./generated/ApiError";
 import type { DismissedView } from "./generated/DismissedView";
 import type { EventsView } from "./generated/EventsView";
 import type { InboxView } from "./generated/InboxView";
+import type { InsightsView, SuppressionRule } from "./insights";
 import type { JobDetailView } from "./generated/JobDetailView";
 import type { JobFullView } from "./generated/JobFullView";
 import type { JobsView } from "./generated/JobsView";
@@ -92,6 +93,8 @@ export function createApi(
     job: (ref: string) => call<JobDetailView>(`/api/jobs/${ref}`),
     jobFull: (ref: string) => call<JobFullView>(`/api/jobs/${ref}/detail`),
     quota: () => call<QuotaPanelView>("/api/quota"),
+    insights: () => call<InsightsView>("/api/insights"),
+    suppressions: () => call<SuppressionRule[]>("/api/suppressions"),
     inbox: (query: InboxQuery = {}) => call<InboxView>(inboxPath(query)),
     events: (since = 0) => call<EventsView>(`/api/events?since=${since}`),
     artifact: (ref: string, index: number) =>

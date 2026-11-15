@@ -13,6 +13,7 @@ pub mod gate;
 pub mod handoff;
 pub mod id;
 pub mod inbox;
+pub mod insights;
 pub mod job;
 pub mod mcp;
 pub mod memorize;
@@ -30,6 +31,7 @@ pub mod ship;
 pub mod spec;
 pub mod stage;
 pub mod store;
+pub mod suppress;
 pub mod triage;
 pub mod tui;
 pub mod usage;
@@ -44,6 +46,7 @@ pub use filter::{
 };
 pub use gate::{gate, GateDecision, GateItem, GateThresholds, Impact};
 pub use id::{resolve, short_id, JobId, ResolveError};
+pub use insights::{aggregate, ledger_events, proposals, render_insights, Insights, Proposal};
 pub use job::{apply, fold, Job, JobState};
 pub use quota::{fold_quota, quota_views, QuotaSnapshot, QuotaStatus, QuotaView};
 pub use render::{
@@ -60,5 +63,6 @@ pub use stage::{
     fix_rounds, fold_stages, next_claim, pipeline, pipeline_done, ClaimPlan, StageState, StageView,
 };
 pub use store::{ClaimRequest, Claimed, ExpiredLease, NewEvent, NewJob, Store, StoreError};
+pub use suppress::{render_rules, Rule};
 pub use triage::TriageOptions;
 pub use usage::Usage;
