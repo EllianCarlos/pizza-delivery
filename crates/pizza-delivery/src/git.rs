@@ -21,7 +21,13 @@ pub trait Git: Send + Sync {
     }
     /// A worktree on the pull request's own branch (fetched if it exists
     /// only on the remote), so follow-up work lands on that PR.
-    fn ensure_pr_worktree(&self, _repo: &Path, _worktree: &Path, _branch: &str) -> Result<()> {
+    fn ensure_pr_worktree(
+        &self,
+        _repo: &Path,
+        _worktree: &Path,
+        _local: &str,
+        _remote_branch: &str,
+    ) -> Result<()> {
         Err(anyhow!("ensure_pr_worktree is not supported"))
     }
     fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>>;
@@ -250,42 +256,35 @@ impl Git for SystemGit {
         Ok(Some(out).filter(|b| !b.is_empty()))
     }
 
-    fn ensure_pr_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
+    fn ensure_pr_worktree(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        local: &str,
+        remote_branch: &str,
+    ) -> Result<()> {
         if worktree.join(".git").exists() {
             return Ok(());
         }
         if let Some(parent) = worktree.parent() {
             std::fs::create_dir_all(parent).context("create worktree parent")?;
         }
-        let _ = run(repo, &["fetch", "origin", branch]);
+        // A fresh local branch tracking the PR's branch: the PR branch itself
+        // may be checked out by an earlier job's worktree.
+        run(repo, &["fetch", "origin", remote_branch])?;
         let path = worktree.to_string_lossy();
-        let local = run(
+        run(
             repo,
             &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{branch}"),
+                "worktree",
+                "add",
+                "-b",
+                local,
+                &path,
+                &format!("origin/{remote_branch}"),
             ],
         )
-        .is_ok();
-        if local {
-            run(repo, &["worktree", "add", &path, branch])?;
-        } else {
-            run(
-                repo,
-                &[
-                    "worktree",
-                    "add",
-                    "--track",
-                    "-b",
-                    branch,
-                    &path,
-                    &format!("origin/{branch}"),
-                ],
-            )?;
-        }
-        Ok(())
+        .map(|_| ())
     }
 
     fn commit_wip(&self, worktree: &Path, message: &str) -> Result<Option<String>> {
@@ -565,8 +564,16 @@ impl<G: Git> Git for LockedGit<G> {
         self.inner.ci_failure(worktree, pr_url)
     }
 
-    fn ensure_pr_worktree(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<()> {
-        self.serialized(repo, |g| g.ensure_pr_worktree(repo, worktree, branch))
+    fn ensure_pr_worktree(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        local: &str,
+        remote_branch: &str,
+    ) -> Result<()> {
+        self.serialized(repo, |g| {
+            g.ensure_pr_worktree(repo, worktree, local, remote_branch)
+        })
     }
 
     fn push(&self, worktree: &Path, remote: &str, branch: &str) -> Result<String> {

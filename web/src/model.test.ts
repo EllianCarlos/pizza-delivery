@@ -15,6 +15,7 @@ import {
   hashFor,
   jobSummary,
   pipelineLanes,
+  problemsOf,
   routeFromHash,
   segmentsOf,
   stageRows,
@@ -255,4 +256,20 @@ test("topNavItems link hrefs round-trip through routeFromHash", () => {
     expect(item.href).toBe(hashFor(route));
     expect(routeFromHash(item.href)).toBe(route);
   });
+});
+
+test("problems list each failure, retry and fallback with its reason and stage", () => {
+  const failed = { ...ev(3, "stage-failed", { reason: "worktree: boom" }), stage_id: "S1" };
+  const events = [
+    ev(1, "stage-started"),
+    ev(2, "agent-fell-back", { agent: "agy", reason: "quota" }),
+    failed,
+    ev(4, "job-failed", { reason: "worktree: boom" }),
+  ];
+  const problems = problemsOf(detailOf([stage("S1", "grill", "failed", null)], events));
+  expect(problems.map((p) => [p.stage, p.kind, p.reason])).toEqual([
+    ["-", "agent-fell-back", "agy: quota"],
+    ["grill", "stage-failed", "worktree: boom"],
+    ["-", "job-failed", "worktree: boom"],
+  ]);
 });
