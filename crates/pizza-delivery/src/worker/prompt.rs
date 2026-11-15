@@ -40,7 +40,9 @@ impl Worker<'_> {
             _ => None,
         });
         let report = events.iter().rev().find_map(|e| match &e.payload {
-            EventPayload::ArtifactRecorded { kind, path, .. } if kind == "review-report" => {
+            EventPayload::ArtifactRecorded { kind, path, .. }
+                if kind == "review-report" || kind == "ci-failure" =>
+            {
                 self.read_data(path)
             }
             _ => None,

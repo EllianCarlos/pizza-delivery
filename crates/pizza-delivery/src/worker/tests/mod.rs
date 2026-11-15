@@ -51,10 +51,16 @@ struct FakeGit {
     merges: Mutex<Vec<String>>,
     no_checks: AtomicBool,
     pr_head: Mutex<Option<String>>,
+    ci: Mutex<Option<crate::git::CiFailure>>,
     pr_worktrees: Mutex<Vec<String>>,
 }
 
 impl Git for FakeGit {
+    fn ci_failure(&self, _worktree: &Path, _pr_url: &str) -> Result<crate::git::CiFailure> {
+        acquire(&self.ci, "ci")?
+            .clone()
+            .ok_or_else(|| anyhow!("no ci failure scripted"))
+    }
     fn pr_branch(&self, _repo: &Path, _pr_url: &str) -> Result<Option<String>> {
         Ok(acquire(&self.pr_head, "pr_head")?.clone())
     }
