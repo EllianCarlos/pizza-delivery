@@ -30,11 +30,13 @@ export const emptyOptionFields: OptionFields = {
   model: "",
 };
 
-/** Claude models offered as suggestions; any other value can still be typed. */
+/** Models offered as suggestions; any other value can still be typed. */
 export const MODEL_SUGGESTIONS: { value: string; description: string }[] = [
-  { value: "haiku", description: "Cheapest; default for triage and memorize" },
-  { value: "sonnet", description: "Default for grill, spec, implement, fix and review" },
-  { value: "opus", description: "Rarely worth it; only for risky or hard jobs" },
+  { value: "haiku", description: "Claude: cheapest; default for triage and memorize" },
+  { value: "sonnet", description: "Claude: default for grill, spec, implement, fix and review" },
+  { value: "opus", description: "Claude: hard or risky jobs" },
+  { value: "gemini-flash", description: "Agy: fast Gemini model" },
+  { value: "deepseek/chat", description: "Opencode: provider/model format" },
 ];
 
 /**

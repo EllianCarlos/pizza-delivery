@@ -40,3 +40,19 @@ test("model suggestions are unique, non-empty and accepted by the option builder
     expect(buildOptions({ ...emptyOptionFields, open: true, model })).toEqual({ model });
   }
 });
+
+test("model suggestions cover multiple supported harnesses with harness prefixes", () => {
+  const values = MODEL_SUGGESTIONS.map((s) => s.value);
+  expect(values).toContain("haiku");
+  expect(values).toContain("sonnet");
+  expect(values).toContain("opus");
+  expect(values).toContain("gemini-flash");
+  expect(values).toContain("deepseek/chat");
+
+  const byValue = new Map(MODEL_SUGGESTIONS.map((s) => [s.value, s.description]));
+  expect(byValue.get("haiku")).toStartWith("Claude:");
+  expect(byValue.get("sonnet")).toStartWith("Claude:");
+  expect(byValue.get("opus")).toStartWith("Claude:");
+  expect(byValue.get("gemini-flash")).toStartWith("Agy:");
+  expect(byValue.get("deepseek/chat")).toStartWith("Opencode:");
+});
