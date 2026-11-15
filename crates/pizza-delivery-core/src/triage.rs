@@ -193,6 +193,22 @@ pub fn remote_slug(url: &str) -> Option<String> {
     Some(format!("{owner}/{}", name.trim_end_matches(".git")).to_lowercase())
 }
 
+impl Resolution {
+    /// A repository-less job; the empty path is replaced by a scratch
+    /// workspace when the daemon records the triage.
+    pub fn scratch() -> Self {
+        Self {
+            path: String::new(),
+            confidence: 100,
+            alternatives: vec![],
+        }
+    }
+
+    pub fn is_scratch(&self) -> bool {
+        self.path.is_empty() && self.confidence == 100
+    }
+}
+
 fn explicit(path: &str) -> Resolution {
     Resolution {
         path: path.to_owned(),
@@ -273,6 +289,8 @@ pub enum Template {
     BugFix,
     Investigate,
     Report,
+    /// A repository-less job: carry out an action, no pull request.
+    Action,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,6 +490,7 @@ pub fn template_name(template: Template) -> &'static str {
         Template::BugFix => "bug-fix",
         Template::Investigate => "investigate",
         Template::Report => "report",
+        Template::Action => "action",
     }
 }
 
@@ -499,6 +518,7 @@ pub fn plan_for(template: Template) -> Vec<PlannedStage> {
         ],
         Template::BugFix => vec![grill, implement, review, ship],
         Template::Report => vec![stage("investigate", "gather findings into a report")],
+        Template::Action => vec![stage("act", "carry out the requested action")],
         Template::Investigate => vec![
             stage("investigate", "gather findings before deciding anything"),
             stage("grill", "decide whether a pull request is needed"),
@@ -538,6 +558,7 @@ fn restate(prompt: &str, repo: &Resolution, template: Template, hint: Option<&st
             Template::BugFix => "diagnose and fix a defect, then ship the fix",
             Template::Investigate => "investigate first, then decide whether a change is needed",
             Template::Report => "investigate and end with a report, no pull request",
+            Template::Action => "carry out the action in a scratch workspace, no pull request",
         }
     )
 }
@@ -565,9 +586,13 @@ pub fn plan_with(template: Template, options: Option<&TriageOptions>) -> Vec<Pla
 
 /// Triage with the submitter's options applied as hard overrides.
 pub fn triage_with(prompt: &str, repo: Resolution, options: Option<&TriageOptions>) -> Triage {
-    let template = options
-        .and_then(|o| o.template)
-        .unwrap_or_else(|| classify(prompt));
+    let template = if repo.is_scratch() {
+        Template::Action
+    } else {
+        options
+            .and_then(|o| o.template)
+            .unwrap_or_else(|| classify(prompt))
+    };
     let mut flags = risk_flags(prompt);
     for extra in options.iter().flat_map(|o| o.risk_flags.iter()) {
         if !flags.contains(extra) {
@@ -671,12 +696,18 @@ pub fn conclude_with(
     options: Option<&TriageOptions>,
 ) -> Outcome {
     match resolution {
+        // No project matched: the prompt is an action with no repository
+        // (toggle a setting, call a service). The daemon supplies a scratch
+        // workspace for the empty path.
         None => Outcome {
-            triage: None,
+            triage: Some(triage_with(prompt, Resolution::scratch(), options)),
             feedback: vec![Feedback::new(
-                "needs-human",
-                "high",
-                "no repository matched the prompt; pass --repo or name the project".to_owned(),
+                "assumption",
+                "medium",
+                "no project matched the prompt; running it as a repository-less action \
+                 with write access to the home directory. If a project was meant, resubmit \
+                 with --repo"
+                    .to_owned(),
                 None,
             )],
         },
@@ -1029,13 +1060,19 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_repo_ends_as_needs_human_with_a_feedback_entry() {
+    fn a_missing_repo_becomes_a_repo_less_action_with_an_assumption() {
         let resolved = resolve_repo(None, "do something unrelated", &index(), &|_| None);
         assert_eq!(resolved, None);
         let outcome = conclude("do something unrelated", resolved);
-        assert_eq!(outcome.triage, None);
+        let triage = outcome.triage;
+        assert!(triage.as_ref().is_some_and(|t| t.repo.is_scratch()));
+        assert_eq!(triage.as_ref().map(|t| t.template), Some(Template::Action));
+        assert!(triage
+            .as_ref()
+            .is_some_and(|t| names(&t.plan) == vec!["act"]));
         assert_eq!(outcome.feedback.len(), 1);
-        assert_eq!(outcome.feedback[0].kind, "needs-human");
+        assert_eq!(outcome.feedback[0].kind, "assumption");
+        assert_eq!(outcome.feedback[0].severity, "medium");
     }
 
     #[test]

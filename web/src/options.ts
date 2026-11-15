@@ -1,5 +1,5 @@
 /** Wire shape of the optional "Additional Parameters" (core `TriageOptions`). */
-export type TemplateName = "full-feature" | "bug-fix" | "investigate" | "report";
+export type TemplateName = "full-feature" | "bug-fix" | "investigate" | "report" | "action";
 
 export interface TriageOptions {
   template?: TemplateName;

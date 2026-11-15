@@ -248,17 +248,22 @@ impl Worker<'_> {
         if egress_log.exists() {
             std::fs::remove_file(&egress_log)?;
         }
-        let sandbox = self.config.trust.profile_for(
-            &run.repo.to_string_lossy(),
-            &[
-                run.worktree.to_string_lossy().into_owned(),
-                self.config
-                    .data_dir
-                    .join(&run.relative)
-                    .to_string_lossy()
-                    .into_owned(),
-            ],
-        );
+        let mut writable = vec![
+            run.worktree.to_string_lossy().into_owned(),
+            self.config
+                .data_dir
+                .join(&run.relative)
+                .to_string_lossy()
+                .into_owned(),
+        ];
+        // A repository-less action may change anything in the user's home.
+        if claimed.name == "act" {
+            writable.extend(std::env::var("HOME").ok().filter(|h| !h.is_empty()));
+        }
+        let sandbox = self
+            .config
+            .trust
+            .profile_for(&run.repo.to_string_lossy(), &writable);
         let mcp_log = self
             .config
             .data_dir

@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use pizza_delivery_core::budget::{estimate_overrun, estimate_plan, samples, Defaults, Sample};
 use pizza_delivery_core::context::{assemble_context, Context, Section, CONTEXT_CAP_BYTES};
 use pizza_delivery_core::event::{Actor, EventPayload};
@@ -186,13 +186,12 @@ impl Triager<'_> {
         }
         match &report.outcome.triage {
             Some(triage) => {
-                self.record_budget(&job.id, triage)?;
-                self.append(
-                    &job.id,
-                    EventPayload::TriageCompleted {
-                        triage: triage.clone(),
-                    },
-                )
+                let mut triage = triage.clone();
+                if triage.repo.is_scratch() {
+                    triage.repo.path = self.scratch_repo(&job.id)?;
+                }
+                self.record_budget(&job.id, &triage)?;
+                self.append(&job.id, EventPayload::TriageCompleted { triage })
             }
             None => self.append(
                 &job.id,
@@ -201,6 +200,35 @@ impl Triager<'_> {
                 },
             ),
         }
+    }
+
+    /// A fresh empty git repository for a job that names no project, so the
+    /// usual worktree machinery runs unchanged.
+    fn scratch_repo(&self, job: &JobId) -> Result<String> {
+        let dir = self.data_dir.join("scratch").join(job.as_str());
+        std::fs::create_dir_all(&dir)?;
+        if !dir.join(".git").exists() {
+            for args in [
+                &["init", "-q"][..],
+                &[
+                    "-c",
+                    "user.name=pizza-delivery",
+                    "-c",
+                    "user.email=pizza-delivery@localhost",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "scratch workspace",
+                ],
+            ] {
+                let status = Command::new("git").current_dir(&dir).args(args).status()?;
+                if !status.success() {
+                    return Err(anyhow!("git {} failed in {}", args[0], dir.display()));
+                }
+            }
+        }
+        Ok(dir.to_string_lossy().into_owned())
     }
 
     fn history(&self) -> Result<Vec<Sample>> {
@@ -658,16 +686,31 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolvable_job_ends_as_needs_human_with_a_feedback_entry() -> Result<()> {
-        let rig = Rig::new("do something unrelated", None)?;
+    fn a_job_that_names_no_project_becomes_a_repo_less_action_in_a_scratch_repo() -> Result<()> {
+        let rig = Rig::new("turn the dark mode setting off", None)?;
 
         rig.triage(&FixedIndex(vec![project("blog")]), None)?;
 
+        let job = rig.job()?;
+        let repo = job
+            .repo
+            .ok_or_else(|| anyhow!("no scratch repo recorded"))?;
+        assert!(repo.ends_with("scratch/J1"), "{repo}");
+        assert!(std::path::Path::new(&repo).join(".git").exists());
+        assert!(rig.kinds()?.contains(&"triage-completed"));
+        assert_ne!(job.state, JobState::NeedsHuman);
+        let plan = rig
+            .events()?
+            .into_iter()
+            .find_map(|e| match e.payload {
+                EventPayload::TriageCompleted { triage } => Some(triage.plan),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow!("no triage"))?;
         assert_eq!(
-            rig.kinds()?,
-            vec!["job-submitted", "feedback-recorded", "job-needs-human"]
+            plan.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["act"]
         );
-        assert_eq!(rig.job()?.state, JobState::NeedsHuman);
         Ok(())
     }
 

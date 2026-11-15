@@ -88,6 +88,7 @@ function SubmitModal({ visible, onClose, onSubmitted }: { visible: boolean; onCl
     { value: "bug-fix", label: "bug-fix" },
     { value: "investigate", label: "investigate" },
     { value: "report", label: "report" },
+    { value: "action", label: "action (no repository)" },
   ];
   return (
     <Modal

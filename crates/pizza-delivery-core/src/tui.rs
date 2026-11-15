@@ -817,10 +817,11 @@ impl NewJobForm {
             "bug-fix" => Some(Template::BugFix),
             "investigate" => Some(Template::Investigate),
             "report" => Some(Template::Report),
+            "action" => Some(Template::Action),
             other => {
                 return Err(format!(
-                    "template {other:?} must be full-feature, bug-fix, investigate or report"
-                ))
+                "template {other:?} must be full-feature, bug-fix, investigate, report or action"
+            ))
             }
         };
         let max_stages = match self.max_stages.trim() {
